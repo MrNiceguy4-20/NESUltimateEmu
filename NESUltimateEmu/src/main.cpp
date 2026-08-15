@@ -52,7 +52,7 @@ int main(int, char**)
 
     apu->initAudio();
 
-    Frontend frontend(window, renderer, *cpu, *bus, *cart, *ppu);
+    Frontend frontend(window, renderer, *cpu, *bus, *cart, *ppu, *apu);
     frontend.run();
 
     cart->saveBattery();
