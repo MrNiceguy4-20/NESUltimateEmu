@@ -1,8 +1,11 @@
 #include "Frontend.hpp"
+#include <fstream>
+#include <vector>
 #include "../core/CPU.hpp"
 #include "../core/Bus.hpp"
 #include "../core/Cartridge.hpp"
 #include "../core/PPU.hpp"
+#include "../core/APU.hpp"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_sdlrenderer2.h"
 
@@ -15,13 +18,14 @@
 #endif
 
 Frontend::Frontend(SDL_Window* window, SDL_Renderer* renderer,
-    CPU& cpu, Bus& bus, Cartridge& cart, PPU& ppu)
+    CPU& cpu, Bus& bus, Cartridge& cart, PPU& ppu, APU& apu)
     : m_window(window)
     , m_renderer(renderer)
     , m_cpu(cpu)
     , m_bus(bus)
     , m_cart(cart)
     , m_ppu(ppu)
+    , m_apu(apu)
     , m_running(true)
     , m_statusMessage("No ROM loaded. Click \"Load ROM...\" to choose a .nes file.")
 {
@@ -201,6 +205,15 @@ void Frontend::processEvents()
             case SDLK_2: m_scale = 2; break;
             case SDLK_3: m_scale = 3; break;
             case SDLK_4: m_scale = 4; break;
+            case SDLK_F5: saveState(); break;
+            case SDLK_F9: loadState(); break;
+            case SDLK_c:
+                m_apu.setChipMod(!m_apu.chipMod());
+                m_statusMessage = m_apu.chipMod()
+                    ? "Chip Mod ON (kylxbn-style smooth triangle + linear mix)"
+                    : "Chip Mod OFF (accurate nonlinear mix)";
+                m_statusIsError = false;
+                break;
             }
         }
     }
@@ -254,6 +267,12 @@ void Frontend::drawUI()
         ImGui::Separator();
         ImGui::Text("Controls: Z/A=A  X/S=B  Enter=Start  RShift=Select");
         ImGui::Text("          Arrow keys = D-Pad  |  Gamepad supported");
+        ImGui::Text("          F5 = Save State  |  F9 = Load State");
+        ImGui::Text("          C  = Toggle Chip Mod (kylxbn-style audio)");
+        if (m_apu.chipMod())
+            ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.7f, 1.0f), "Chip Mod: ON");
+        else
+            ImGui::Text("Chip Mod: OFF");
     }
 
     ImGui::End();
@@ -295,6 +314,76 @@ bool Frontend::openRomDialog()
     return false;
 #endif
 }
+
+
+void Frontend::saveState()
+{
+    if (!m_cart.isLoaded()) {
+        m_statusMessage = "No ROM loaded – cannot save state.";
+        m_statusIsError = true;
+        return;
+    }
+
+    std::vector<uint8_t> buf;
+    buf.push_back('N'); buf.push_back('E'); buf.push_back('S'); buf.push_back('U'); // magic
+    buf.push_back(1); // version
+
+    m_cpu.saveState(buf);
+    m_ppu.saveState(buf);
+    m_bus.saveState(buf);
+    m_cart.saveState(buf);
+
+    // Path: ROM name + .state
+    std::string path = m_cart.path() + ".state";
+    std::ofstream f(path, std::ios::binary);
+    if (!f) {
+        m_statusMessage = "Failed to write save state.";
+        m_statusIsError = true;
+        return;
+    }
+    f.write(reinterpret_cast<const char*>(buf.data()), (std::streamsize)buf.size());
+    m_statusMessage = "State saved (F5).";
+    m_statusIsError = false;
+}
+
+void Frontend::loadState()
+{
+    if (!m_cart.isLoaded()) {
+        m_statusMessage = "No ROM loaded – cannot load state.";
+        m_statusIsError = true;
+        return;
+    }
+
+    std::string path = m_cart.path() + ".state";
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) {
+        m_statusMessage = "No save state found (F9).";
+        m_statusIsError = true;
+        return;
+    }
+    auto sz = f.tellg();
+    f.seekg(0);
+    std::vector<uint8_t> buf((size_t)sz);
+    f.read(reinterpret_cast<char*>(buf.data()), sz);
+    if (buf.size() < 5 || buf[0] != 'N' || buf[1] != 'E' || buf[2] != 'S' || buf[3] != 'U') {
+        m_statusMessage = "Invalid save state file.";
+        m_statusIsError = true;
+        return;
+    }
+    const uint8_t* p = buf.data() + 5;
+    const uint8_t* end = buf.data() + buf.size();
+
+    if (!m_cpu.loadState(p, end) || !m_ppu.loadState(p, end) ||
+        !m_bus.loadState(p, end) || !m_cart.loadState(p, end)) {
+        m_statusMessage = "Save state load failed (corrupt or wrong ROM).";
+        m_statusIsError = true;
+        return;
+    }
+    m_statusMessage = "State loaded (F9).";
+    m_statusIsError = false;
+}
+
+
 
 
 

@@ -7,11 +7,12 @@ class CPU;
 class Bus;
 class Cartridge;
 class PPU;
+class APU;
 
 class Frontend {
 public:
     Frontend(SDL_Window* window, SDL_Renderer* renderer,
-        CPU& cpu, Bus& bus, Cartridge& cart, PPU& ppu);
+        CPU& cpu, Bus& bus, Cartridge& cart, PPU& ppu, APU& apu);
     ~Frontend();
 
     void run();
@@ -23,6 +24,7 @@ private:
     Bus& m_bus;
     Cartridge& m_cart;
     PPU& m_ppu;
+    APU& m_apu;
     bool          m_running;
 
     SDL_Texture* m_nesTexture = nullptr;
@@ -41,7 +43,11 @@ private:
     bool openRomDialog();
     void updateTexture();
     void openGamepad();
+    void saveState();
+    void loadState();
 };
+
+
 
 
 
