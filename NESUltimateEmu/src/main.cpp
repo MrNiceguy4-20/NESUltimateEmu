@@ -50,6 +50,7 @@ int main(int, char**)
     ppu->connectCPU(cpu.get());
     cart->connectCPU(cpu.get());
 
+    apu->connectBus(bus.get());
     apu->initAudio();
 
     Frontend frontend(window, renderer, *cpu, *bus, *cart, *ppu, *apu);
@@ -67,7 +68,6 @@ int main(int, char**)
     SDL_Quit();
     return 0;
 }
-
 
 
 
