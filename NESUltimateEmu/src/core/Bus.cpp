@@ -1,4 +1,5 @@
 #include "Bus.hpp"
+#include <cstring>
 #include "CPU.hpp"
 #include "PPU.hpp"
 #include "APU.hpp"
@@ -102,6 +103,29 @@ void Bus::write(uint16_t addr, uint8_t data)
         return;
     }
 }
+
+void Bus::saveState(std::vector<uint8_t>& out) const
+{
+    out.insert(out.end(), m_ram, m_ram + 2048);
+    out.push_back(m_controller1);
+    out.push_back(m_controller2);
+    out.push_back(m_controller1Shift);
+    out.push_back(m_controller2Shift);
+    out.push_back(m_strobe ? 1 : 0);
+}
+
+bool Bus::loadState(const uint8_t*& p, const uint8_t* end)
+{
+    if (p + 2048 + 5 > end) return false;
+    memcpy(m_ram, p, 2048); p += 2048;
+    m_controller1 = *p++;
+    m_controller2 = *p++;
+    m_controller1Shift = *p++;
+    m_controller2Shift = *p++;
+    m_strobe = (*p++) != 0;
+    return true;
+}
+
 
 
 

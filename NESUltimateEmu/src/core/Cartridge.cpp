@@ -1,4 +1,5 @@
 #include "Cartridge.hpp"
+#include <cstring>
 #include "CPU.hpp"
 #include <fstream>
 #include <filesystem>
@@ -58,7 +59,7 @@ bool Cartridge::loadFromFile(const std::string& path)
     std::ifstream rom(path, std::ios::binary);
     if (!rom.is_open()) return false;
 
-    uint8_t header[16];
+    uint8_t header[16] = {};
     rom.read(reinterpret_cast<char*>(header), 16);
     if (!rom || header[0] != 'N' || header[1] != 'E' || header[2] != 'S' || header[3] != 0x1A)
         return false;
@@ -241,52 +242,52 @@ uint8_t Cartridge::cpuRead(uint16_t addr) const
     }
     if (addr < 0x8000 || m_prgRom.empty()) return 0;
 
-    const uint32_t prgSize = (uint32_t)m_prgRom.size();
-    const uint32_t bank16 = 0x4000;
-    const uint32_t bank32 = 0x8000;
-    uint32_t offset = 0;
+    const size_t prgSize = m_prgRom.size();
+    const size_t bank16 = 0x4000;
+    const size_t bank32 = 0x8000;
+    size_t offset = 0;
 
     switch (m_mapper) {
     case 0:
-        offset = addr - 0x8000;
+        offset = static_cast<size_t>(addr - 0x8000u);
         if (prgSize == bank16) offset %= bank16;
         else offset %= prgSize;
         break;
     case 1: {
         uint8_t mode = (m_mmc1Ctrl >> 2) & 0x03;
         if (mode <= 1) {
-            offset = (m_mmc1Prg & 0x0E) * bank16 + (addr - 0x8000);
+            offset = static_cast<size_t>(m_mmc1Prg & 0x0E) * bank16 + static_cast<size_t>(addr - 0x8000u);
         }
         else if (mode == 2) {
-            if (addr < 0xC000) offset = addr - 0x8000;
-            else offset = m_mmc1Prg * bank16 + (addr - 0xC000);
+            if (addr < 0xC000) offset = static_cast<size_t>(addr - 0x8000u);
+            else offset = static_cast<size_t>(m_mmc1Prg) * bank16 + static_cast<size_t>(addr - 0xC000u);
         }
         else {
-            if (addr < 0xC000) offset = m_mmc1Prg * bank16 + (addr - 0x8000);
-            else offset = prgSize - bank16 + (addr - 0xC000);
+            if (addr < 0xC000) offset = static_cast<size_t>(m_mmc1Prg) * bank16 + static_cast<size_t>(addr - 0x8000u);
+            else offset = prgSize - bank16 + static_cast<size_t>(addr - 0xC000u);
         }
         offset %= prgSize;
         break;
     }
     case 2:
-        if (addr < 0xC000) offset = m_unromBank * bank16 + (addr - 0x8000);
-        else offset = prgSize - bank16 + (addr - 0xC000);
+        if (addr < 0xC000) offset = static_cast<size_t>(m_unromBank) * bank16 + static_cast<size_t>(addr - 0x8000u);
+        else offset = prgSize - bank16 + static_cast<size_t>(addr - 0xC000u);
         offset %= prgSize;
         break;
     case 3:
-        offset = addr - 0x8000;
+        offset = static_cast<size_t>(addr - 0x8000u);
         if (prgSize == bank16) offset %= bank16;
         else offset %= prgSize;
         break;
     case 4:
-        offset = mmc3MapPrg(addr) % prgSize;
+        offset = static_cast<size_t>(mmc3MapPrg(addr)) % prgSize;
         break;
     case 7: // AxROM – 32 KB banks at $8000, mirroring from bit 4
-        offset = (m_axromBank & 0x07) * bank32 + (addr - 0x8000);
+        offset = static_cast<size_t>(m_axromBank & 0x07) * bank32 + static_cast<size_t>(addr - 0x8000u);
         offset %= prgSize;
         break;
     default:
-        offset = (addr - 0x8000) % prgSize;
+        offset = static_cast<size_t>(addr - 0x8000u) % prgSize;
         break;
     }
     return m_prgRom[offset];
@@ -351,6 +352,71 @@ void Cartridge::ppuWrite(uint16_t addr, uint8_t data)
     if (!m_chrRam.empty())
         m_chrRam[addr % m_chrRam.size()] = data;
 }
+
+void Cartridge::saveState(std::vector<uint8_t>& out) const
+{
+    auto put8 = [&](uint8_t v) { out.push_back(v); };
+    put8(m_mapper);
+    put8((uint8_t)m_mirror);
+    put8(m_shiftReg); put8(m_mmc1Ctrl); put8(m_mmc1Chr0); put8(m_mmc1Chr1); put8(m_mmc1Prg);
+    put8(m_unromBank); put8(m_cnromBank); put8(m_axromBank);
+    put8(m_mmc3BankSelect);
+    for (int i = 0; i < 8; i++) put8(m_mmc3Regs[i]);
+    put8(m_mmc3PrgMode); put8(m_mmc3ChrMode);
+    put8(m_mmc3IrqLatch); put8(m_mmc3IrqCounter);
+    put8(m_mmc3IrqEnabled ? 1 : 0); put8(m_mmc3IrqReload ? 1 : 0);
+    // PRG RAM
+    uint16_t ramSize = (uint16_t)m_prgRam.size();
+    put8(ramSize & 0xFF); put8((ramSize >> 8) & 0xFF);
+    out.insert(out.end(), m_prgRam.begin(), m_prgRam.end());
+    // CHR RAM if present
+    uint16_t chrSize = (uint16_t)m_chrRam.size();
+    put8(chrSize & 0xFF); put8((chrSize >> 8) & 0xFF);
+    out.insert(out.end(), m_chrRam.begin(), m_chrRam.end());
+}
+
+bool Cartridge::loadState(const uint8_t*& p, const uint8_t* end)
+{
+    auto get8 = [&](uint8_t& v) -> bool {
+        if (p >= end) return false; v = *p++; return true;
+        };
+    uint8_t tmp = 0;
+    if (!get8(tmp) || tmp != m_mapper) return false; // must same mapper/ROM
+    if (!get8(tmp)) return false; m_mirror = (Mirror)tmp;
+    if (!get8(m_shiftReg) || !get8(m_mmc1Ctrl) || !get8(m_mmc1Chr0) || !get8(m_mmc1Chr1) || !get8(m_mmc1Prg)) return false;
+    if (!get8(m_unromBank) || !get8(m_cnromBank) || !get8(m_axromBank)) return false;
+    if (!get8(m_mmc3BankSelect)) return false;
+    for (int i = 0; i < 8; i++) if (!get8(m_mmc3Regs[i])) return false;
+    if (!get8(m_mmc3PrgMode) || !get8(m_mmc3ChrMode)) return false;
+    if (!get8(m_mmc3IrqLatch) || !get8(m_mmc3IrqCounter)) return false;
+    if (!get8(tmp)) return false; m_mmc3IrqEnabled = tmp != 0;
+    if (!get8(tmp)) return false; m_mmc3IrqReload = tmp != 0;
+
+    if (p + 2 > end) return false;
+    uint16_t ramSize = p[0] | (uint16_t(p[1]) << 8); p += 2;
+    if (p + ramSize > end) return false;
+    if (ramSize != m_prgRam.size()) {
+        // size mismatch – skip or fail
+        if (ramSize > 0 && ramSize == 0x2000) {
+            m_prgRam.assign(p, p + ramSize);
+        }
+        p += ramSize;
+    }
+    else {
+        memcpy(m_prgRam.data(), p, ramSize);
+        p += ramSize;
+    }
+
+    if (p + 2 > end) return false;
+    uint16_t chrSize = p[0] | (uint16_t(p[1]) << 8); p += 2;
+    if (p + chrSize > end) return false;
+    if (chrSize == m_chrRam.size() && chrSize > 0)
+        memcpy(m_chrRam.data(), p, chrSize);
+    p += chrSize;
+    return true;
+}
+
+
 
 
 

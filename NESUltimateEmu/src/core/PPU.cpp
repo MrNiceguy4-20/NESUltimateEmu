@@ -1,4 +1,5 @@
 #include "PPU.hpp"
+#include <cstring>
 #include "Cartridge.hpp"
 #include "CPU.hpp"
 
@@ -16,6 +17,14 @@ static const uint32_t kNesPalette[64] = {
 PPU::PPU()
 {
     m_framebuffer.fill(0xFF000000);
+
+    m_masterClock = 0;
+    for (int i = 0; i < 32; i++) {
+        m_oamDecayCycles[i] = 0;
+    }
+    m_oamLfsr = 0x5A;
+
+    m_busLatch = 0;
 }
 
 void PPU::connectCartridge(Cartridge* cart) { m_cart = cart; }
@@ -152,13 +161,67 @@ void PPU::updateBackgroundShifters()
 }
 
 // ---------------------------------------------------------
+// OAM decay helpers (Mesen-style curve)
+// ---------------------------------------------------------
+void PPU::touchOamRow(uint8_t row)
+{
+    if (row < 32) {
+        m_oamDecayCycles[row] = static_cast<uint32_t>(m_masterClock);
+    }
+}
+
+uint8_t PPU::oamRandomByte()
+{
+    // Simple 8-bit LFSR for pseudo-random decay noise
+    uint8_t bit = ((m_oamLfsr >> 0) ^ (m_oamLfsr >> 2) ^ (m_oamLfsr >> 3) ^ (m_oamLfsr >> 4)) & 1;
+    m_oamLfsr = static_cast<uint8_t>((m_oamLfsr >> 1) | (bit << 7));
+    return m_oamLfsr;
+}
+
+void PPU::corruptOamRow(uint8_t row)
+{
+    if (row >= 32) return;
+
+    int base = row * 8;
+
+    // Primary OAM bytes (8 bytes per row)
+    for (int i = 0; i < 8; i++) {
+        uint8_t v = m_oam[base + i];
+        uint8_t noise = oamRandomByte();
+        // Mix existing bits with noise to simulate gradual decay
+        m_oam[base + i] = (v & noise) | (~noise & (v ^ noise));
+    }
+
+    // Secondary OAM byte (9th byte in the DRAM row)
+    uint8_t v2 = m_oamSecondary[row];
+    uint8_t noise2 = oamRandomByte();
+    m_oamSecondary[row] = (v2 & noise2) | (~noise2 & (v2 ^ noise2));
+}
+
+void PPU::updateOamDecay()
+{
+    // Approximate Mesen decay curve: rows decay at slightly different ages
+    for (uint8_t row = 0; row < 32; ++row) {
+        uint32_t threshold = 60000u + static_cast<uint32_t>(row) * 2000u;
+        uint32_t last = m_oamDecayCycles[row];
+        uint32_t age = static_cast<uint32_t>(m_masterClock - static_cast<uint64_t>(last));
+        if (age > threshold) {
+            corruptOamRow(row);
+            m_oamDecayCycles[row] = static_cast<uint32_t>(m_masterClock);
+        }
+    }
+}
+
+// ---------------------------------------------------------
 // Sprites
 // ---------------------------------------------------------
 void PPU::evaluateSprites()
 {
     // Clear secondary OAM
-    for (int i = 0; i < 32; i++)
+    for (int i = 0; i < 32; i++) {
         m_oamSecondary[i] = 0xFF;
+        touchOamRow(static_cast<uint8_t>(i));
+    }
     m_spriteCount = 0;
     m_spriteZeroPossible = false;
 
@@ -166,6 +229,10 @@ void PPU::evaluateSprites()
 
     for (int i = 0; i < 64 && m_spriteCount < 9; i++) {
         int diff = m_scanline - (int)m_oam[i * 4 + 0];
+        // Touch the row for this sprite's primary OAM bytes
+        uint8_t row = static_cast<uint8_t>((i * 4) >> 3);
+        touchOamRow(row);
+
         if (diff >= 0 && diff < spriteH) {
             if (m_spriteCount < 8) {
                 if (i == 0)
@@ -174,6 +241,7 @@ void PPU::evaluateSprites()
                 m_oamSecondary[m_spriteCount * 4 + 1] = m_oam[i * 4 + 1];
                 m_oamSecondary[m_spriteCount * 4 + 2] = m_oam[i * 4 + 2];
                 m_oamSecondary[m_spriteCount * 4 + 3] = m_oam[i * 4 + 3];
+                touchOamRow(m_spriteCount);
             }
             m_spriteCount++;
         }
@@ -192,6 +260,8 @@ void PPU::loadSpriteShifters()
         uint8_t tileId = m_oamSecondary[i * 4 + 1];
         uint8_t attr = m_oamSecondary[i * 4 + 2];
         uint8_t tileX = m_oamSecondary[i * 4 + 3];
+
+        touchOamRow(i);
 
         m_spriteAttr[i] = attr;
         m_spriteX[i] = tileX;
@@ -277,6 +347,9 @@ void PPU::getSpritePixel(uint8_t& pixel, uint8_t& palette, uint8_t& priority)
 // ---------------------------------------------------------
 void PPU::clock()
 {
+    // Master clock for OAM decay timing
+    m_masterClock++;
+
     if (m_scanline >= -1 && m_scanline < 240) {
 
         if (m_scanline == 0 && m_cycle == 0)
@@ -405,10 +478,13 @@ void PPU::clock()
             m_cpu->nmi();
     }
 
-    m_cycle++;
+    // Apply OAM decay once per PPU cycle
+    updateOamDecay();
+
+    m_cycle = m_cycle + 1;
     if (m_cycle > 340) {
         m_cycle = 0;
-        m_scanline++;
+        m_scanline = m_scanline + 1;
         // MMC3 IRQ clock: once per scanline while rendering (0-239 and pre-render)
         if (m_scanline >= 0 && m_scanline < 240 && renderingEnabled() && m_cart)
             m_cart->scanlineTick();
@@ -421,24 +497,36 @@ void PPU::clock()
 
 uint8_t PPU::cpuRead(uint16_t addr)
 {
-    uint8_t data = 0;
+    uint8_t data = m_busLatch;
+
     switch (addr & 0x7) {
     case 2:
         data = (m_status & 0xE0) | (m_dataBuffer & 0x1F);
         clearVBlank();
         m_w = false;
+        m_busLatch = data;
         break;
-    case 4:
+    case 4: {
+        // OAM read
+        uint8_t row = static_cast<uint8_t>(m_oamAddr >> 3);
+        touchOamRow(row);
         data = m_oam[m_oamAddr];
+        m_busLatch = data;
         break;
+    }
     case 7:
         data = m_dataBuffer;
         m_dataBuffer = ppuRead(m_v);
         if (m_v >= 0x3F00)
             data = m_dataBuffer;
         m_v += (m_ctrl & 0x04) ? 32 : 1;
+        m_busLatch = data;
+        break;
+    default:
+        // Unused/unknown registers return open bus
         break;
     }
+
     return data;
 }
 
@@ -455,9 +543,13 @@ void PPU::cpuWrite(uint16_t addr, uint8_t data)
     case 3:
         m_oamAddr = data;
         break;
-    case 4:
+    case 4: {
+        // OAM write
+        uint8_t row = static_cast<uint8_t>(m_oamAddr >> 3);
+        touchOamRow(row);
         m_oam[m_oamAddr++] = data;
         break;
+    }
     case 5:
         if (!m_w) {
             m_x = data & 0x07;
@@ -486,9 +578,98 @@ void PPU::cpuWrite(uint16_t addr, uint8_t data)
         m_v += (m_ctrl & 0x04) ? 32 : 1;
         break;
     }
+
+    // Mesen-Lite masked-write open bus: only D0-D4 updated, D5-D7 preserved
+    m_busLatch = (m_busLatch & 0xE0) | (data & 0x1F);
 }
 
 void PPU::setVBlank() { m_status |= 0x80; }
 void PPU::clearVBlank() { m_status &= ~0x80; }
+
+void PPU::saveState(std::vector<uint8_t>& out) const
+{
+    auto put8 = [&](uint8_t v) { out.push_back(v); };
+    auto put16 = [&](uint16_t v) { out.push_back(v & 0xFF); out.push_back((v >> 8) & 0xFF); };
+    auto put32 = [&](uint32_t v) {
+        for (int i = 0; i < 4; i++) out.push_back((v >> (i * 8)) & 0xFF);
+        };
+    auto putBytes = [&](const uint8_t* d, size_t n) {
+        out.insert(out.end(), d, d + n);
+        };
+
+    put32((uint32_t)(int32_t)m_scanline);
+    put32((uint32_t)m_cycle);
+    put8(m_frameComplete ? 1 : 0);
+    put8(m_ctrl); put8(m_mask); put8(m_status); put8(m_oamAddr);
+    put16(m_v); put16(m_t); put8(m_x); put8(m_w ? 1 : 0);
+    put8(m_dataBuffer);
+    putBytes(m_oam, 256);
+    putBytes(m_nametable, 2048);
+    putBytes(m_palette, 32);
+    put8(m_busLatch);
+
+    // OAM decay state
+    put32((uint32_t)(m_masterClock & 0xFFFFFFFFu));
+    put32((uint32_t)((m_masterClock >> 32) & 0xFFFFFFFFu));
+    for (int i = 0; i < 32; i++) {
+        put32(m_oamDecayCycles[i]);
+    }
+    put8(m_oamLfsr);
+}
+
+bool PPU::loadState(const uint8_t*& p, const uint8_t* end)
+{
+    auto need = [&](size_t n) { return p + n <= end; };
+    auto get8 = [&](uint8_t& v) -> bool {
+        if (!need(1)) return false; v = *p++; return true;
+        };
+    auto get16 = [&](uint16_t& v) -> bool {
+        if (!need(2)) return false;
+        v = p[0] | (uint16_t(p[1]) << 8); p += 2; return true;
+        };
+    auto get32 = [&](uint32_t& v) -> bool {
+        if (!need(4)) return false;
+        v = p[0] | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+        p += 4; return true;
+        };
+    auto getBytes = [&](uint8_t* d, size_t n) -> bool {
+        if (!need(n)) return false;
+        memcpy(d, p, n); p += n; return true;
+        };
+
+    uint32_t sl = 0, cy = 0;
+    uint8_t fc = 0, w = 0;
+    if (!get32(sl) || !get32(cy) || !get8(fc)) return false;
+    m_scanline = (int)(int32_t)sl;
+    m_cycle = (int)cy;
+    m_frameComplete = fc != 0;
+    if (!get8(m_ctrl) || !get8(m_mask) || !get8(m_status) || !get8(m_oamAddr)) return false;
+    if (!get16(m_v) || !get16(m_t) || !get8(m_x) || !get8(w)) return false;
+    m_w = w != 0;
+    if (!get8(m_dataBuffer)) return false;
+    if (!getBytes(m_oam, 256)) return false;
+    if (!getBytes(m_nametable, 2048)) return false;
+    if (!getBytes(m_palette, 32)) return false;
+    if (!get8(m_busLatch)) return false;
+
+    // OAM decay state
+    uint32_t mcLo = 0, mcHi = 0;
+    if (!get32(mcLo) || !get32(mcHi)) return false;
+    m_masterClock = (uint64_t)mcLo | ((uint64_t)mcHi << 32);
+    for (int i = 0; i < 32; i++) {
+        uint32_t t = 0;
+        if (!get32(t)) return false;
+        m_oamDecayCycles[i] = t;
+    }
+    if (!get8(m_oamLfsr)) return false;
+
+    return true;
+}
+
+
+
+
+
+
 
 

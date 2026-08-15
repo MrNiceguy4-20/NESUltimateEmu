@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <vector>
 #include <array>
 
 class Bus;
@@ -12,6 +13,10 @@ public:
     void clock();
     void nmi();   // Non-maskable interrupt (from PPU VBlank)
     void irq();   // Maskable interrupt (MMC3, APU, etc.)
+
+    // Save states
+    void saveState(std::vector<uint8_t>& out) const;
+    bool loadState(const uint8_t*& p, const uint8_t* end);
 
 private:
     Bus& m_bus;
@@ -374,5 +379,7 @@ private:
 
     void buildTable();
 };
+
+
 
 

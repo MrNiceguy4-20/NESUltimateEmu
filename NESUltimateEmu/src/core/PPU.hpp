@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <array>
+#include <vector>
 
 class Cartridge;
 class CPU;
@@ -25,6 +26,9 @@ public:
 
     int scanline() const { return m_scanline; }
     int cycle() const { return m_cycle; }
+
+    void saveState(std::vector<uint8_t>& out) const;
+    bool loadState(const uint8_t*& p, const uint8_t* end);
 
 private:
     Cartridge* m_cart = nullptr;
@@ -72,6 +76,14 @@ private:
     uint16_t m_bgShifterAttrLo = 0;
     uint16_t m_bgShifterAttrHi = 0;
 
+    // OAM decay (Mesen-style curve)
+    uint64_t m_masterClock = 0;
+    uint32_t m_oamDecayCycles[32] = {};
+    uint8_t  m_oamLfsr = 0x5A;
+
+    // Mesen-Lite open bus latch
+    uint8_t  m_busLatch = 0;
+
     uint8_t  ppuRead(uint16_t addr) const;
     void     ppuWrite(uint16_t addr, uint8_t data);
     uint16_t mirrorNametable(uint16_t addr) const;
@@ -91,8 +103,18 @@ private:
     void loadSpriteShifters();
     void getSpritePixel(uint8_t& pixel, uint8_t& palette, uint8_t& priority);
 
+    // OAM decay helpers
+    void touchOamRow(uint8_t row);
+    void updateOamDecay();
+    void corruptOamRow(uint8_t row);
+    uint8_t oamRandomByte();
+
     uint32_t nesColor(uint8_t index) const;
 };
+
+
+
+
 
 
 

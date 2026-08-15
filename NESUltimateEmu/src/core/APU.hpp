@@ -1,6 +1,5 @@
 #pragma once
 #include <cstdint>
-#include <atomic>
 #include <vector>
 #include <mutex>
 
@@ -10,19 +9,22 @@ public:
     ~APU();
 
     void cpuWrite(uint16_t addr, uint8_t data);
-    uint8_t cpuRead(uint16_t addr);
+    uint8_t cpuRead(uint16_t addr) const;
 
-    // Called once per CPU cycle
     void clock();
-
-    // SDL audio callback fills stream with samples
     void fillBuffer(float* stream, int len);
+
+    void saveState(std::vector<uint8_t>& out) const;
+    bool loadState(const uint8_t*& p, const uint8_t* end);
 
     bool initAudio();
     void shutdownAudio();
 
+    // kylxbn-style "chip mod" listening mode
+    void setChipMod(bool enabled) { m_chipMod = enabled; }
+    bool chipMod() const { return m_chipMod; }
+
 private:
-    // Pulse channel
     struct Pulse {
         bool enabled = false;
         uint8_t duty = 0;
@@ -42,7 +44,6 @@ private:
         bool sweepEnabled = false;
         bool sweepReload = false;
         uint8_t sweepDivider = 0;
-        uint16_t sweepTarget = 0;
 
         void clockTimer();
         void clockEnvelope();
@@ -61,11 +62,13 @@ private:
         uint8_t linearReload = 0;
         bool linearReloadFlag = false;
         uint8_t sequencer = 0;
+        // Smooth-wave phase (0..1), advanced in chip-mod mode
+        float phase = 0.0f;
 
-        void clockTimer();
+        void clockTimer(bool chipMod);
         void clockLinear();
         void clockLength();
-        float sample() const;
+        float sample(bool chipMod) const;
     };
 
     struct Noise {
@@ -81,23 +84,23 @@ private:
         uint8_t length = 0;
         uint16_t shift = 1;
         bool mode = false;
+        float smooth = 0.0f; // simple float average for chip-mod
 
-        void clockTimer();
+        void clockTimer(bool chipMod);
         void clockEnvelope();
         void clockLength();
-        float sample() const;
+        float sample(bool chipMod) const;
     };
 
     Pulse m_pulse1, m_pulse2;
     Triangle m_triangle;
     Noise m_noise;
 
-    uint8_t m_frameCounter = 0;
-    bool m_frameMode5 = false;  // $4017 bit 7
+    bool m_frameMode5 = false;
     bool m_irqInhibit = false;
     uint32_t m_frameCycles = 0;
+    bool m_chipMod = false;
 
-    // Audio output
     static constexpr int kSampleRate = 44100;
     static constexpr int kCpuClock = 1789773;
     double m_sampleTimer = 0;
@@ -113,6 +116,8 @@ private:
     void quarterFrame();
     void halfFrame();
     void pushSample(float s);
+    float mixSample() const;
+    float triangleLoudnessGain(uint16_t period) const;
 
     static const uint8_t lengthTable[32];
     static const uint8_t dutyTable[4][8];

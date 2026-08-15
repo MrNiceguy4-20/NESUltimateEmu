@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <vector>
 
 class CPU;
 class PPU;
@@ -24,6 +25,9 @@ public:
     void setController1(uint8_t state) { m_controller1 = state; }
     void setController2(uint8_t state) { m_controller2 = state; }
 
+    void saveState(std::vector<uint8_t>& out) const;
+    bool loadState(const uint8_t*& p, const uint8_t* end);
+
 private:
     CPU* m_cpu = nullptr;
     PPU* m_ppu = nullptr;
@@ -38,6 +42,7 @@ private:
     mutable uint8_t m_controller2Shift = 0;
     bool    m_strobe = false;
 };
+
 
 
 

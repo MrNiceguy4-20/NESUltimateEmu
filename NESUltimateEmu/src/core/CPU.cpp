@@ -2394,6 +2394,40 @@ void CPU::buildTable()
     m_table[0xBB] = { &CPU::opLAS_absy, 4 };
 }
 
+void CPU::saveState(std::vector<uint8_t>& out) const
+{
+    auto put8 = [&](uint8_t v) { out.push_back(v); };
+    auto put16 = [&](uint16_t v) { out.push_back(v & 0xFF); out.push_back((v >> 8) & 0xFF); };
+    auto put32 = [&](uint32_t v) {
+        for (int i = 0; i < 4; i++) out.push_back((v >> (i * 8)) & 0xFF);
+        };
+    put8(m_a); put8(m_x); put8(m_y); put8(m_sp);
+    put16(m_pc); put8(m_status);
+    put32((uint32_t)m_cycles);
+}
+
+bool CPU::loadState(const uint8_t*& p, const uint8_t* end)
+{
+    auto get8 = [&](uint8_t& v) -> bool {
+        if (p >= end) return false; v = *p++; return true;
+        };
+    auto get16 = [&](uint16_t& v) -> bool {
+        if (p + 2 > end) return false;
+        v = p[0] | (uint16_t(p[1]) << 8); p += 2; return true;
+        };
+    auto get32 = [&](uint32_t& v) -> bool {
+        if (p + 4 > end) return false;
+        v = p[0] | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+        p += 4; return true;
+        };
+    uint32_t cycles = 0;
+    if (!get8(m_a) || !get8(m_x) || !get8(m_y) || !get8(m_sp)) return false;
+    if (!get16(m_pc) || !get8(m_status) || !get32(cycles)) return false;
+    m_cycles = (int)cycles;
+    return true;
+}
+
+
 
 
 
