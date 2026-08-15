@@ -1,6 +1,7 @@
 #include "Frontend.hpp"
 #include <fstream>
 #include <vector>
+#include <cstring>
 #include "../core/CPU.hpp"
 #include "../core/Bus.hpp"
 #include "../core/Cartridge.hpp"
@@ -62,8 +63,6 @@ Frontend::~Frontend()
 
 void Frontend::runFrame()
 {
-    // Run CPU/PPU until a full frame is produced
-    // Safety limit prevents infinite loop if something goes wrong
     const int kMaxCycles = 100000;
     int guard = 0;
     m_ppu.clearFrameComplete();
@@ -103,23 +102,24 @@ void Frontend::run()
             updateTexture();
         }
 
-        // ---- ImGui ----
         ImGui_ImplSDLRenderer2_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
         drawUI();
         ImGui::Render();
 
-        // ---- Draw ----
         SDL_SetRenderDrawColor(m_renderer, 20, 20, 30, 255);
         SDL_RenderClear(m_renderer);
 
-        // NES screen (centered, scaled)
         if (m_cart.isLoaded() && m_nesTexture) {
             int winW = 0, winH = 0;
             SDL_GetWindowSize(m_window, &winW, &winH);
             int tw = 256 * m_scale;
             int th = 240 * m_scale;
+            if (m_ntscAspect) {
+                // NTSC pixel aspect ~8:7
+                tw = (256 * m_scale * 8) / 7;
+            }
             SDL_Rect dst{ (winW - tw) / 2, (winH - th) / 2, tw, th };
             SDL_RenderCopy(m_renderer, m_nesTexture, nullptr, &dst);
         }
@@ -127,7 +127,6 @@ void Frontend::run()
         ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), m_renderer);
         SDL_RenderPresent(m_renderer);
 
-        // Simple frame limiter
         Uint64 now = SDL_GetPerformanceCounter();
         double elapsedMs = (double)(now - last) / (double)freq * 1000.0;
         if (elapsedMs < targetFrameMs) {
@@ -139,19 +138,17 @@ void Frontend::run()
 
 void Frontend::updateControllers()
 {
-    // Keyboard
     const Uint8* keys = SDL_GetKeyboardState(nullptr);
     uint8_t state = 0;
-    if (keys[SDL_SCANCODE_Z] || keys[SDL_SCANCODE_A])     state |= 0x80; // A
-    if (keys[SDL_SCANCODE_X] || keys[SDL_SCANCODE_S])     state |= 0x40; // B
+    if (keys[SDL_SCANCODE_Z] || keys[SDL_SCANCODE_A]) state |= 0x80; // A
+    if (keys[SDL_SCANCODE_X] || keys[SDL_SCANCODE_S]) state |= 0x40; // B
     if (keys[SDL_SCANCODE_RSHIFT] || keys[SDL_SCANCODE_BACKSPACE]) state |= 0x20; // Select
-    if (keys[SDL_SCANCODE_RETURN])                         state |= 0x10; // Start
-    if (keys[SDL_SCANCODE_UP])                             state |= 0x08;
-    if (keys[SDL_SCANCODE_DOWN])                           state |= 0x04;
-    if (keys[SDL_SCANCODE_LEFT])                           state |= 0x02;
-    if (keys[SDL_SCANCODE_RIGHT])                          state |= 0x01;
+    if (keys[SDL_SCANCODE_RETURN]) state |= 0x10; // Start
+    if (keys[SDL_SCANCODE_UP]) state |= 0x08;
+    if (keys[SDL_SCANCODE_DOWN]) state |= 0x04;
+    if (keys[SDL_SCANCODE_LEFT]) state |= 0x02;
+    if (keys[SDL_SCANCODE_RIGHT]) state |= 0x01;
 
-    // Gamepad (OR with keyboard)
     if (m_gamepad) {
         if (SDL_GameControllerGetButton(m_gamepad, SDL_CONTROLLER_BUTTON_A)) state |= 0x80;
         if (SDL_GameControllerGetButton(m_gamepad, SDL_CONTROLLER_BUTTON_B)) state |= 0x40;
@@ -162,7 +159,6 @@ void Frontend::updateControllers()
         if (SDL_GameControllerGetButton(m_gamepad, SDL_CONTROLLER_BUTTON_DPAD_LEFT)) state |= 0x02;
         if (SDL_GameControllerGetButton(m_gamepad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) state |= 0x01;
 
-        // Left stick as D-pad
         Sint16 lx = SDL_GameControllerGetAxis(m_gamepad, SDL_CONTROLLER_AXIS_LEFTX);
         Sint16 ly = SDL_GameControllerGetAxis(m_gamepad, SDL_CONTROLLER_AXIS_LEFTY);
         const Sint16 dead = 16000;
@@ -174,7 +170,6 @@ void Frontend::updateControllers()
 
     m_bus.setController1(state);
 }
-
 
 void Frontend::processEvents()
 {
@@ -193,7 +188,7 @@ void Frontend::processEvents()
         if (e.type == SDL_KEYDOWN) {
             switch (e.key.keysym.sym) {
             case SDLK_ESCAPE: m_running = false; break;
-            case SDLK_p:      m_paused = !m_paused; break;
+            case SDLK_p: m_paused = !m_paused; break;
             case SDLK_r:
                 if (m_cart.isLoaded()) {
                     m_cpu.reset();
@@ -207,6 +202,21 @@ void Frontend::processEvents()
             case SDLK_4: m_scale = 4; break;
             case SDLK_F5: saveState(); break;
             case SDLK_F9: loadState(); break;
+            case SDLK_F6:
+                m_saveSlot = (m_saveSlot + 1) % 10;
+                m_statusMessage = "Save slot: " + std::to_string(m_saveSlot);
+                m_statusIsError = false;
+                break;
+            case SDLK_F7:
+                m_saveSlot = (m_saveSlot + 9) % 10;
+                m_statusMessage = "Save slot: " + std::to_string(m_saveSlot);
+                m_statusIsError = false;
+                break;
+            case SDLK_a:
+                m_ntscAspect = !m_ntscAspect;
+                m_statusMessage = m_ntscAspect ? "NTSC aspect ON (8:7)" : "Square pixels";
+                m_statusIsError = false;
+                break;
             case SDLK_c:
                 m_apu.setChipMod(!m_apu.chipMod());
                 m_statusMessage = m_apu.chipMod()
@@ -214,9 +224,17 @@ void Frontend::processEvents()
                     : "Chip Mod OFF (accurate nonlinear mix)";
                 m_statusIsError = false;
                 break;
+            case SDLK_F11:
+                toggleFullscreen();
+                break;
             }
         }
     }
+}
+
+static bool mapperSupported(uint8_t m)
+{
+    return m <= 4 || m == 7 || m == 11 || m == 66;
 }
 
 void Frontend::drawUI()
@@ -248,27 +266,33 @@ void Frontend::drawUI()
         ImGui::Separator();
         ImGui::Text("File   : %s", m_cart.fileName().c_str());
         ImGui::Text("Mapper : %u%s", m_cart.mapper(),
-            (m_cart.mapper() <= 4 || m_cart.mapper() == 7) ? " (supported)" : " (unsupported – may not run)");
+            mapperSupported(m_cart.mapper()) ? " (supported)" : " (unsupported – may not run)");
         ImGui::Text("PRG    : %u x 16KB", m_cart.prgBanks());
         ImGui::Text("CHR    : %u x  8KB%s", m_cart.chrBanks(),
             m_cart.hasChrRam() ? " (CHR RAM)" : "");
+
         const char* mirrorStr = "Horizontal";
         switch (m_cart.mirroring()) {
-        case Cartridge::Mirror::Vertical:     mirrorStr = "Vertical"; break;
-        case Cartridge::Mirror::OnescreenLo:  mirrorStr = "One-screen LO"; break;
-        case Cartridge::Mirror::OnescreenHi:  mirrorStr = "One-screen HI"; break;
+        case Cartridge::Mirror::Vertical:    mirrorStr = "Vertical"; break;
+        case Cartridge::Mirror::OnescreenLo: mirrorStr = "One-screen LO"; break;
+        case Cartridge::Mirror::OnescreenHi: mirrorStr = "One-screen HI"; break;
         default: break;
         }
         ImGui::Text("Mirror : %s", mirrorStr);
         if (m_cart.hasBattery())
             ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.3f, 1.0f), "Battery RAM: yes (auto-saves .sav)");
+
         ImGui::Text("Scale  : %dx  (keys 1-4)", m_scale);
         ImGui::Text("Paused : %s  (P to toggle)", m_paused ? "yes" : "no");
+        ImGui::Text("Slot   : %d  (F6/F7)", m_saveSlot);
+        ImGui::Text("Aspect : %s  (A to toggle)", m_ntscAspect ? "NTSC 8:7" : "Square");
+
         ImGui::Separator();
         ImGui::Text("Controls: Z/A=A  X/S=B  Enter=Start  RShift=Select");
         ImGui::Text("          Arrow keys = D-Pad  |  Gamepad supported");
-        ImGui::Text("          F5 = Save State  |  F9 = Load State");
-        ImGui::Text("          C  = Toggle Chip Mod (kylxbn-style audio)");
+        ImGui::Text("          F5=Save  F9=Load  F6/F7=Slot  F11=Fullscreen");
+        ImGui::Text("          C=Chip Mod  A=Aspect");
+
         if (m_apu.chipMod())
             ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.7f, 1.0f), "Chip Mod: ON");
         else
@@ -282,7 +306,6 @@ bool Frontend::openRomDialog()
 {
 #ifdef _WIN32
     char filename[MAX_PATH] = {};
-
     OPENFILENAMEA ofn = {};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = nullptr;
@@ -315,6 +338,10 @@ bool Frontend::openRomDialog()
 #endif
 }
 
+std::string Frontend::statePath(int slot) const
+{
+    return m_cart.path() + ".state" + std::to_string(slot);
+}
 
 void Frontend::saveState()
 {
@@ -325,16 +352,15 @@ void Frontend::saveState()
     }
 
     std::vector<uint8_t> buf;
-    buf.push_back('N'); buf.push_back('E'); buf.push_back('S'); buf.push_back('U'); // magic
-    buf.push_back(1); // version
+    buf.push_back('N'); buf.push_back('E'); buf.push_back('S'); buf.push_back('U');
+    buf.push_back(1);
 
     m_cpu.saveState(buf);
     m_ppu.saveState(buf);
     m_bus.saveState(buf);
     m_cart.saveState(buf);
 
-    // Path: ROM name + .state
-    std::string path = m_cart.path() + ".state";
+    std::string path = statePath(m_saveSlot);
     std::ofstream f(path, std::ios::binary);
     if (!f) {
         m_statusMessage = "Failed to write save state.";
@@ -342,7 +368,7 @@ void Frontend::saveState()
         return;
     }
     f.write(reinterpret_cast<const char*>(buf.data()), (std::streamsize)buf.size());
-    m_statusMessage = "State saved (F5).";
+    m_statusMessage = "State saved → slot " + std::to_string(m_saveSlot);
     m_statusIsError = false;
 }
 
@@ -354,10 +380,10 @@ void Frontend::loadState()
         return;
     }
 
-    std::string path = m_cart.path() + ".state";
+    std::string path = statePath(m_saveSlot);
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) {
-        m_statusMessage = "No save state found (F9).";
+        m_statusMessage = "No save state in slot " + std::to_string(m_saveSlot);
         m_statusIsError = true;
         return;
     }
@@ -365,23 +391,33 @@ void Frontend::loadState()
     f.seekg(0);
     std::vector<uint8_t> buf((size_t)sz);
     f.read(reinterpret_cast<char*>(buf.data()), sz);
+
     if (buf.size() < 5 || buf[0] != 'N' || buf[1] != 'E' || buf[2] != 'S' || buf[3] != 'U') {
         m_statusMessage = "Invalid save state file.";
         m_statusIsError = true;
         return;
     }
+
     const uint8_t* p = buf.data() + 5;
     const uint8_t* end = buf.data() + buf.size();
-
     if (!m_cpu.loadState(p, end) || !m_ppu.loadState(p, end) ||
         !m_bus.loadState(p, end) || !m_cart.loadState(p, end)) {
         m_statusMessage = "Save state load failed (corrupt or wrong ROM).";
         m_statusIsError = true;
         return;
     }
-    m_statusMessage = "State loaded (F9).";
+    m_statusMessage = "State loaded ← slot " + std::to_string(m_saveSlot);
     m_statusIsError = false;
 }
+
+void Frontend::toggleFullscreen()
+{
+    m_fullscreen = !m_fullscreen;
+    SDL_SetWindowFullscreen(m_window, m_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+    m_statusMessage = m_fullscreen ? "Fullscreen ON" : "Fullscreen OFF";
+    m_statusIsError = false;
+}
+
 
 
 

@@ -30,11 +30,14 @@ private:
     SDL_Texture* m_nesTexture = nullptr;
     SDL_GameController* m_gamepad = nullptr;
 
-    std::string   m_statusMessage;
-    bool          m_statusIsError = false;
+    std::string m_statusMessage;
+    bool        m_statusIsError = false;
 
-    bool          m_paused = false;
-    int           m_scale = 3;
+    bool m_paused = false;
+    int  m_scale = 3;
+    bool m_fullscreen = false;
+    bool m_ntscAspect = true;
+    int  m_saveSlot = 0; // 0..9
 
     void processEvents();
     void updateControllers();
@@ -43,9 +46,12 @@ private:
     bool openRomDialog();
     void updateTexture();
     void openGamepad();
+    void toggleFullscreen();
     void saveState();
     void loadState();
+    std::string statePath(int slot) const;
 };
+
 
 
 
