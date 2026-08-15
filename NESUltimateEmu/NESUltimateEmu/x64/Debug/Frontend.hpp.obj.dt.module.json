@@ -1,0 +1,14 @@
+{
+    "version": 1,
+    "revision": 0,
+    "rules": [
+        {
+            "primary-output": "NESUltimateEmu\\x64\\Debug\\Frontend.obj",
+            "outputs": [
+                "NESUltimateEmu\\x64\\Debug\\Frontend.hpp.obj.dt.module.json",
+                "NESUltimateEmu\\x64\\Debug\\Frontend.hpp.obj.dt.d.json"
+            ],
+            "requires": []
+        }
+    ]
+}

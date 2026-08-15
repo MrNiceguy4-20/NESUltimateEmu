@@ -1,0 +1,12 @@
+{
+    "Version": "1.2",
+    "Data": {
+        "Source": "c:\\kevin\\nesultimateemu\\src\\core\\apu.cpp",
+        "ProvidedModule": "",
+        "Includes": [
+            "c:\\kevin\\nesultimateemu\\src\\core\\apu.hpp"
+        ],
+        "ImportedModules": [],
+        "ImportedHeaderUnits": []
+    }
+}
