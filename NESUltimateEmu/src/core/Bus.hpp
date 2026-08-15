@@ -18,6 +18,9 @@ public:
 
     void clock();
 
+    // OAM DMA: writing $4014 starts a 256-byte CPU-stalling transfer.
+    bool dmaActive() const { return m_dmaActive; }
+
     uint8_t read(uint16_t addr) const;
     void    write(uint16_t addr, uint8_t data);
 
@@ -41,9 +44,22 @@ private:
     mutable uint8_t m_controller1Shift = 0;
     mutable uint8_t m_controller2Shift = 0;
     bool    m_strobe = false;
+
+    // CPU-cycle counter used for OAM DMA alignment. It advances once per
+    // master CPU clock, including cycles stolen by DMA.
+    uint64_t m_cpuCycleCounter = 0;
+
+    bool    m_dmaActive = false;
+    bool    m_dmaDummy = false;
+    bool    m_dmaReadPhase = true;
+    uint16_t m_dmaPage = 0;
+    uint8_t  m_dmaAddress = 0;
+    uint8_t  m_dmaData = 0;
+    uint8_t  m_dmaDummyCycles = 0;
+
+    void startOamDma(uint8_t page);
+    void clockOamDma();
 };
-
-
 
 
 

@@ -87,6 +87,14 @@ private:
     // Mapper 7 AxROM
     uint8_t m_axromBank = 0;
 
+    // Mapper 11 Color Dreams
+    uint8_t m_colorPrg = 0;
+    uint8_t m_colorChr = 0;
+
+    // Mapper 66 GxROM
+    uint8_t m_gxromPrg = 0;
+    uint8_t m_gxromChr = 0;
+
     void mmc1Write(uint16_t addr, uint8_t data);
     void applyMmc1Mirroring();
     void mmc3Write(uint16_t addr, uint8_t data);
@@ -95,6 +103,7 @@ private:
 
     void loadBattery();
 };
+
 
 
 

@@ -1,4 +1,5 @@
 #include "APU.hpp"
+#include "Bus.hpp"
 #include <SDL.h>
 #include <cstring>
 #include <algorithm>
@@ -25,23 +26,21 @@ const uint8_t APU::triangleSequence[32] = {
       0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15
 };
 
+// NTSC DMC rate table (CPU cycles per bit)
+const uint16_t APU::dmcRates[16] = {
+    428, 380, 340, 320, 286, 254, 226, 214,
+    190, 160, 142, 128, 106,  84,  72,  54
+};
+
 static void sdlAudioCallback(void* userdata, Uint8* stream, int len)
 {
     APU* apu = static_cast<APU*>(userdata);
     float* out = reinterpret_cast<float*>(stream);
-    int samples = len / (int)sizeof(float);
-    apu->fillBuffer(out, samples);
+    apu->fillBuffer(out, len / (int)sizeof(float));
 }
 
-APU::APU()
-{
-    m_ring.assign(kRingSize, 0.0f);
-}
-
-APU::~APU()
-{
-    shutdownAudio();
-}
+APU::APU() { m_ring.assign(kRingSize, 0.0f); }
+APU::~APU() { shutdownAudio(); }
 
 bool APU::initAudio()
 {
@@ -52,83 +51,48 @@ bool APU::initAudio()
     want.samples = 512;
     want.callback = sdlAudioCallback;
     want.userdata = this;
-
-    if (SDL_OpenAudio(&want, &have) < 0)
-        return false;
+    if (SDL_OpenAudio(&want, &have) < 0) return false;
     SDL_PauseAudio(0);
     return true;
 }
 
-void APU::shutdownAudio()
-{
-    SDL_CloseAudio();
-}
+void APU::shutdownAudio() { SDL_CloseAudio(); }
 
 // ---- Pulse ----
 void APU::Pulse::clockTimer()
 {
-    if (timer == 0) {
-        timer = timerPeriod;
-        dutyBit = (dutyBit + 1) & 7;
-    }
-    else {
-        timer--;
-    }
+    if (timer == 0) { timer = timerPeriod; dutyBit = (dutyBit + 1) & 7; }
+    else timer--;
 }
-
 void APU::Pulse::clockEnvelope()
 {
-    if (envelopeStart) {
-        envelope = 15;
-        envelopePeriod = volume;
-        envelopeStart = false;
-    }
+    if (envelopeStart) { envelope = 15; envelopePeriod = volume; envelopeStart = false; }
     else if (envelopePeriod == 0) {
         envelopePeriod = volume;
-        if (envelope > 0)
-            envelope--;
-        else if (lengthHalt)
-            envelope = 15;
+        if (envelope > 0) envelope--;
+        else if (lengthHalt) envelope = 15;
     }
-    else {
-        envelopePeriod--;
-    }
+    else envelopePeriod--;
 }
-
-void APU::Pulse::clockLength()
-{
-    if (!lengthHalt && length > 0)
-        length--;
-}
-
+void APU::Pulse::clockLength() { if (!lengthHalt && length > 0) length--; }
 void APU::Pulse::clockSweep(bool isPulse1)
 {
     if (sweepDivider == 0) {
         if (sweepEnabled && sweepShift > 0 && timerPeriod >= 8) {
             int delta = timerPeriod >> sweepShift;
-            if (sweepNegate)
-                delta = isPulse1 ? -delta - 1 : -delta;
+            if (sweepNegate) delta = isPulse1 ? -delta - 1 : -delta;
             int target = (int)timerPeriod + delta;
-            if (target >= 0 && target <= 0x7FF)
-                timerPeriod = (uint16_t)target;
+            if (target >= 0 && target <= 0x7FF) timerPeriod = (uint16_t)target;
         }
         sweepDivider = sweepPeriod;
     }
-    else {
-        sweepDivider--;
-    }
-    if (sweepReload) {
-        sweepDivider = sweepPeriod;
-        sweepReload = false;
-    }
+    else sweepDivider--;
+    if (sweepReload) { sweepDivider = sweepPeriod; sweepReload = false; }
 }
-
 float APU::Pulse::sample() const
 {
-    if (!enabled || length == 0 || timerPeriod < 8 || timerPeriod > 0x7FF)
-        return 0.0f;
-    if (!dutyTable[duty][dutyBit])
-        return 0.0f;
+    if (!enabled || length == 0 || timerPeriod < 8 || timerPeriod > 0x7FF) return 0.0f;
+    if (!dutyTable[duty][dutyBit]) return 0.0f;
     return constant ? (volume / 15.0f) : (envelope / 15.0f);
 }
 
@@ -139,61 +103,34 @@ void APU::Triangle::clockTimer(bool chipMod)
         timer = timerPeriod;
         if (length > 0 && linear > 0) {
             if (chipMod) {
-                // Advance continuous phase: one full triangle cycle every 32 sequencer steps
-                // Hardware clocks sequencer once per timer expiry → 32 steps = 1 period of wave
                 phase += 1.0f / 32.0f;
-                if (phase >= 1.0f)
-                    phase -= 1.0f;
-                sequencer = (sequencer + 1) & 31; // keep in sync for mode switches
+                if (phase >= 1.0f) phase -= 1.0f;
             }
-            else {
-                sequencer = (sequencer + 1) & 31;
-            }
+            sequencer = (sequencer + 1) & 31;
         }
     }
-    else {
-        timer--;
-    }
+    else timer--;
 }
-
 void APU::Triangle::clockLinear()
 {
-    if (linearReloadFlag)
-        linear = linearReload;
-    else if (linear > 0)
-        linear--;
-    if (!lengthHalt)
-        linearReloadFlag = false;
+    if (linearReloadFlag) linear = linearReload;
+    else if (linear > 0) linear--;
+    if (!lengthHalt) linearReloadFlag = false;
 }
-
-void APU::Triangle::clockLength()
-{
-    if (!lengthHalt && length > 0)
-        length--;
-}
-
+void APU::Triangle::clockLength() { if (!lengthHalt && length > 0) length--; }
 float APU::Triangle::sample(bool chipMod) const
 {
-    if (!enabled || length == 0 || linear == 0 || timerPeriod < 2)
-        return 0.0f;
-
+    if (!enabled || length == 0 || linear == 0 || timerPeriod < 2) return 0.0f;
     if (chipMod) {
-        // Pure triangle: 0→1→0 over phase [0,1)
         float p = phase;
-        float tri = (p < 0.5f) ? (p * 2.0f) : (2.0f - p * 2.0f);
-        return tri; // 0..1
+        return (p < 0.5f) ? (p * 2.0f) : (2.0f - p * 2.0f);
     }
     return triangleSequence[sequencer] / 15.0f;
 }
-
-// Approximate ISO 226-inspired boost for low triangle notes (kylxbn-style)
 float APU::triangleLoudnessGain(uint16_t period) const
 {
-    // Lower pitch (higher period) → more gain, capped
-    // period ~ 0x7FF is very low; ~32 is high
-    float t = (float)period / 2047.0f; // 0..1
-    float gain = 1.0f + t * 1.25f;     // up to ~2.25x on lowest notes
-    return std::min(gain, 2.5f);
+    float t = (float)period / 2047.0f;
+    return std::min(1.0f + t * 1.25f, 2.5f);
 }
 
 // ---- Noise ----
@@ -201,13 +138,78 @@ void APU::Noise::clockTimer(bool chipMod)
 {
     if (timer == 0) {
         timer = timerPeriod;
-        uint16_t feedback = mode ? ((shift >> 6) ^ (shift >> 0)) & 1
-            : ((shift >> 1) ^ (shift >> 0)) & 1;
+        uint16_t feedback = mode ? ((shift >> 6) ^ shift) & 1 : ((shift >> 1) ^ shift) & 1;
         shift = (shift >> 1) | (feedback << 14);
         if (chipMod) {
-            // Light float smoothing toward the new bit
             float target = (shift & 1) ? 0.0f : 1.0f;
             smooth += (target - smooth) * 0.35f;
+        }
+    }
+    else timer--;
+}
+void APU::Noise::clockEnvelope()
+{
+    if (envelopeStart) { envelope = 15; envelopePeriod = volume; envelopeStart = false; }
+    else if (envelopePeriod == 0) {
+        envelopePeriod = volume;
+        if (envelope > 0) envelope--;
+        else if (lengthHalt) envelope = 15;
+    }
+    else envelopePeriod--;
+}
+void APU::Noise::clockLength() { if (!lengthHalt && length > 0) length--; }
+float APU::Noise::sample(bool chipMod) const
+{
+    if (!enabled || length == 0) return 0.0f;
+    float vol = constant ? (volume / 15.0f) : (envelope / 15.0f);
+    if (chipMod) return smooth * vol;
+    return (shift & 1) ? 0.0f : vol;
+}
+
+// ---- DMC ----
+void APU::Dmc::start()
+{
+    currentAddr = sampleAddr;
+    bytesRemaining = sampleLength;
+}
+
+void APU::Dmc::clockTimer(Bus* bus)
+{
+    if (timer == 0) {
+        timer = rate;
+
+        if (!silence) {
+            if (shiftReg & 1) {
+                if (output <= 125) output += 2;
+            }
+            else {
+                if (output >= 2) output -= 2;
+            }
+            shiftReg >>= 1;
+            bitsRemaining--;
+        }
+
+        if (bitsRemaining == 0) {
+            bitsRemaining = 8;
+            if (sampleBufferFull) {
+                silence = false;
+                shiftReg = sampleBuffer;
+                sampleBufferFull = false;
+            }
+            else {
+                silence = true;
+            }
+        }
+
+        // Fetch next sample byte if needed
+        if (!sampleBufferFull && bytesRemaining > 0 && bus) {
+            sampleBuffer = bus->read(currentAddr);
+            sampleBufferFull = true;
+            currentAddr++;
+            if (currentAddr == 0) currentAddr = 0x8000;
+            bytesRemaining--;
+            if (bytesRemaining == 0 && loop)
+                start();
         }
     }
     else {
@@ -215,42 +217,13 @@ void APU::Noise::clockTimer(bool chipMod)
     }
 }
 
-void APU::Noise::clockEnvelope()
+float APU::Dmc::sample() const
 {
-    if (envelopeStart) {
-        envelope = 15;
-        envelopePeriod = volume;
-        envelopeStart = false;
-    }
-    else if (envelopePeriod == 0) {
-        envelopePeriod = volume;
-        if (envelope > 0) envelope--;
-        else if (lengthHalt) envelope = 15;
-    }
-    else {
-        envelopePeriod--;
-    }
+    if (!enabled) return 0.0f;
+    return output / 127.0f;
 }
 
-void APU::Noise::clockLength()
-{
-    if (!lengthHalt && length > 0)
-        length--;
-}
-
-float APU::Noise::sample(bool chipMod) const
-{
-    if (!enabled || length == 0)
-        return 0.0f;
-    float vol = constant ? (volume / 15.0f) : (envelope / 15.0f);
-    if (chipMod)
-        return smooth * vol;
-    if (shift & 1)
-        return 0.0f;
-    return vol;
-}
-
-// ---- Frame counter ----
+// ---- Frame ----
 void APU::quarterFrame()
 {
     m_pulse1.clockEnvelope();
@@ -258,7 +231,6 @@ void APU::quarterFrame()
     m_noise.clockEnvelope();
     m_triangle.clockLinear();
 }
-
 void APU::halfFrame()
 {
     m_pulse1.clockLength();
@@ -268,22 +240,17 @@ void APU::halfFrame()
     m_pulse1.clockSweep(true);
     m_pulse2.clockSweep(false);
 }
-
 void APU::clockFrameCounter()
 {
     static const uint32_t steps4[] = { 3729, 7457, 11186, 14915 };
     static const uint32_t steps5[] = { 3729, 7457, 11186, 18641 };
-
     m_frameCycles++;
     const uint32_t* steps = m_frameMode5 ? steps5 : steps4;
-
     for (int i = 0; i < 4; i++) {
         if (m_frameCycles == steps[i]) {
             quarterFrame();
-            if (i == 1 || i == 3 || (m_frameMode5 && i == 0))
-                halfFrame();
-            if (i == 3)
-                m_frameCycles = 0;
+            if (i == 1 || i == 3 || (m_frameMode5 && i == 0)) halfFrame();
+            if (i == 3) m_frameCycles = 0;
         }
     }
 }
@@ -303,23 +270,21 @@ float APU::mixSample() const
     float p2 = m_pulse2.sample();
     float t = m_triangle.sample(m_chipMod);
     float n = m_noise.sample(m_chipMod);
+    float d = m_dmc.sample();
 
     if (m_chipMod) {
-        // Linear float mix (kylxbn): channels don't steal volume from each other
-        if (m_chipMod)
-            t *= triangleLoudnessGain(m_triangle.timerPeriod);
-
-        float s = p1 * 0.15f + p2 * 0.15f + t * 0.20f + n * 0.12f;
+        t *= triangleLoudnessGain(m_triangle.timerPeriod);
+        float s = p1 * 0.15f + p2 * 0.15f + t * 0.20f + n * 0.12f + d * 0.15f;
         return std::clamp(s * 1.8f, -1.0f, 1.0f);
     }
 
-    // Hardware-ish nonlinear mix
+    // Nonlinear mix including DMC
     float pulseOut = 0.0f;
     if (p1 + p2 > 0.0f)
         pulseOut = 95.88f / ((8128.0f / (p1 * 15.0f + p2 * 15.0f)) + 100.0f);
 
     float tnd = 0.0f;
-    float tndSum = t * 15.0f / 8227.0f + n * 15.0f / 12241.0f;
+    float tndSum = t * 15.0f / 8227.0f + n * 15.0f / 12241.0f + d * 127.0f / 22638.0f;
     if (tndSum > 0.0f)
         tnd = 159.79f / (1.0f / tndSum + 100.0f);
 
@@ -332,6 +297,7 @@ void APU::clock()
     m_pulse2.clockTimer();
     m_triangle.clockTimer(m_chipMod);
     m_noise.clockTimer(m_chipMod);
+    m_dmc.clockTimer(m_bus);
     clockFrameCounter();
 
     m_sampleTimer += 1.0;
@@ -349,9 +315,7 @@ void APU::fillBuffer(float* stream, int len)
             stream[i] = m_ring[m_ringRead];
             m_ringRead = (m_ringRead + 1) % kRingSize;
         }
-        else {
-            stream[i] = 0.0f;
-        }
+        else stream[i] = 0.0f;
     }
 }
 
@@ -363,6 +327,7 @@ uint8_t APU::cpuRead(uint16_t addr) const
         if (m_pulse2.length > 0) v |= 0x02;
         if (m_triangle.length > 0) v |= 0x04;
         if (m_noise.length > 0) v |= 0x08;
+        if (m_dmc.bytesRemaining > 0) v |= 0x10;
         return v;
     }
     return 0;
@@ -444,25 +409,45 @@ void APU::cpuWrite(uint16_t addr, uint8_t data)
         m_noise.envelopeStart = true;
         break;
 
+        // DMC
+    case 0x4010:
+        m_dmc.irqEnabled = (data & 0x80) != 0;
+        m_dmc.loop = (data & 0x40) != 0;
+        m_dmc.rate = dmcRates[data & 0x0F];
+        break;
+    case 0x4011:
+        m_dmc.output = data & 0x7F;
+        break;
+    case 0x4012:
+        m_dmc.sampleAddr = 0xC000 | ((uint16_t)data << 6);
+        break;
+    case 0x4013:
+        m_dmc.sampleLength = ((uint16_t)data << 4) + 1;
+        break;
+
     case 0x4015:
         m_pulse1.enabled = (data & 0x01) != 0;
         m_pulse2.enabled = (data & 0x02) != 0;
         m_triangle.enabled = (data & 0x04) != 0;
         m_noise.enabled = (data & 0x08) != 0;
+        m_dmc.enabled = (data & 0x10) != 0;
         if (!m_pulse1.enabled) m_pulse1.length = 0;
         if (!m_pulse2.enabled) m_pulse2.length = 0;
         if (!m_triangle.enabled) m_triangle.length = 0;
         if (!m_noise.enabled) m_noise.length = 0;
+        if (!m_dmc.enabled) {
+            m_dmc.bytesRemaining = 0;
+        }
+        else if (m_dmc.bytesRemaining == 0) {
+            m_dmc.start();
+        }
         break;
 
     case 0x4017:
         m_frameMode5 = (data & 0x80) != 0;
         m_irqInhibit = (data & 0x40) != 0;
         m_frameCycles = 0;
-        if (m_frameMode5) {
-            quarterFrame();
-            halfFrame();
-        }
+        if (m_frameMode5) { quarterFrame(); halfFrame(); }
         break;
     }
 }
@@ -476,8 +461,8 @@ void APU::saveState(std::vector<uint8_t>& out) const
     put8(m_pulse2.enabled); put8(m_pulse2.length); put16(m_pulse2.timerPeriod); put8(m_pulse2.volume);
     put8(m_triangle.enabled); put8(m_triangle.length); put16(m_triangle.timerPeriod); put8(m_triangle.linear);
     put8(m_noise.enabled); put8(m_noise.length); put16(m_noise.timerPeriod); put8(m_noise.volume);
-    put8(m_frameMode5); put8(m_irqInhibit);
-    put8(m_chipMod ? 1 : 0);
+    put8(m_dmc.enabled); put8(m_dmc.output); put16(m_dmc.bytesRemaining); put16(m_dmc.currentAddr);
+    put8(m_frameMode5); put8(m_irqInhibit); put8(m_chipMod ? 1 : 0);
 }
 
 bool APU::loadState(const uint8_t*& p, const uint8_t* end)
@@ -495,15 +480,10 @@ bool APU::loadState(const uint8_t*& p, const uint8_t* end)
     if (!get8(m_triangle.length) || !get16(m_triangle.timerPeriod) || !get8(m_triangle.linear)) return false;
     if (!get8(b)) return false; m_noise.enabled = b;
     if (!get8(m_noise.length) || !get16(m_noise.timerPeriod) || !get8(m_noise.volume)) return false;
+    if (!get8(b)) return false; m_dmc.enabled = b;
+    if (!get8(m_dmc.output) || !get16(m_dmc.bytesRemaining) || !get16(m_dmc.currentAddr)) return false;
     if (!get8(b)) return false; m_frameMode5 = b;
     if (!get8(b)) return false; m_irqInhibit = b;
-    if (p < end) {
-        if (!get8(b)) return false;
-        m_chipMod = b != 0;
-    }
+    if (p < end) { if (!get8(b)) return false; m_chipMod = b != 0; }
     return true;
 }
-
-
-
-

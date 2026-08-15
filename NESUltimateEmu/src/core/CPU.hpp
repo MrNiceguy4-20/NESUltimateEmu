@@ -29,6 +29,11 @@ private:
     uint8_t  m_status = 0;
 
     int m_cycles = 0;
+    bool m_nmiPending = false;
+    bool m_irqPending = false;
+
+    void serviceNmi();
+    void serviceIrq();
 
     // Status flag helpers
     void cmpHelper(uint8_t reg, uint8_t value);

@@ -20,25 +20,43 @@ void CPU::reset()
     m_sp = 0xFD;
     m_a = m_x = m_y = 0;
     m_status = 0x24;
-    m_cycles = 0;
+    m_nmiPending = false;
+    m_irqPending = false;
+    // Hardware reset consumes 7 CPU cycles before normal execution resumes.
+    m_cycles = 7;
 }
 
 void CPU::nmi()
 {
-    // Push PC and status (B flag clear, bit 5 set), set I flag, jump to NMI vector
-    push16(m_pc);
-    push((m_status & ~0x10) | 0x20);  // clear B, set unused bit
-    setFlag(0x04, true);              // set I
-    uint8_t lo = read(0xFFFA);
-    uint8_t hi = read(0xFFFB);
-    m_pc = (uint16_t)lo | ((uint16_t)hi << 8);
-    m_cycles = 8;                     // NMI takes 7-8 cycles
+    // NMI is edge-triggered. Latch it and service it at the next
+    // instruction boundary rather than interrupting an instruction that
+    // is already in progress.
+    m_nmiPending = true;
 }
 
 void CPU::irq()
 {
-    if (getFlag(0x04))  // I flag set → ignore
-        return;
+    // IRQ is level-sensitive from the CPU's point of view. Sources such as
+    // MMC3/APU can assert it while the I flag is set; the request is then
+    // serviced once interrupts become unmasked.
+    m_irqPending = true;
+}
+
+void CPU::serviceNmi()
+{
+    m_nmiPending = false;
+    push16(m_pc);
+    push((m_status & ~0x10) | 0x20);
+    setFlag(0x04, true);
+    uint8_t lo = read(0xFFFA);
+    uint8_t hi = read(0xFFFB);
+    m_pc = (uint16_t)lo | ((uint16_t)hi << 8);
+    m_cycles = 7;
+}
+
+void CPU::serviceIrq()
+{
+    m_irqPending = false;
     push16(m_pc);
     push((m_status & ~0x10) | 0x20);
     setFlag(0x04, true);
@@ -51,11 +69,21 @@ void CPU::irq()
 void CPU::clock()
 {
     if (m_cycles == 0) {
-        uint8_t opcode = fetch();
-        execute(opcode);
+        // NMI has priority over IRQ at an instruction boundary.
+        if (m_nmiPending) {
+            serviceNmi();
+        }
+        else if (m_irqPending && !getFlag(0x04)) {
+            serviceIrq();
+        }
+        else {
+            uint8_t opcode = fetch();
+            execute(opcode);
+        }
     }
 
-    m_cycles--;
+    if (m_cycles > 0)
+        --m_cycles;
 }
 
 uint8_t CPU::fetch()
@@ -69,9 +97,12 @@ void CPU::execute(uint8_t opcode)
 {
     Instruction& inst = m_table[opcode];
 
+    // Establish the base cycle count before executing the operation.
+    // Addressing helpers and branches may add page-cross/taken-branch
+    // penalties to m_cycles.  The old ordering overwrote those penalties.
     if (inst.operate) {
-        (this->*inst.operate)();
         m_cycles = inst.cycles;
+        (this->*inst.operate)();
     }
     else {
         m_cycles = 2;
@@ -94,7 +125,11 @@ uint16_t CPU::addrIndirect()
     uint16_t ptr = (uint16_t)loPtr | ((uint16_t)hiPtr << 8);
 
     uint8_t lo = read(ptr);
-    uint8_t hi = read(ptr + 1);
+
+    // NMOS 6502 JMP-indirect page-wrap bug: if the pointer ends in
+    // $FF, the high byte is read from the beginning of the same page.
+    uint16_t hiAddr = (uint16_t)((ptr & 0xFF00) | ((ptr + 1) & 0x00FF));
+    uint8_t hi = read(hiAddr);
 
     return (uint16_t)lo | ((uint16_t)hi << 8);
 }
@@ -389,7 +424,9 @@ void CPU::opBRK()
 
 void CPU::opRTI()
 {
-    m_status = pull() & ~0x10;
+    // B is not a persistent CPU flag; bit 5 is always set in the
+    // internal representation.
+    m_status = (pull() & 0xEF) | 0x20;
     m_pc = pull16();
 }
 
@@ -819,9 +856,9 @@ void CPU::opBVS() { branchIf(getFlag(0x40)); }
 
 // Stack ops
 void CPU::opPHA() { push(m_a); }
-void CPU::opPHP() { push(m_status | 0x10); }
+void CPU::opPHP() { push(m_status | 0x30); }
 void CPU::opPLA() { m_a = pull(); setZeroNeg(m_a); }
-void CPU::opPLP() { m_status = pull() & ~0x10; }
+void CPU::opPLP() { m_status = (pull() & 0xEF) | 0x20; }
 
 // Subroutines
 void CPU::opJSR()
@@ -2404,6 +2441,8 @@ void CPU::saveState(std::vector<uint8_t>& out) const
     put8(m_a); put8(m_x); put8(m_y); put8(m_sp);
     put16(m_pc); put8(m_status);
     put32((uint32_t)m_cycles);
+    put8(m_nmiPending ? 1 : 0);
+    put8(m_irqPending ? 1 : 0);
 }
 
 bool CPU::loadState(const uint8_t*& p, const uint8_t* end)
@@ -2421,9 +2460,14 @@ bool CPU::loadState(const uint8_t*& p, const uint8_t* end)
         p += 4; return true;
         };
     uint32_t cycles = 0;
+    uint8_t nmiPending = 0, irqPending = 0;
     if (!get8(m_a) || !get8(m_x) || !get8(m_y) || !get8(m_sp)) return false;
     if (!get16(m_pc) || !get8(m_status) || !get32(cycles)) return false;
+    if (!get8(nmiPending) || !get8(irqPending)) return false;
+    m_status = (m_status & 0xEF) | 0x20;
     m_cycles = (int)cycles;
+    m_nmiPending = nmiPending != 0;
+    m_irqPending = irqPending != 0;
     return true;
 }
 

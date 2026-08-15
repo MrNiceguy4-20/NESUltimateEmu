@@ -49,6 +49,10 @@ bool Cartridge::loadFromFile(const std::string& path)
     m_unromBank = 0;
     m_cnromBank = 0;
     m_axromBank = 0;
+    m_colorPrg = 0;
+    m_colorChr = 0;
+    m_gxromPrg = 0;
+    m_gxromChr = 0;
 
     m_mmc3BankSelect = 0;
     for (int i = 0; i < 8; i++) m_mmc3Regs[i] = 0;
@@ -286,6 +290,14 @@ uint8_t Cartridge::cpuRead(uint16_t addr) const
         offset = static_cast<size_t>(m_axromBank & 0x07) * bank32 + static_cast<size_t>(addr - 0x8000u);
         offset %= prgSize;
         break;
+    case 11: // Color Dreams – 32 KB PRG
+        offset = static_cast<size_t>(m_colorPrg & 0x03) * bank32 + static_cast<size_t>(addr - 0x8000u);
+        offset %= prgSize;
+        break;
+    case 66: // GxROM – 32 KB PRG
+        offset = static_cast<size_t>(m_gxromPrg & 0x03) * bank32 + static_cast<size_t>(addr - 0x8000u);
+        offset %= prgSize;
+        break;
     default:
         offset = static_cast<size_t>(addr - 0x8000u) % prgSize;
         break;
@@ -310,6 +322,14 @@ void Cartridge::cpuWrite(uint16_t addr, uint8_t data)
     case 7:
         m_axromBank = data;
         m_mirror = (data & 0x10) ? Mirror::OnescreenHi : Mirror::OnescreenLo;
+        break;
+    case 11:
+        m_colorPrg = (data >> 4) & 0x03;
+        m_colorChr = data & 0x0F;
+        break;
+    case 66:
+        m_gxromPrg = (data >> 4) & 0x03;
+        m_gxromChr = data & 0x03;
         break;
     default: break;
     }
@@ -336,6 +356,12 @@ uint8_t Cartridge::ppuRead(uint16_t addr) const
             break;
         case 4:
             offset = mmc3MapChr(addr);
+            break;
+        case 11:
+            offset = static_cast<uint32_t>(m_colorChr) * 0x2000u + addr;
+            break;
+        case 66:
+            offset = static_cast<uint32_t>(m_gxromChr) * 0x2000u + addr;
             break;
         default: break;
         }
@@ -415,6 +441,7 @@ bool Cartridge::loadState(const uint8_t*& p, const uint8_t* end)
     p += chrSize;
     return true;
 }
+
 
 
 
