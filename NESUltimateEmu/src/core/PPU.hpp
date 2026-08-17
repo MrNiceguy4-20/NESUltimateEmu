@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <array>
 #include <vector>
+#include "Mapper.hpp"
 
 class Cartridge;
 class CPU;
@@ -13,12 +14,23 @@ public:
     void connectCartridge(Cartridge* cart);
     void connectCPU(CPU* cpu);
 
+    // Reset the PPU's live register/timing pipeline while preserving PPU
+    // memory. This models the console Reset button rather than a cold boot.
+    void reset();
+
+    // Cold-boot the PPU for a newly inserted cartridge. In addition to the
+    // register/timing pipeline, this clears VRAM/OAM/palette/framebuffer state
+    // so a newly loaded game cannot inherit state from the previous image.
+    void powerOn();
+
     void clock();
 
     uint8_t cpuRead(uint16_t addr);
     void    cpuWrite(uint16_t addr, uint8_t data);
 
-    void oamWrite(uint8_t index, uint8_t data) { m_oam[index] = data; }
+    // OAM DMA writes behave like writes through $2004: they target the
+    // current OAMADDR and increment/wrap it after every byte.
+    void oamDmaWrite(uint8_t data);
 
     const uint32_t* framebuffer() const { return m_framebuffer.data(); }
     bool frameComplete() const { return m_frameComplete; }
@@ -26,6 +38,31 @@ public:
 
     int scanline() const { return m_scanline; }
     int cycle() const { return m_cycle; }
+
+    struct DebugState {
+        int scanline = 0;
+        int cycle = 0;
+        bool oddFrame = false;
+        uint8_t ctrl = 0;
+        uint8_t mask = 0;
+        uint8_t status = 0;
+        uint8_t oamAddr = 0;
+        uint16_t v = 0;
+        uint16_t t = 0;
+        uint8_t fineX = 0;
+        bool writeToggle = false;
+        uint8_t dataBuffer = 0;
+        uint8_t spriteCount = 0;
+        uint8_t busLatch = 0;
+        bool nmiLine = false;
+        uint8_t nmiDelay = 0;
+        uint64_t masterClock = 0;
+    };
+
+    DebugState debugState() const;
+    uint8_t debugCpuRead(uint16_t addr) const;
+    uint8_t debugVramRead(uint16_t addr) const;
+    uint8_t debugOamRead(uint8_t addr) const { return m_oam[addr]; }
 
     void saveState(std::vector<uint8_t>& out) const;
     bool loadState(const uint8_t*& p, const uint8_t* end);
@@ -37,6 +74,7 @@ private:
     int  m_scanline = 0;
     int  m_cycle = 0;
     bool m_frameComplete = false;
+    bool m_oddFrame = false;
 
     uint8_t m_ctrl = 0;
     uint8_t m_mask = 0;
@@ -55,13 +93,23 @@ private:
     bool    m_spriteZeroPossible = false;
     bool    m_spriteZeroBeingRendered = false;
 
+    // Dot-timed sprite evaluator state used for the $2002 overflow flag.
+    // Rendering still consumes the batch-built secondary OAM below, but the
+    // overflow detector follows primary OAM during dots 65-256 so flag timing
+    // and the hardware diagonal-byte bug remain externally observable.
+    uint8_t m_spriteEvalN = 0;      // primary OAM sprite index (0-64)
+    uint8_t m_spriteEvalM = 0;      // byte within sprite (0-3)
+    uint8_t m_spriteEvalFound = 0;  // sprites copied into secondary OAM (0-8)
+    uint8_t m_spriteEvalData = 0;   // odd-dot primary OAM read latch
+    bool    m_spriteEvalFull = false;
+
     // Per-sprite shift state for current scanline
     uint8_t m_spriteShifterLo[8] = {};
     uint8_t m_spriteShifterHi[8] = {};
     uint8_t m_spriteX[8] = {};
     uint8_t m_spriteAttr[8] = {};
 
-    uint8_t m_nametable[2048] = {};
+    uint8_t m_nametable[4096] = {};  // 4KB for four-screen
     uint8_t m_palette[32] = {};
 
     std::array<uint32_t, 256 * 240> m_framebuffer{};
@@ -81,15 +129,28 @@ private:
     uint32_t m_oamDecayCycles[32] = {};
     uint8_t  m_oamLfsr = 0x5A;
 
-    // Mesen-Lite open bus latch
+    // PPU I/O open-bus latch. CPU writes drive all 8 bits; reads of
+    // write-only registers return the last value on this internal bus.
     uint8_t  m_busLatch = 0;
 
-    uint8_t  ppuRead(uint16_t addr) const;
+    // VBlank/NMI edge state. The PPU NMI output is effectively
+    // (PPUSTATUS.VBlank && PPUCTRL.NMI-enable). A low-to-high edge is
+    // presented to the CPU immediately, but for the edge dot and the next
+    // PPU dot it remains cancelable by the VBlank race: reading $2002 or
+    // disabling NMI through $2000 can withdraw an edge not yet sampled.
+    bool     m_nmiLine = false;
+    uint8_t  m_nmiDelay = 0; // remaining cancelable PPU dots (legacy state slot)
+    bool     m_suppressVBlank = false;
+
+    uint8_t  ppuRead(uint16_t addr, PpuFetchKind kind = PpuFetchKind::Cpu);
     void     ppuWrite(uint16_t addr, uint8_t data);
     uint16_t mirrorNametable(uint16_t addr) const;
 
     void setVBlank();
     void clearVBlank();
+    void updateNmiLine();
+    void clockNmiDelay();
+    void notifyPpuAddress(uint16_t addr);
     bool renderingEnabled() const { return (m_mask & 0x18) != 0; }
 
     void loadBackgroundShifters();
@@ -100,6 +161,10 @@ private:
     void transferAddressY();
 
     void evaluateSprites();
+    void resetSpriteOverflowEvaluation();
+    void clockSpriteOverflowEvaluation();
+    void rebuildSpriteOverflowEvaluation();
+    bool spriteEvalValueInRange(uint8_t value) const;
     void loadSpriteShifters();
     void getSpritePixel(uint8_t& pixel, uint8_t& palette, uint8_t& priority);
 
@@ -110,7 +175,24 @@ private:
     uint8_t oamRandomByte();
 
     uint32_t nesColor(uint8_t index) const;
+
+    void resetState(bool clearMemory);
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

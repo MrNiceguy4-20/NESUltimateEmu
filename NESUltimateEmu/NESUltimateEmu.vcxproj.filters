@@ -35,7 +35,13 @@
     <ClCompile Include="src\core\Cartridge.cpp">
       <Filter>Core</Filter>
     </ClCompile>
+    <ClCompile Include="src\core\Mapper.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
     <ClCompile Include="src\frontend\Frontend.cpp">
+      <Filter>Frontend</Filter>
+    </ClCompile>
+    <ClCompile Include="src\frontend\Debugger.cpp">
       <Filter>Frontend</Filter>
     </ClCompile>
   </ItemGroup>
@@ -55,7 +61,13 @@
     <ClInclude Include="src\core\Cartridge.hpp">
       <Filter>Core</Filter>
     </ClInclude>
+    <ClInclude Include="src\core\Mapper.hpp">
+      <Filter>Core</Filter>
+    </ClInclude>
     <ClInclude Include="src\frontend\Frontend.hpp">
+      <Filter>Frontend</Filter>
+    </ClInclude>
+    <ClInclude Include="src\frontend\Debugger.hpp">
       <Filter>Frontend</Filter>
     </ClInclude>
   </ItemGroup>

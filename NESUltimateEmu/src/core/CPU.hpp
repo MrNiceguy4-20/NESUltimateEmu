@@ -12,7 +12,49 @@ public:
     void reset();
     void clock();
     void nmi();   // Non-maskable interrupt (from PPU VBlank)
-    void irq();   // Maskable interrupt (MMC3, APU, etc.)
+    // Cancel an asynchronous NMI edge that has not yet been sampled by the
+    // CPU. The PPU uses this only for the very narrow VBlank race where a
+    // $2002 read or $2000 NMI-disable immediately after VBlank suppresses an
+    // otherwise newly-generated NMI edge.
+    void cancelPendingNmi();
+    // IRQ is a shared level-sensitive line. The Bus recomputes it from
+    // all active IRQ sources before each CPU clock.
+    void setIrqLine(bool asserted);
+    void irq(); // Legacy helper: assert the line until the Bus recomputes it.
+
+    struct DebugState {
+        uint8_t a = 0;
+        uint8_t x = 0;
+        uint8_t y = 0;
+        uint8_t sp = 0;
+        uint16_t pc = 0;
+        uint8_t status = 0;
+        int cyclesRemaining = 0;
+        bool nmiPending = false;
+        bool nmiPolled = false;
+        bool irqLine = false;
+        bool irqPolled = false;
+        uint64_t instructionCount = 0;
+    };
+
+    struct TraceState {
+        uint16_t pc = 0;
+        uint8_t opcode = 0;
+        uint8_t operand1 = 0;
+        uint8_t operand2 = 0;
+        uint8_t a = 0;
+        uint8_t x = 0;
+        uint8_t y = 0;
+        uint8_t sp = 0;
+        uint8_t status = 0;
+        uint64_t instructionCount = 0;
+    };
+
+    DebugState debugState() const;
+    TraceState lastTraceState() const;
+    void setTraceCaptureEnabled(bool enabled) { m_traceCaptureEnabled = enabled; }
+    bool atInstructionBoundary() const { return m_cycles == 0; }
+    uint64_t instructionCount() const { return m_instructionCount; }
 
     // Save states
     void saveState(std::vector<uint8_t>& out) const;
@@ -29,11 +71,73 @@ private:
     uint8_t  m_status = 0;
 
     int m_cycles = 0;
+    // External interrupt state is sampled before the current instruction
+    // ends.  m_nmiPending is the asynchronous edge latch; the *Polled
+    // fields are what the CPU actually committed to service at the next
+    // instruction boundary.  Looking at the live IRQ line only at the
+    // boundary is too late and makes APU IRQs arrive one instruction early.
     bool m_nmiPending = false;
-    bool m_irqPending = false;
+    bool m_nmiPolled = false;
+    bool m_irqLine = false;
+    bool m_irqPolled = false;
+    bool m_pollInterruptsThisSequence = false;
+    bool m_irqDisableBeforeInstruction = true;
+    uint8_t m_currentOpcode = 0;
+    bool m_branchPageCrossed = false;
+
+    // The CPU core is instruction-oriented, but external bus accesses still
+    // need the correct relative cycle ordering. Loads/stores that use this
+    // queue complete on the final cycle, leaving the penultimate cycle free
+    // for observable indexed dummy reads.
+    enum class PendingIoOp : uint8_t {
+        None = 0,
+        Write,
+        Lda,
+        Ldx,
+        Ldy,
+        Bit,
+        Lax,
+        // Cycle-2 read of PC for one-byte NMOS 6502 instructions. Reuses
+        // the existing pending-I/O state so mid-instruction save states keep
+        // the address of the externally visible dummy bus access.
+        DummyRead,
+
+        // Interrupt-entry microsequences. These reuse the serialized pending
+        // I/O byte so BRK/IRQ/NMI can expose their stack/vector bus cycles
+        // without changing the save-state payload layout. The IRQ-vector
+        // forms may be hijacked by a late NMI before the vector low fetch.
+        InterruptBrkIrq,
+        InterruptBrkNmi,
+        InterruptIrqIrq,
+        InterruptIrqNmi,
+        InterruptNmi
+    };
+    PendingIoOp m_pendingIoOp = PendingIoOp::None;
+    uint16_t m_pendingIoAddr = 0;
+    uint8_t m_pendingIoData = 0;
+
+    // Debug-only execution metadata. These fields intentionally are not part
+    // of save states because they do not affect emulation behavior.
+    bool m_traceCaptureEnabled = false;
+    uint64_t m_instructionCount = 0;
+    uint16_t m_lastInstructionPc = 0;
+    uint8_t m_lastOpcode = 0;
+    uint8_t m_lastOperand1 = 0;
+    uint8_t m_lastOperand2 = 0;
+    uint8_t m_lastA = 0;
+    uint8_t m_lastX = 0;
+    uint8_t m_lastY = 0;
+    uint8_t m_lastSp = 0;
+    uint8_t m_lastStatus = 0;
 
     void serviceNmi();
     void serviceIrq();
+    bool isInterruptEntry() const;
+    void clockInterruptEntry();
+    void pollInterrupts();
+    static bool isBranchOpcode(uint8_t opcode);
+    static bool needsSecondCyclePcRead(uint8_t opcode);
+    bool indexedDummyReadAddress(uint16_t& addr) const;
 
     // Status flag helpers
     void cmpHelper(uint8_t reg, uint8_t value);
@@ -47,6 +151,10 @@ private:
     // Memory helpers
     uint8_t read(uint16_t addr) const;
     void    write(uint16_t addr, uint8_t data);
+    void    writeRmw(uint16_t addr, uint8_t oldValue, uint8_t newValue);
+    void scheduleIoWrite(uint16_t addr, uint8_t data);
+    void scheduleIoRead(PendingIoOp op, uint16_t addr);
+    void completePendingIo();
 
     // Stack helpers
     void push(uint8_t value);
