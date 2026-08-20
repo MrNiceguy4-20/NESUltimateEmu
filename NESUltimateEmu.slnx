@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="NESUltimateEmu.vcxproj" Id="b5a7c4c1-1234-4f0a-9f11-111111111111" />
+  <Project Path="NESUltimateEmu.Tests.vcxproj" Id="a2d7c18e-7df2-4db3-b108-25f25a000001" />
+</Solution>
