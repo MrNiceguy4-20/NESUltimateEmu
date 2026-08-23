@@ -31,14 +31,11 @@ static bool runUntilRead(Machine& m, uint16_t addr, uint64_t limit = 10000) {
     return false;
 }
 
-int main(int argc, char** argv) {
-    if (argc != 2) {
-        std::cerr << "usage: DmcPpuConflictProbe <probe.nes>\n";
-        return 2;
-    }
+int runDmcPpuConflictProbe(const std::string& romPath) {
     Machine m;
-    if (!m.cart.loadFromFile(argv[1]) || !m.cart.mapperSupported()) return 2;
+    if (!m.cart.loadFromFile(romPath) || !m.cart.mapperSupported()) return 2;
     m.bus.powerOn();
+    m.ppu.testBypassRegisterWriteInhibit();
 
     if (!runUntilRead(m, 0x2007)) {
         std::cerr << "did not reach $2007 read\n";
@@ -77,3 +74,7 @@ int main(int argc, char** argv) {
               << " $2002_w_clear=PASS\nPASS\n";
     return 0;
 }
+
+#ifndef NES_PROBE_SUITE
+int main(int argc, char** argv) { return argc == 2 ? runDmcPpuConflictProbe(argv[1]) : 2; }
+#endif

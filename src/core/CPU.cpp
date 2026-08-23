@@ -22,6 +22,7 @@ void CPU::powerOn()
     m_pc = 0x0000;
 
     m_nmiPending = false;
+    m_nmiSampled = false;
     m_nmiPolled = false;
     m_irqLine = false;
     m_irqPolled = false;
@@ -49,6 +50,7 @@ void CPU::reset()
     m_status = static_cast<uint8_t>((m_status | 0x24) & 0xEF);
 
     m_nmiPending = false;
+    m_nmiSampled = false;
     m_nmiPolled = false;
     m_irqLine = false;
     m_irqPolled = false;
@@ -72,12 +74,20 @@ void CPU::nmi()
     m_nmiPending = true;
 }
 
+void CPU::sampleNmiInput()
+{
+    if (m_nmiPending) {
+        m_nmiSampled = true;
+        m_nmiPending = false;
+    }
+}
+
 void CPU::cancelPendingNmi()
 {
     // Once the CPU has sampled the edge for the current instruction it is
     // committed. Only the asynchronous, not-yet-polled edge can disappear
     // in the PPU's short VBlank/NMI suppression race.
-    if (!m_nmiPolled)
+    if (!m_nmiPolled && !m_nmiSampled)
         m_nmiPending = false;
 }
 
@@ -99,6 +109,7 @@ void CPU::serviceNmi()
     // cycles. In particular, an IRQ/BRK sequence can have its vector fetch
     // hijacked by an NMI that arrives after the sequence has begun.
     m_nmiPolled = false;
+    m_nmiSampled = false;
     m_irqPolled = false;
     m_pendingIoOp = PendingIoOp::InterruptNmi;
     m_pendingIoAddr = 0;
@@ -143,18 +154,25 @@ void CPU::clockInterruptEntry()
     // NMI takeover has a subtle BRK/IRQ distinction. BRK and hardware IRQ both commit the vector after the status-push
     // boundary.  BRK still retains its origin semantics (PC+2 and B=1 in the
     // pushed status) when an NMI has hijacked the vector before that point.
+    // BRK and hardware IRQ select their vector at the boundary immediately
+    // before the status-push tick (T4 -> T5 internally). An NMI edge that has
+    // been recognized by then can hijack the sequence; an edge arriving once
+    // the low-vector read is about to begin is too late and must remain
+    // pending for the next interrupt opportunity. Keeping BRK hijackable at
+    // m_cycles == 2 incorrectly allowed a late NMI to redirect only after
+    // vector selection had already committed.
     const bool brkCanBeHijacked =
         brkSequence && m_pendingIoOp == PendingIoOp::InterruptBrkIrq &&
-        m_nmiPending && m_cycles >= 3;
+        m_nmiSampled && m_cycles >= 3;
     const bool irqCanBeHijacked =
         irqSequence && m_pendingIoOp == PendingIoOp::InterruptIrqIrq &&
-        m_nmiPending && m_cycles >= 3;
+        m_nmiSampled && m_cycles >= 3;
 
     if (brkCanBeHijacked || irqCanBeHijacked) {
         m_pendingIoOp = brkSequence
             ? PendingIoOp::InterruptBrkNmi
             : PendingIoOp::InterruptIrqNmi;
-        m_nmiPending = false;
+        m_nmiSampled = false;
         m_nmiPolled = false;
     }
 
@@ -223,6 +241,7 @@ void CPU::clockInterruptEntry()
         const uint8_t hi = read(static_cast<uint16_t>(vector + 1));
         m_pc = static_cast<uint16_t>(m_pendingIoData) |
             (static_cast<uint16_t>(hi) << 8);
+        m_bus.applyCartridgeResetBootstrap(m_pc, m_sp);
         m_pendingIoOp = PendingIoOp::None;
         break;
     }
@@ -580,6 +599,19 @@ void CPU::clockAbsIndexedReadSequence()
     }
 }
 
+void CPU::notifyRdyReadStall()
+{
+    // AccuracyCoin deliberately pulls RDY low on the indexed provisional read
+    // two clocks before the SH*/SHA write. On NMOS silicon this suppresses the
+    // H+1 term for the eventual write. Only latch the condition for that exact
+    // bus phase; unrelated DMC stalls must not alter the instruction.
+    const bool absHigh = m_pendingIoOp == PendingIoOp::AbsXHighStore ||
+                         m_pendingIoOp == PendingIoOp::AbsYHighStore;
+    const bool indHigh = m_pendingIoOp == PendingIoOp::IndYHighStore;
+    if ((absHigh || indHigh) && m_cycles == 2)
+        m_unstableHighStoreRdy = true;
+}
+
 bool CPU::isAbsIndexedStoreSequence() const
 {
     switch (m_pendingIoOp) {
@@ -641,14 +673,18 @@ void CPU::clockAbsIndexedStoreSequence()
         return;
     }
 
-    const uint8_t hPlusOne = static_cast<uint8_t>((base >> 8) + 1);
-    const uint8_t stored = static_cast<uint8_t>(source & hPlusOne);
+    uint8_t stored = source;
     uint16_t target = effective;
-    if ((base & 0xFF00) != (effective & 0xFF00))
-        target = static_cast<uint16_t>((static_cast<uint16_t>(stored) << 8) |
-                                       (effective & 0x00FF));
+    if (!m_unstableHighStoreRdy) {
+        const uint8_t hPlusOne = static_cast<uint8_t>((base >> 8) + 1);
+        stored = static_cast<uint8_t>(source & hPlusOne);
+        if ((base & 0xFF00) != (effective & 0xFF00))
+            target = static_cast<uint16_t>((static_cast<uint16_t>(stored) << 8) |
+                                           (effective & 0x00FF));
+    }
     write(target, stored);
     m_pendingIoOp = PendingIoOp::None;
+    m_unstableHighStoreRdy = false;
 }
 
 
@@ -709,6 +745,81 @@ void CPU::clockDirectRmwSequence()
 bool CPU::isImmediateSequence() const
 {
     return m_pendingIoOp == PendingIoOp::Immediate;
+}
+
+bool CPU::isImpliedSequence() const
+{
+    return m_pendingIoOp == PendingIoOp::Implied;
+}
+
+void CPU::applyImplied()
+{
+    switch (m_currentOpcode) {
+    case 0xE8: ++m_x; setZeroNeg(m_x); break; // INX
+    case 0xCA: --m_x; setZeroNeg(m_x); break; // DEX
+    case 0xC8: ++m_y; setZeroNeg(m_y); break; // INY
+    case 0x88: --m_y; setZeroNeg(m_y); break; // DEY
+
+    case 0x78: setFlag(0x04, true); break;  // SEI
+    case 0x58: setFlag(0x04, false); break; // CLI
+    case 0x18: setFlag(0x01, false); break; // CLC
+    case 0x38: setFlag(0x01, true); break;  // SEC
+    case 0xD8: setFlag(0x08, false); break; // CLD
+    case 0xF8: setFlag(0x08, true); break;  // SED (ignored by 2A03 ADC/SBC)
+    case 0xB8: setFlag(0x40, false); break; // CLV
+
+    case 0xAA: m_x = m_a; setZeroNeg(m_x); break; // TAX
+    case 0x8A: m_a = m_x; setZeroNeg(m_a); break; // TXA
+    case 0xA8: m_y = m_a; setZeroNeg(m_y); break; // TAY
+    case 0x98: m_a = m_y; setZeroNeg(m_a); break; // TYA
+    case 0xBA: m_x = m_sp; setZeroNeg(m_x); break; // TSX
+    case 0x9A: m_sp = m_x; break;                    // TXS
+
+    case 0x0A: { // ASL A
+        setFlag(0x01, (m_a & 0x80) != 0);
+        m_a = static_cast<uint8_t>(m_a << 1);
+        setZeroNeg(m_a);
+        break;
+    }
+    case 0x4A: { // LSR A
+        setFlag(0x01, (m_a & 0x01) != 0);
+        m_a = static_cast<uint8_t>(m_a >> 1);
+        setZeroNeg(m_a);
+        break;
+    }
+    case 0x2A: { // ROL A
+        const uint8_t carryIn = getFlag(0x01) ? 1 : 0;
+        setFlag(0x01, (m_a & 0x80) != 0);
+        m_a = static_cast<uint8_t>((m_a << 1) | carryIn);
+        setZeroNeg(m_a);
+        break;
+    }
+    case 0x6A: { // ROR A
+        const uint8_t carryIn = getFlag(0x01) ? 0x80 : 0x00;
+        setFlag(0x01, (m_a & 0x01) != 0);
+        m_a = static_cast<uint8_t>((m_a >> 1) | carryIn);
+        setZeroNeg(m_a);
+        break;
+    }
+
+    // Official and unofficial one-byte NOPs.
+    case 0xEA: case 0x1A: case 0x3A: case 0x5A:
+    case 0x7A: case 0xDA: case 0xFA:
+        break;
+    default:
+        break;
+    }
+}
+
+void CPU::clockImpliedSequence()
+{
+    // Cycle 1 was the opcode fetch. Cycle 2 re-reads PC, then the internal
+    // register/flag operation becomes visible at the end of that cycle.
+    if (m_cycles != 1)
+        return;
+    (void)read(m_pc);
+    applyImplied();
+    m_pendingIoOp = PendingIoOp::None;
 }
 
 bool CPU::isJmpSequence() const
@@ -1260,13 +1371,17 @@ void CPU::clockIndirectSequence()
     }
     if (store && m_cycles == 1) {
         if (op == PendingIoOp::IndYHighStore) {
-            const uint8_t hPlusOne = static_cast<uint8_t>((base >> 8) + 1);
-            const uint8_t stored = static_cast<uint8_t>(m_a & m_x & hPlusOne);
+            uint8_t stored = static_cast<uint8_t>(m_a & m_x);
             uint16_t target = effective;
-            if ((base & 0xFF00) != (effective & 0xFF00))
-                target = static_cast<uint16_t>((static_cast<uint16_t>(stored) << 8) |
-                                               (effective & 0x00FF));
+            if (!m_unstableHighStoreRdy) {
+                const uint8_t hPlusOne = static_cast<uint8_t>((base >> 8) + 1);
+                stored = static_cast<uint8_t>(stored & hPlusOne);
+                if ((base & 0xFF00) != (effective & 0xFF00))
+                    target = static_cast<uint16_t>((static_cast<uint16_t>(stored) << 8) |
+                                                   (effective & 0x00FF));
+            }
             write(target, stored);
+            m_unstableHighStoreRdy = false;
         } else {
             write(effective, m_a);
         }
@@ -1440,9 +1555,9 @@ void CPU::clockStackSequence()
 
 void CPU::pollNmi()
 {
-    if (m_nmiPending) {
+    if (m_nmiSampled) {
         m_nmiPolled = true;
-        m_nmiPending = false;
+        m_nmiSampled = false;
     }
 }
 
@@ -1804,11 +1919,14 @@ CPU::BusCycle CPU::nextBusCycle() const
         if (store && m_cycles == 1) {
             cycle.type = BusCycleType::Write;
             if (op == PendingIoOp::IndYHighStore) {
-                const uint8_t hPlusOne = static_cast<uint8_t>((base >> 8) + 1);
-                const uint8_t stored = static_cast<uint8_t>(m_a & m_x & hPlusOne);
+                uint8_t stored = static_cast<uint8_t>(m_a & m_x);
                 uint16_t target = effective;
-                if ((base & 0xFF00) != (effective & 0xFF00))
-                    target = static_cast<uint16_t>((static_cast<uint16_t>(stored) << 8) | (effective & 0x00FF));
+                if (!m_unstableHighStoreRdy) {
+                    const uint8_t hPlusOne = static_cast<uint8_t>((base >> 8) + 1);
+                    stored = static_cast<uint8_t>(stored & hPlusOne);
+                    if ((base & 0xFF00) != (effective & 0xFF00))
+                        target = static_cast<uint16_t>((static_cast<uint16_t>(stored) << 8) | (effective & 0x00FF));
+                }
                 cycle.address = target; cycle.data = stored;
             } else { cycle.address = effective; cycle.data = m_a; }
             return cycle;
@@ -1875,12 +1993,15 @@ CPU::BusCycle CPU::nextBusCycle() const
                 case 0x9B: source = m_sp; break;
                 default: break;
                 }
-                const uint8_t stored = static_cast<uint8_t>(source &
-                    static_cast<uint8_t>((base >> 8) + 1));
+                uint8_t stored = source;
+                if (!m_unstableHighStoreRdy) {
+                    stored = static_cast<uint8_t>(source &
+                        static_cast<uint8_t>((base >> 8) + 1));
+                    if ((base & 0xFF00) != (effective & 0xFF00))
+                        cycle.address = static_cast<uint16_t>((static_cast<uint16_t>(stored) << 8) |
+                                                              (effective & 0x00FF));
+                }
                 cycle.data = stored;
-                if ((base & 0xFF00) != (effective & 0xFF00))
-                    cycle.address = static_cast<uint16_t>((static_cast<uint16_t>(stored) << 8) |
-                                                          (effective & 0x00FF));
             }
             return cycle;
         }
@@ -2120,6 +2241,13 @@ CPU::BusCycle CPU::nextBusCycle() const
         }
     }
 
+    if (isImpliedSequence()) {
+        cycle.address = m_pc;
+        cycle.dummy = true;
+        cycle.exact = true;
+        return cycle;
+    }
+
     // Final scheduled I/O is fully known, including store data. This is the
     // authoritative signal used by RDY/DMC arbitration instead of a separate
     // collection of opcode-specific write-cycle guesses.
@@ -2160,11 +2288,11 @@ CPU::BusCycle CPU::nextBusCycle() const
         return cycle;
     }
 
-    // Remaining instruction-atomic families have not yet been converted to
-    // scheduled micro-operations. PC is the conservative externally-driven
-    // read used by the old core, but it is now explicitly tagged !exact. DMA
-    // no longer needs to know which opcode families are writes: exact writes
-    // above are represented directly by BusCycleType::Write.
+    // Defensive fallback. The all-opcode headless regression verifies that
+    // every executable opcode reaches one of the exact finite sequences above.
+    // In normal execution this path is therefore reserved for the deliberate
+    // JAM/KIL halted representation (or a future unconverted sequence). Keep it
+    // tagged !exact so DMA never mistakes a synthesized PC read for hardware.
     cycle.address = m_pc;
     cycle.dummy = true;
     return cycle;
@@ -2236,12 +2364,30 @@ void CPU::clock()
                 pollInterrupts();
 
             const bool nmiPendingAtFinalCycleStart =
-                m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiPending;
+                m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiSampled;
 
             clockStackSequence();
-            if (nmiPendingAtFinalCycleStart && m_nmiPending)
+            if (nmiPendingAtFinalCycleStart && m_nmiSampled)
                 pollNmi();
 
+            --m_cycles;
+            if (m_cycles == 0)
+                m_pollInterruptsThisSequence = false;
+            return;
+        }
+
+        if (isImpliedSequence()) {
+            // Two-cycle implied/accumulator instructions poll during the
+            // opcode-fetch cycle. The actual register/flag mutation and the
+            // observable discarded PC read happen on cycle 2, so RDY/DMA can
+            // stretch that final cycle without applying the operation early.
+            if (m_pollInterruptsThisSequence && startedInstruction)
+                pollInterrupts();
+            const bool nmiPendingAtFinalCycleStart =
+                m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiSampled;
+            clockImpliedSequence();
+            if (nmiPendingAtFinalCycleStart && m_nmiSampled)
+                pollNmi();
             --m_cycles;
             if (m_cycles == 0)
                 m_pollInterruptsThisSequence = false;
@@ -2261,9 +2407,9 @@ void CPU::clock()
             // Keep the final-cycle late-edge path below for an edge that arrives
             // after this poll but before the instruction actually completes.
             const bool nmiPendingAtFinalCycleStart =
-                m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiPending;
+                m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiSampled;
             clockImmediateSequence();
-            if (nmiPendingAtFinalCycleStart && m_nmiPending) pollNmi();
+            if (nmiPendingAtFinalCycleStart && m_nmiSampled) pollNmi();
             --m_cycles;
             if (m_cycles == 0) m_pollInterruptsThisSequence = false;
             return;
@@ -2271,9 +2417,9 @@ void CPU::clock()
 
         if (isJmpSequence()) {
             if (m_pollInterruptsThisSequence && m_cycles == 2) pollInterrupts();
-            const bool nmiPendingAtFinalCycleStart = m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiPending;
+            const bool nmiPendingAtFinalCycleStart = m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiSampled;
             clockJmpSequence();
-            if (nmiPendingAtFinalCycleStart && m_nmiPending) pollNmi();
+            if (nmiPendingAtFinalCycleStart && m_nmiSampled) pollNmi();
             --m_cycles;
             if (m_cycles == 0) m_pollInterruptsThisSequence = false;
             return;
@@ -2295,9 +2441,9 @@ void CPU::clock()
             if (m_pollInterruptsThisSequence && m_cycles == 2)
                 pollInterrupts();
             const bool nmiPendingAtFinalCycleStart =
-                m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiPending;
+                m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiSampled;
             clockDirectRmwSequence();
-            if (nmiPendingAtFinalCycleStart && m_nmiPending)
+            if (nmiPendingAtFinalCycleStart && m_nmiSampled)
                 pollNmi();
             --m_cycles;
             if (m_cycles == 0)
@@ -2309,9 +2455,9 @@ void CPU::clock()
             if (m_pollInterruptsThisSequence && m_cycles == 2)
                 pollInterrupts();
             const bool nmiPendingAtFinalCycleStart =
-                m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiPending;
+                m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiSampled;
             clockDirectMemorySequence();
-            if (nmiPendingAtFinalCycleStart && m_nmiPending)
+            if (nmiPendingAtFinalCycleStart && m_nmiSampled)
                 pollNmi();
             --m_cycles;
             if (m_cycles == 0)
@@ -2328,11 +2474,11 @@ void CPU::clock()
             if (m_pollInterruptsThisSequence && m_cycles == 2 && !pointerHighCycle)
                 pollInterrupts();
             const bool nmiPendingAtFinalCycleStart =
-                m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiPending;
+                m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiSampled;
             clockIndirectSequence();
             if (m_pollInterruptsThisSequence && pointerHighCycle && m_cycles == 2)
                 pollInterrupts();
-            if (nmiPendingAtFinalCycleStart && m_nmiPending)
+            if (nmiPendingAtFinalCycleStart && m_nmiSampled)
                 pollNmi();
             --m_cycles;
             if (m_cycles == 0)
@@ -2344,9 +2490,9 @@ void CPU::clock()
             if (m_pollInterruptsThisSequence && m_cycles == 2)
                 pollInterrupts();
             const bool nmiPendingAtFinalCycleStart =
-                m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiPending;
+                m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiSampled;
             clockAbsIndexedStoreSequence();
-            if (nmiPendingAtFinalCycleStart && m_nmiPending)
+            if (nmiPendingAtFinalCycleStart && m_nmiSampled)
                 pollNmi();
             --m_cycles;
             if (m_cycles == 0)
@@ -2362,11 +2508,11 @@ void CPU::clock()
                 pollInterrupts();
             const bool highOperandCycle = (m_cycles == 2 && m_pendingIoData == 0);
             const bool nmiPendingAtFinalCycleStart =
-                m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiPending;
+                m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiSampled;
             clockAbsIndexedReadSequence();
             if (m_pollInterruptsThisSequence && highOperandCycle && m_cycles == 2)
                 pollInterrupts();
-            if (nmiPendingAtFinalCycleStart && m_nmiPending)
+            if (nmiPendingAtFinalCycleStart && m_nmiSampled)
                 pollNmi();
             --m_cycles;
             if (m_cycles == 0)
@@ -2378,9 +2524,9 @@ void CPU::clock()
             if (m_pollInterruptsThisSequence && m_cycles == 2)
                 pollInterrupts();
             const bool nmiPendingAtFinalCycleStart =
-                m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiPending;
+                m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiSampled;
             clockAbsIndexedRmwSequence();
-            if (nmiPendingAtFinalCycleStart && m_nmiPending)
+            if (nmiPendingAtFinalCycleStart && m_nmiSampled)
                 pollNmi();
             --m_cycles;
             if (m_cycles == 0)
@@ -2392,9 +2538,9 @@ void CPU::clock()
             if (m_pollInterruptsThisSequence && m_cycles == 2)
                 pollInterrupts();
             const bool nmiPendingAtFinalCycleStart =
-                m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiPending;
+                m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiSampled;
             clockZpIndexedRmwSequence();
-            if (nmiPendingAtFinalCycleStart && m_nmiPending)
+            if (nmiPendingAtFinalCycleStart && m_nmiSampled)
                 pollNmi();
             --m_cycles;
             if (m_cycles == 0)
@@ -2406,9 +2552,9 @@ void CPU::clock()
             if (m_pollInterruptsThisSequence && m_cycles == 2)
                 pollInterrupts();
             const bool nmiPendingAtFinalCycleStart =
-                m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiPending;
+                m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiSampled;
             clockZpIndexedSequence();
-            if (nmiPendingAtFinalCycleStart && m_nmiPending)
+            if (nmiPendingAtFinalCycleStart && m_nmiSampled)
                 pollNmi();
             --m_cycles;
             if (m_cycles == 0)
@@ -2472,7 +2618,7 @@ void CPU::clock()
         // instruction, preserving the documented one-instruction delay.
         const bool nmiPendingAtFinalCycleStart =
             m_pollInterruptsThisSequence && !isBranchOpcode(m_currentOpcode) &&
-            m_cycles == 1 && m_nmiPending;
+            m_cycles == 1 && m_nmiSampled;
 
         // Memory-mapped APU/PPU I/O happens on the final CPU cycle of the
         // instruction. Bus::clock() advances the APU before calling here,
@@ -2480,7 +2626,7 @@ void CPU::clock()
         // clocks versus CPU register accesses.
         if (m_cycles == 1) {
             completePendingIo();
-            if (nmiPendingAtFinalCycleStart && m_nmiPending)
+            if (nmiPendingAtFinalCycleStart && m_nmiSampled)
                 pollNmi();
         }
         --m_cycles;
@@ -2895,20 +3041,20 @@ void CPU::opLDY_zpx()
 void CPU::opLDY_absx() { m_pendingIoOp = PendingIoOp::AbsXRead; m_pendingIoAddr = 0; m_pendingIoData = 0; }
 
 // INC/DEC registers
-void CPU::opINX() { m_x++; setZeroNeg(m_x); }
-void CPU::opDEX() { m_x--; setZeroNeg(m_x); }
-void CPU::opINY() { m_y++; setZeroNeg(m_y); }
-void CPU::opDEY() { m_y--; setZeroNeg(m_y); }
+void CPU::opINX() { m_pendingIoOp = PendingIoOp::Implied; }
+void CPU::opDEX() { m_pendingIoOp = PendingIoOp::Implied; }
+void CPU::opINY() { m_pendingIoOp = PendingIoOp::Implied; }
+void CPU::opDEY() { m_pendingIoOp = PendingIoOp::Implied; }
 
 // Flags
-void CPU::opSEI() { setFlag(0x04, true); }
-void CPU::opCLI() { setFlag(0x04, false); }
+void CPU::opSEI() { m_pendingIoOp = PendingIoOp::Implied; }
+void CPU::opCLI() { m_pendingIoOp = PendingIoOp::Implied; }
 
-void CPU::opCLC() { setFlag(0x01, false); }
-void CPU::opSEC() { setFlag(0x01, true); }
-void CPU::opCLD() { setFlag(0x08, false); }
-void CPU::opSED() { setFlag(0x08, true); }
-void CPU::opCLV() { setFlag(0x40, false); }
+void CPU::opCLC() { m_pendingIoOp = PendingIoOp::Implied; }
+void CPU::opSEC() { m_pendingIoOp = PendingIoOp::Implied; }
+void CPU::opCLD() { m_pendingIoOp = PendingIoOp::Implied; }
+void CPU::opSED() { m_pendingIoOp = PendingIoOp::Implied; }
+void CPU::opCLV() { m_pendingIoOp = PendingIoOp::Implied; }
 
 // Jumps / interrupts
 void CPU::opJMP_abs() { m_pendingIoOp = PendingIoOp::JmpAbs; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
@@ -3095,11 +3241,7 @@ void CPU::opBIT_abs() { m_pendingIoOp = PendingIoOp::AbsRead; m_pendingIoAddr = 
 
 void CPU::opASL_acc()
 {
-    uint8_t v = m_a;
-    setFlag(0x01, v & 0x80);
-    v <<= 1;
-    m_a = v;
-    setZeroNeg(m_a);
+    m_pendingIoOp = PendingIoOp::Implied;
 }
 
 void CPU::opASL_zp() { m_pendingIoOp = PendingIoOp::ZpRmw; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
@@ -3124,11 +3266,7 @@ void CPU::opASL_absx()
 
 void CPU::opLSR_acc()
 {
-    uint8_t v = m_a;
-    setFlag(0x01, v & 0x01);
-    v >>= 1;
-    m_a = v;
-    setZeroNeg(m_a);
+    m_pendingIoOp = PendingIoOp::Implied;
 }
 
 void CPU::opLSR_zp() { m_pendingIoOp = PendingIoOp::ZpRmw; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
@@ -3153,12 +3291,7 @@ void CPU::opLSR_absx()
 
 void CPU::opROL_acc()
 {
-    uint8_t v = m_a;
-    uint8_t carryIn = getFlag(0x01) ? 1 : 0;
-    setFlag(0x01, v & 0x80);
-    v = (uint8_t)((v << 1) | carryIn);
-    m_a = v;
-    setZeroNeg(m_a);
+    m_pendingIoOp = PendingIoOp::Implied;
 }
 
 void CPU::opROL_zp() { m_pendingIoOp = PendingIoOp::ZpRmw; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
@@ -3183,12 +3316,7 @@ void CPU::opROL_absx()
 
 void CPU::opROR_acc()
 {
-    uint8_t v = m_a;
-    uint8_t carryIn = getFlag(0x01) ? 0x80 : 0x00;
-    setFlag(0x01, v & 0x01);
-    v = (uint8_t)((v >> 1) | carryIn);
-    m_a = v;
-    setZeroNeg(m_a);
+    m_pendingIoOp = PendingIoOp::Implied;
 }
 
 void CPU::opROR_zp() { m_pendingIoOp = PendingIoOp::ZpRmw; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
@@ -3247,37 +3375,32 @@ void CPU::opRTS()
 
 void CPU::opTAX()
 {
-    m_x = m_a;
-    setZeroNeg(m_x);
+    m_pendingIoOp = PendingIoOp::Implied;
 }
 
 void CPU::opTXA()
 {
-    m_a = m_x;
-    setZeroNeg(m_a);
+    m_pendingIoOp = PendingIoOp::Implied;
 }
 
 void CPU::opTAY()
 {
-    m_y = m_a;
-    setZeroNeg(m_y);
+    m_pendingIoOp = PendingIoOp::Implied;
 }
 
 void CPU::opTYA()
 {
-    m_a = m_y;
-    setZeroNeg(m_a);
+    m_pendingIoOp = PendingIoOp::Implied;
 }
 
 void CPU::opTSX()
 {
-    m_x = m_sp;
-    setZeroNeg(m_x);
+    m_pendingIoOp = PendingIoOp::Implied;
 }
 
 void CPU::opTXS()
 {
-    m_sp = m_x;
+    m_pendingIoOp = PendingIoOp::Implied;
 }
 
 // ---------------------------------------------------------
@@ -3483,7 +3606,7 @@ void CPU::opDEC_absx()
 
 void CPU::opNOP()
 {
-    // Do nothing
+    m_pendingIoOp = PendingIoOp::Implied;
 }
 
 // ---------------------------------------------------------
@@ -3907,6 +4030,7 @@ void CPU::opANE_imm()
 
 void CPU::opSHA_indy()
 {
+    m_unstableHighStoreRdy = false;
     m_pendingIoOp = PendingIoOp::IndYHighStore;
     m_pendingIoAddr = 0;
     m_pendingIoData = 0;
@@ -3915,21 +4039,25 @@ void CPU::opSHA_indy()
 
 void CPU::opSHA_absy()
 {
+    m_unstableHighStoreRdy = false;
     m_pendingIoOp = PendingIoOp::AbsYHighStore; m_pendingIoAddr = 0; m_pendingIoData = 0;
 }
 
 void CPU::opSHX_absy()
 {
+    m_unstableHighStoreRdy = false;
     m_pendingIoOp = PendingIoOp::AbsYHighStore; m_pendingIoAddr = 0; m_pendingIoData = 0;
 }
 
 void CPU::opSHY_absx()
 {
+    m_unstableHighStoreRdy = false;
     m_pendingIoOp = PendingIoOp::AbsXHighStore; m_pendingIoAddr = 0; m_pendingIoData = 0;
 }
 
 void CPU::opTAS_absy()
 {
+    m_unstableHighStoreRdy = false;
     m_sp = static_cast<uint8_t>(m_a & m_x);
     m_pendingIoOp = PendingIoOp::AbsYHighStore; m_pendingIoAddr = 0; m_pendingIoData = 0;
 }
@@ -4309,6 +4437,7 @@ void CPU::saveState(std::vector<uint8_t>& out) const
     put16(m_pc); put8(m_status);
     put32((uint32_t)m_cycles);
     put8(m_nmiPending ? 1 : 0);
+    put8(m_nmiSampled ? 1 : 0);
     put8(m_nmiPolled ? 1 : 0);
     put8(m_irqLine ? 1 : 0);
     put8(m_irqPolled ? 1 : 0);
@@ -4325,7 +4454,9 @@ void CPU::saveState(std::vector<uint8_t>& out) const
 bool CPU::loadState(const uint8_t*& p, const uint8_t* end)
 {
     auto get8 = [&](uint8_t& v) -> bool {
-        if (p >= end) return false; v = *p++; return true;
+        if (p >= end) return false;
+        v = *p++;
+        return true;
         };
     auto get16 = [&](uint16_t& v) -> bool {
         if (p + 2 > end) return false;
@@ -4337,13 +4468,13 @@ bool CPU::loadState(const uint8_t*& p, const uint8_t* end)
         p += 4; return true;
         };
     uint32_t cycles = 0;
-    uint8_t nmiPending = 0, nmiPolled = 0, irqLine = 0, irqPolled = 0;
+    uint8_t nmiPending = 0, nmiSampled = 0, nmiPolled = 0, irqLine = 0, irqPolled = 0;
     uint8_t pollSequence = 0, irqDisableBefore = 0, currentOpcode = 0, branchPageCrossed = 0, pendingIo = 0;
     uint16_t pendingAddr = 0;
     uint8_t pendingData = 0, pendingData2 = 0;
     if (!get8(m_a) || !get8(m_x) || !get8(m_y) || !get8(m_sp)) return false;
     if (!get16(m_pc) || !get8(m_status) || !get32(cycles)) return false;
-    if (!get8(nmiPending) || !get8(nmiPolled) || !get8(irqLine) || !get8(irqPolled) ||
+    if (!get8(nmiPending) || !get8(nmiSampled) || !get8(nmiPolled) || !get8(irqLine) || !get8(irqPolled) ||
         !get8(pollSequence) || !get8(irqDisableBefore) || !get8(currentOpcode) ||
         !get8(branchPageCrossed) || !get8(pendingIo) ||
         !get16(pendingAddr) || !get8(pendingData) || !get8(pendingData2)) return false;
@@ -4351,6 +4482,7 @@ bool CPU::loadState(const uint8_t*& p, const uint8_t* end)
     m_status = (m_status & 0xEF) | 0x20;
     m_cycles = (int)cycles;
     m_nmiPending = nmiPending != 0;
+    m_nmiSampled = nmiSampled != 0;
     m_nmiPolled = nmiPolled != 0;
     m_irqLine = irqLine != 0;
     m_irqPolled = irqPolled != 0;

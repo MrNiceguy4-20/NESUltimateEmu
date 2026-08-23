@@ -1,4 +1,5 @@
 #include "Cartridge.hpp"
+#include "RomDatabase.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -104,6 +105,10 @@ void Cartridge::resetImage()
     m_battery = false;
     m_nes20 = false;
     m_fds = false;
+    m_timing = ConsoleTiming::NTSC;
+    m_multiRegion = false;
+    m_hasTrainer = false;
+    m_trainerLoadAddress = 0x7000;
     m_prgRom.clear();
     m_chrRom.clear();
     m_chrRam.clear();
@@ -223,6 +228,22 @@ void Cartridge::saveBattery() const
 
 bool Cartridge::loadFromFile(const std::string& path)
 {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) return false;
+    const auto end = file.tellg();
+    if (end <= 0) return false;
+    file.seekg(0);
+    std::vector<uint8_t> raw(static_cast<std::size_t>(end));
+    file.read(reinterpret_cast<char*>(raw.data()), static_cast<std::streamsize>(raw.size()));
+    if (!file) return false;
+    return loadFromMemory(raw, path);
+}
+
+bool Cartridge::loadFromMemory(const std::vector<uint8_t>& raw, const std::string& logicalPath,
+    const std::string& containerPath)
+{
+    const std::string& path = logicalPath;
+    const std::string backingPath = containerPath.empty() ? logicalPath : containerPath;
     saveBattery();
     resetImage();
 
@@ -233,15 +254,8 @@ bool Cartridge::loadFromFile(const std::string& path)
         ext = std::filesystem::path(path).extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
     } catch (...) {}
-    if (ext == ".fds") {
-        std::ifstream disk(path, std::ios::binary | std::ios::ate);
-        if (!disk) return false;
-        const auto diskEnd = disk.tellg();
-        if (diskEnd <= 0) return false;
-        disk.seekg(0);
-        std::vector<uint8_t> raw(static_cast<std::size_t>(diskEnd));
-        disk.read(reinterpret_cast<char*>(raw.data()), static_cast<std::streamsize>(raw.size()));
-        if (!disk) return false;
+    const bool headeredFds = raw.size() >= 16 && std::memcmp(raw.data(), "FDS\x1A", 4) == 0;
+    if (ext == ".fds" || headeredFds) {
         const bool headered = raw.size() >= 16 && std::memcmp(raw.data(), "FDS\x1A", 4) == 0;
         const std::size_t sides = headered ? raw[4] : raw.size() / 65500;
         const std::size_t offset = headered ? 16 : 0;
@@ -249,7 +263,7 @@ bool Cartridge::loadFromFile(const std::string& path)
 
         std::vector<std::filesystem::path> biosCandidates;
         try {
-            const auto rp = std::filesystem::path(path);
+            const auto rp = std::filesystem::path(backingPath);
             biosCandidates.push_back(rp.parent_path() / "disksys.rom");
             biosCandidates.push_back(rp.parent_path() / "DISKSYS.ROM");
         } catch (...) {}
@@ -277,16 +291,18 @@ bool Cartridge::loadFromFile(const std::string& path)
         m_chrRam.assign(0x2000, 0);
         m_identityData = raw;
         const MapperConfig config { m_mapperId, m_submapper, m_prgRom.size(), 0, m_prgRam.size(),
-            m_chrRam.size(), m_headerMirror, false, 0, 0, false };
+            m_chrRam.size(), m_headerMirror, false, 0, 0, false, true };
         m_mapper = createMapper(config);
         if (!m_mapper || !m_mapper->loadDiskImage(raw)) { resetImage(); return false; }
 
-        m_path = path;
-        m_fileName = std::filesystem::path(path).filename().string();
+        m_path = containerPath.empty() ? logicalPath : (containerPath + "::" + logicalPath);
+        m_fileName = std::filesystem::path(logicalPath).filename().string();
         try {
-            const auto rp = std::filesystem::path(path);
-            m_batteryPath = (rp.parent_path() / (rp.stem().string() + ".sav")).string();
-        } catch (...) { m_batteryPath = path + ".sav"; }
+            const auto rp = std::filesystem::path(backingPath);
+            const std::string stem = containerPath.empty() ? rp.stem().string()
+                : (rp.stem().string() + "." + std::filesystem::path(logicalPath).stem().string());
+            m_batteryPath = (rp.parent_path() / (stem + ".sav")).string();
+        } catch (...) { m_batteryPath = backingPath + ".sav"; }
         // FDS media are writable; persist the expanded disk-side contents.
         m_battery = true;
         loadBattery();
@@ -294,24 +310,34 @@ bool Cartridge::loadFromFile(const std::string& path)
         return true;
     }
 
-    std::ifstream rom(path, std::ios::binary | std::ios::ate);
-    if (!rom) return false;
-    const auto fileEnd = rom.tellg();
-    if (fileEnd < static_cast<std::streamoff>(kINesHeaderSize)) return false;
-    const std::size_t fileSize = static_cast<std::size_t>(fileEnd);
-    rom.seekg(0);
+    if (raw.size() < kINesHeaderSize) return false;
+    const std::size_t fileSize = raw.size();
 
     uint8_t header[kINesHeaderSize] = {};
-    rom.read(reinterpret_cast<char*>(header), sizeof(header));
-    if (!rom || header[0] != 'N' || header[1] != 'E' || header[2] != 'S' || header[3] != 0x1A)
+    std::copy_n(raw.begin(), kINesHeaderSize, header);
+    if (header[0] != 'N' || header[1] != 'E' || header[2] != 'S' || header[3] != 0x1A)
         return false;
 
     const uint8_t flags6 = header[6];
     const uint8_t flags7 = header[7];
     const bool hasTrainer = (flags6 & 0x04) != 0;
     m_nes20 = (flags7 & 0x0C) == 0x08;
-    m_mapperId = uint16_t(flags6 >> 4) | uint16_t(flags7 & 0xF0);
+
+    // Archaic iNES dumps predate the upper mapper nibble and byte-8 PRG-RAM
+    // extension. ROM tools commonly wrote signatures such as "DiskDude!"
+    // across bytes 7-15; interpreting those bytes as modern metadata turns
+    // otherwise valid mapper 0-15 images into unrelated mapper IDs and can
+    // allocate hundreds of KiB of bogus RAM. For non-NES-2.0 images, the
+    // explicit archaic marker or nonzero tail padding selects legacy rules.
+    const bool dirtyLegacyTail = !m_nes20 &&
+        (header[12] != 0 || header[13] != 0 || header[14] != 0 || header[15] != 0);
+    const bool archaicINes = !m_nes20 && (((flags7 & 0x0C) == 0x04) || dirtyLegacyTail);
+
+    m_mapperId = uint16_t(flags6 >> 4);
+    if (!archaicINes) m_mapperId |= uint16_t(flags7 & 0xF0);
     m_submapper = 0;
+
+    m_hasTrainer = hasTrainer;
 
     std::size_t prgSize = 0;
     std::size_t chrSize = 0;
@@ -330,6 +356,16 @@ bool Cartridge::loadFromFile(const std::string& path)
         m_prgNvRamSize = decodeNes20RamSize(header[10] >> 4);
         chrRamVolatile = decodeNes20RamSize(header[11] & 0x0F);
         m_chrNvRamSize = decodeNes20RamSize(header[11] >> 4);
+
+        // NES 2.0 byte 12 selects the console CPU/PPU timing. Multi-region
+        // images are intentionally started in NTSC mode; a future/manual
+        // override can select PAL without changing the cartridge identity.
+        switch (header[12] & 0x03) {
+        case 1: m_timing = ConsoleTiming::PAL; break;
+        case 3: m_timing = ConsoleTiming::Dendy; break;
+        case 2: m_multiRegion = true; [[fallthrough]];
+        default: m_timing = ConsoleTiming::NTSC; break;
+        }
     }
     else {
         prgSize = std::size_t(header[4]) * 0x4000;
@@ -339,24 +375,11 @@ bool Cartridge::loadFromFile(const std::string& path)
         // means one 8 KiB bank. Mapper 30 uses the battery flag for flash
         // persistence rather than conventional $6000-$7FFF PRG RAM.
         if (m_mapperId != 30) {
-            const std::size_t iNesRam = std::size_t(header[8] ? header[8] : 1) * 0x2000;
+            const uint8_t ramBanks = archaicINes ? 1 : (header[8] ? header[8] : 1);
+            const std::size_t iNesRam = std::size_t(ramBanks) * 0x2000;
             if (flags6 & 0x02) m_prgNvRamSize = iNesRam;
             else prgRamVolatile = iNesRam;
         }
-    }
-
-    // Bandai LZ93D50/Datach serial EEPROM capacity is carried in the NES 2.0
-    // PRG-NVRAM field, but it is not CPU-addressable PRG RAM.  iNES Mapper 16
-    // likewise conventionally denotes the serial EEPROM rather than 8 KiB SRAM.
-    headerPrgNvRamHint = m_prgNvRamSize;
-    const bool serialBandai =
-        m_mapperId == 157 || m_mapperId == 159 ||
-        (m_mapperId == 16 && (!m_nes20 ||
-            (m_submapper == 5 && headerPrgNvRamHint == 256) ||
-            (m_submapper == 0 && headerPrgNvRamHint == 256)));
-    if (serialBandai) {
-        m_prgNvRamSize = 0;
-        if (!m_nes20) prgRamVolatile = 0;
     }
 
     if (prgSize == 0) return false;
@@ -383,24 +406,52 @@ bool Cartridge::loadFromFile(const std::string& path)
 
     std::vector<uint8_t> trainer;
     if (hasTrainer) {
-        trainer.resize(kTrainerSize);
-        rom.seekg(static_cast<std::streamoff>(kINesHeaderSize));
-        rom.read(reinterpret_cast<char*>(trainer.data()), static_cast<std::streamsize>(trainer.size()));
-        if (!rom) { resetImage(); return false; }
+        trainer.assign(raw.begin() + kINesHeaderSize, raw.begin() + kINesHeaderSize + kTrainerSize);
         // Trainer bytes affect initial machine state and therefore belong in
         // the ROM identity used to validate save states.
         m_identityData = trainer;
     }
 
-    rom.seekg(static_cast<std::streamoff>(dataOffset));
-    m_prgRom.resize(prgSize);
-    rom.read(reinterpret_cast<char*>(m_prgRom.data()), static_cast<std::streamsize>(prgSize));
-    if (!rom) { resetImage(); return false; }
+    m_prgRom.assign(raw.begin() + dataOffset, raw.begin() + afterPrg);
 
-    if (chrSize) {
-        m_chrRom.resize(chrSize);
-        rom.read(reinterpret_cast<char*>(m_chrRom.data()), static_cast<std::streamsize>(chrSize));
-        if (!rom) { resetImage(); return false; }
+    if (chrSize)
+        m_chrRom.assign(raw.begin() + afterPrg, raw.begin() + afterChr);
+
+    const auto dbResolution = RomDatabase::resolve(m_mapperId,
+        m_prgRom.empty() ? nullptr : m_prgRom.data(), m_prgRom.size(),
+        m_chrRom.empty() ? nullptr : m_chrRom.data(), m_chrRom.size());
+
+    // Database corrections are applied before board-specific RAM fallbacks and
+    // mapper construction. This is important for legacy images whose header
+    // names the wrong mapper or cannot express the physical RAM capacity.
+    if (dbResolution.matched) {
+        if (dbResolution.overrideMapper) m_mapperId = dbResolution.mapper;
+        if (dbResolution.overrideSubmapper) m_submapper = dbResolution.submapper;
+        if (dbResolution.overrideMirror) m_headerMirror = dbResolution.mirror;
+        if (dbResolution.overrideTiming) m_timing = dbResolution.timing;
+        if (dbResolution.overrideMultiRegion) m_multiRegion = dbResolution.multiRegion;
+        if (dbResolution.overridePrgRam) prgRamVolatile = dbResolution.prgRamSize;
+        if (dbResolution.overridePrgNvRam) m_prgNvRamSize = dbResolution.prgNvRamSize;
+        if (dbResolution.overrideChrRam) chrRamVolatile = dbResolution.chrRamSize;
+        if (dbResolution.overrideChrNvRam) m_chrNvRamSize = dbResolution.chrNvRamSize;
+    }
+
+    // Bandai LZ93D50/Datach serial EEPROM capacity is carried in the NES 2.0
+    // PRG-NVRAM field, but it is not CPU-addressable PRG RAM. Apply these
+    // board-specific transformations after database mapper/submapper fixes.
+    headerPrgNvRamHint = m_prgNvRamSize;
+    if (m_nes20 && m_mapperId == 4 && m_submapper == 1) {
+        m_prgNvRamSize = 0;
+        prgRamVolatile = 0;
+    }
+    const bool serialBandai =
+        m_mapperId == 157 || m_mapperId == 159 ||
+        (m_mapperId == 16 && (!m_nes20 ||
+            (m_submapper == 5 && headerPrgNvRamHint == 256) ||
+            (m_submapper == 0 && headerPrgNvRamHint == 256)));
+    if (serialBandai) {
+        m_prgNvRamSize = 0;
+        if (!m_nes20) prgRamVolatile = 0;
     }
 
     std::size_t prgRamTotal = 0;
@@ -412,22 +463,15 @@ bool Cartridge::loadFromFile(const std::string& path)
     }
 
     // iNES trainers are copied to CPU $7000-$71FF before execution starts.
-    // Ensure a conventional 8 KiB PRG-RAM window exists even when an old
-    // header omitted byte-8 RAM metadata.
-    if (hasTrainer && prgRamTotal < 0x2000)
-        prgRamTotal = 0x2000;
+    if (hasTrainer && prgRamTotal < 0x2000) prgRamTotal = 0x2000;
 
-    // Compatibility fallback for older/homebrew images that declare no CHR
-    // ROM and omit the CHR-RAM size. CPROM has 16 KiB of CHR RAM and
-    // UNROM-512 can bank four 8 KiB CHR-RAM pages.
+    if (m_mapperId == 111 && chrSize == 0) chrRamTotal = std::max<std::size_t>(chrRamTotal, 0x8000);
+
     if (chrSize == 0 && chrRamTotal == 0) {
         if (m_mapperId == 13) chrRamTotal = 0x4000;
         else if (m_mapperId == 30) chrRamTotal = 0x8000;
         else chrRamTotal = 0x2000;
     }
-    // A handful of boards expose CHR-ROM and a small CHR-RAM window at the
-    // same time. iNES often cannot describe that RAM, so allocate the board's
-    // known fallback amount when it was omitted from the header.
     if (chrRamTotal == 0 && chrSize != 0) {
         switch (m_mapperId) {
         case 74:  chrRamTotal = 0x0800; break;
@@ -441,8 +485,36 @@ bool Cartridge::loadFromFile(const std::string& path)
         }
     }
 
+    const bool smcExtract = m_mapperId == 6 || m_mapperId == 8 || m_mapperId == 17 ||
+        (m_mapperId == 12 && m_submapper == 1);
+    if (smcExtract) {
+        const std::size_t prgDram = (m_mapperId == 17 || (m_mapperId == 12 && m_submapper == 1))
+            ? 0x80000 : std::max<std::size_t>(0x20000, prgSize);
+        prgRamTotal = std::max(prgRamTotal, prgDram + 0x8000 + 0x1000);
+        const std::size_t chrDram = m_mapperId == 17 ? 0x40000 : 0x8000;
+        chrRamTotal = std::max(chrRamTotal, chrDram);
+        m_prgNvRamSize = 0;
+        m_chrNvRamSize = 0;
+    }
+
     m_prgRam.assign(prgRamTotal, 0);
     m_chrRam.assign(chrRamTotal, 0);
+
+    if (smcExtract) {
+        const std::size_t n = std::min(m_prgRom.size(), m_prgRam.size());
+        std::copy_n(m_prgRom.begin(), n, m_prgRam.begin());
+        if (m_mapperId == 12 && m_submapper == 1) {
+            // Magic Card 4M dumps store CHR payload at PRG DRAM $40000 so
+            // their trainer can copy working sets into the 32 KiB CHR RAM.
+            if (m_prgRam.size() > 0x40000) {
+                const std::size_t c = std::min(m_chrRom.size(), m_prgRam.size() - 0x40000);
+                std::copy_n(m_chrRom.begin(), c, m_prgRam.begin() + 0x40000);
+            }
+        } else {
+            const std::size_t c = std::min(m_chrRom.size(), m_chrRam.size());
+            std::copy_n(m_chrRom.begin(), c, m_chrRam.begin());
+        }
+    }
 
     const MapperConfig config {
         m_mapperId,
@@ -455,14 +527,23 @@ bool Cartridge::loadFromFile(const std::string& path)
         m_headerMirror == Mirror::FourScreen,
         headerPrgNvRamHint,
         m_chrNvRamSize,
-        m_nes20
+        m_nes20,
+        (flags6 & 0x02) != 0 || headerPrgNvRamHint != 0 || m_chrNvRamSize != 0,
+        dbResolution.boardVariant
     };
     m_mapper = createMapper(config);
+    if (m_mapper) m_mapper->initializePrgImage(m_prgRom.data(), m_prgRom.size());
     if (!m_mapper) { resetImage(); return false; }
 
     if (hasTrainer) {
+        if (m_mapperId == 17) {
+            static const uint16_t kSmcTrainerAddress[4] = { 0x7000, 0x5D00, 0x5E00, 0x5F00 };
+            m_trainerLoadAddress = kSmcTrainerAddress[std::min<unsigned>(m_submapper, 3)];
+        } else {
+            m_trainerLoadAddress = 0x7000;
+        }
         for (std::size_t i = 0; i < trainer.size(); ++i) {
-            const uint16_t addr = static_cast<uint16_t>(0x7000 + i);
+            const uint16_t addr = static_cast<uint16_t>(m_trainerLoadAddress + i);
             uint32_t mapped = 0;
 
             // This is cartridge initialization, not a CPU write, so mapper
@@ -479,18 +560,21 @@ bool Cartridge::loadFromFile(const std::string& path)
         }
     }
 
-    m_path = path;
-    m_fileName = std::filesystem::path(path).filename().string();
+    m_path = containerPath.empty() ? logicalPath : (containerPath + "::" + logicalPath);
+    m_fileName = std::filesystem::path(logicalPath).filename().string();
     try {
-        const auto p = std::filesystem::path(path);
-        m_batteryPath = (p.parent_path() / (p.stem().string() + ".sav")).string();
+        const auto p = std::filesystem::path(backingPath);
+        const std::string stem = containerPath.empty() ? p.stem().string()
+            : (p.stem().string() + "." + std::filesystem::path(logicalPath).stem().string());
+        m_batteryPath = (p.parent_path() / (stem + ".sav")).string();
     }
     catch (...) {
-        m_batteryPath = path + ".sav";
+        m_batteryPath = backingPath + ".sav";
     }
 
     m_battery = (flags6 & 0x02) != 0 || m_prgNvRamSize != 0 || m_chrNvRamSize != 0 ||
         (m_mapper && m_mapper->mapperBatterySize() != 0);
+    if (smcExtract) m_battery = false;
     if (m_battery) loadBattery();
 
     m_loaded = true;
@@ -513,8 +597,16 @@ uint64_t Cartridge::romIdentity() const
     mix(m_submapper);
     mix(m_nes20 ? 1 : 0);
     mix(m_fds ? 1 : 0);
+    mix(static_cast<uint8_t>(m_timing));
+    mix(m_multiRegion ? 1 : 0);
+    mix(static_cast<uint8_t>(m_headerMirror));
+    mix(m_battery ? 1 : 0);
     mix64(m_prgRom.size());
     mix64(m_chrRom.size());
+    mix64(m_prgRam.size());
+    mix64(m_chrRam.size());
+    mix64(m_prgNvRamSize);
+    mix64(m_chrNvRamSize);
     for (uint8_t value : m_prgRom) mix(value);
     for (uint8_t value : m_chrRom) mix(value);
     for (uint8_t value : m_identityData) mix(value);
@@ -525,14 +617,17 @@ bool Cartridge::cpuRead(uint16_t addr, uint8_t& data)
 {
     if (!m_loaded || !m_mapper) return false;
 
-    uint8_t regData = 0;
+    // `data` is seeded by Bus with the current CPU data-bus latch. Mapper
+    // registers may modify only the bits their hardware actually drives,
+    // leaving the rest as open bus.
+    uint8_t regData = data;
     if (addr >= 0x4020 && m_mapper->cpuReadRegister(addr, regData)) {
         data = regData;
         return true;
     }
 
     uint32_t mapped = 0;
-    if (addr >= 0x6000 && m_mapper->mapPrgRam(addr, mapped, false) && mapped < m_prgRam.size()) {
+    if (addr >= 0x4020 && m_mapper->mapPrgRam(addr, mapped, false) && mapped < m_prgRam.size()) {
         data = m_prgRam[mapped];
         m_mapper->observeCpuRead(addr, data);
         return true;
@@ -540,7 +635,10 @@ bool Cartridge::cpuRead(uint16_t addr, uint8_t& data)
 
     // Many cartridges do not decode $4020-$5FFF at all. Report that no
     // cartridge device drove the data bus so Bus can preserve CPU open bus.
-    if (addr < 0x6000) return false;
+    // Some cartridge boards map PRG-ROM into expansion space below $6000
+    // (for example mapper 43 at $5000-$5FFF). Mapper registers and cartridge
+    // RAM were already given priority above, so it is safe to ask the mapper
+    // for a ROM mapping throughout the cartridge expansion range.
     if (m_mapper->cpuMapRead(addr, mapped) && mapped < m_prgRom.size()) {
         data = m_prgRom[mapped];
         m_mapper->observeCpuRead(addr, data);
@@ -556,13 +654,29 @@ uint8_t Cartridge::cpuRead(uint16_t addr)
     return data;
 }
 
+void Cartridge::observeCpuWrite(uint16_t addr, uint8_t data)
+{
+    if (m_loaded && m_mapper) m_mapper->observeCpuWrite(addr, data);
+}
+
 void Cartridge::cpuWrite(uint16_t addr, uint8_t data, uint64_t cpuCycle)
 {
     if (!m_loaded || !m_mapper || addr < 0x4020) return;
 
-    m_mapper->cpuWrite(addr, data, cpuCycle);
+    // On discrete boards without PRG-ROM output gating, a mapper-register
+    // write overlaps the ROM output. Real hardware resolves those conflicts
+    // as a wired-AND of CPU data and the byte driven by the currently mapped
+    // PRG-ROM location. The mapper must see that effective value.
+    uint8_t mapperData = data;
+    if (addr >= 0x8000 && m_mapper->hasBusConflicts()) {
+        uint32_t mappedRom = 0;
+        if (m_mapper->cpuMapRead(addr, mappedRom) && mappedRom < m_prgRom.size())
+            mapperData = m_mapper->resolveBusConflict(addr, data, m_prgRom[mappedRom]);
+    }
 
-    if (addr >= 0x6000) {
+    m_mapper->cpuWrite(addr, mapperData, cpuCycle);
+
+    if (addr >= 0x4020) {
         uint32_t mapped = 0;
         if (m_mapper->mapPrgRam(addr, mapped, true) && mapped < m_prgRam.size())
             m_prgRam[mapped] = data;
@@ -574,6 +688,9 @@ uint8_t Cartridge::ppuRead(uint16_t addr, PpuFetchKind kind)
     if (!m_loaded || !m_mapper) return 0;
     addr &= 0x3FFF;
     if (addr >= 0x2000) return 0;
+
+    uint8_t overrideData = 0;
+    if (m_mapper->ppuReadOverride(addr, kind, overrideData)) return overrideData;
 
     uint32_t mapped = 0;
     if (!m_mapper->ppuMapReadEx(addr, mapped, kind)) return 0;
@@ -605,6 +722,11 @@ void Cartridge::ppuWrite(uint16_t addr, uint8_t data)
 bool Cartridge::mapNametable(uint16_t addr, NametableSource& source, uint32_t& mapped) const
 {
     return m_loaded && m_mapper && m_mapper->mapNametable(addr, source, mapped);
+}
+
+bool Cartridge::mapNametableWrite(uint16_t addr, NametableSource& source, uint32_t& mapped) const
+{
+    return m_loaded && m_mapper && m_mapper->mapNametableWrite(addr, source, mapped);
 }
 
 uint8_t Cartridge::readNametableBacking(NametableSource source, uint32_t mapped) const
@@ -646,6 +768,27 @@ void Cartridge::scanlineTick()
     if (m_mapper) m_mapper->scanlineTick();
 }
 
+void Cartridge::resetMapper(bool hard)
+{
+    if (m_mapper) m_mapper->reset(hard);
+}
+
+bool Cartridge::hardResetBootstrap(uint16_t, uint16_t& entry, bool& jsr) const
+{
+    if (!m_hasTrainer) return false;
+    if (m_mapperId == 6 || m_mapperId == 8 || (m_mapperId == 12 && m_submapper == 1)) {
+        entry = 0x7003;
+        jsr = true;
+        return true;
+    }
+    if (m_mapperId == 17) {
+        entry = m_trainerLoadAddress;
+        jsr = false;
+        return true;
+    }
+    return false;
+}
+
 void Cartridge::saveState(std::vector<uint8_t>& out) const
 {
     put16(out, m_mapperId);
@@ -664,30 +807,53 @@ void Cartridge::saveState(std::vector<uint8_t>& out) const
 
 bool Cartridge::loadState(const uint8_t*& p, const uint8_t* end)
 {
+    // Validate the complete cartridge payload before committing RAM or mapper
+    // state. This prevents a truncated/corrupt state from leaving a cartridge
+    // half-restored when the function reports failure.
+    const uint8_t* q = p;
     uint16_t mapperId = 0;
     uint8_t submapper = 0;
     uint32_t mapperStateSize = 0;
-    if (!get16(p, end, mapperId) || mapperId != m_mapperId ||
-        !get8(p, end, submapper) || submapper != m_submapper ||
-        !get32(p, end, mapperStateSize))
+    if (!get16(q, end, mapperId) || mapperId != m_mapperId ||
+        !get8(q, end, submapper) || submapper != m_submapper ||
+        !get32(q, end, mapperStateSize) || !m_mapper)
         return false;
-    if (mapperStateSize > static_cast<uint32_t>(end - p) || !m_mapper)
+    if (mapperStateSize > static_cast<uint32_t>(end - q))
         return false;
 
-    const uint8_t* mapperEnd = p + mapperStateSize;
-    if (!m_mapper->loadState(p, mapperEnd) || p != mapperEnd)
-        return false;
+    const uint8_t* mapperBegin = q;
+    const uint8_t* mapperEnd = mapperBegin + mapperStateSize;
+    q = mapperEnd;
 
     uint32_t prgRamSize = 0;
-    if (!get32(p, end, prgRamSize) || prgRamSize != m_prgRam.size() || prgRamSize > static_cast<uint32_t>(end - p))
+    if (!get32(q, end, prgRamSize) || prgRamSize != m_prgRam.size() ||
+        prgRamSize > static_cast<uint32_t>(end - q))
         return false;
-    if (prgRamSize) std::memcpy(m_prgRam.data(), p, prgRamSize);
-    p += prgRamSize;
+    const uint8_t* prgData = q;
+    q += prgRamSize;
 
     uint32_t chrRamSize = 0;
-    if (!get32(p, end, chrRamSize) || chrRamSize != m_chrRam.size() || chrRamSize > static_cast<uint32_t>(end - p))
+    if (!get32(q, end, chrRamSize) || chrRamSize != m_chrRam.size() ||
+        chrRamSize > static_cast<uint32_t>(end - q))
         return false;
-    if (chrRamSize) std::memcpy(m_chrRam.data(), p, chrRamSize);
-    p += chrRamSize;
+    const uint8_t* chrData = q;
+    q += chrRamSize;
+
+    // Mapper deserializers necessarily mutate their object while parsing.
+    // Keep a known-good snapshot so even a malformed mapper payload is
+    // transactional from Cartridge's caller's point of view.
+    std::vector<uint8_t> mapperBackup;
+    m_mapper->saveState(mapperBackup);
+    const uint8_t* mapperP = mapperBegin;
+    if (!m_mapper->loadState(mapperP, mapperEnd) || mapperP != mapperEnd) {
+        const uint8_t* restore = mapperBackup.data();
+        const uint8_t* restoreEnd = restore + mapperBackup.size();
+        (void)m_mapper->loadState(restore, restoreEnd);
+        return false;
+    }
+
+    if (prgRamSize) std::memcpy(m_prgRam.data(), prgData, prgRamSize);
+    if (chrRamSize) std::memcpy(m_chrRam.data(), chrData, chrRamSize);
+    p = q;
     return true;
 }

@@ -121,14 +121,52 @@ public:
     bool loadMapperBattery(const uint8_t*d,std::size_t n)override{const uint8_t*p=d,*e=d+n;uint32_t count;if(!fds_detail::get32(p,e,count)||count!=m_sides.size())return false;for(size_t i=0;i<count;i++){uint32_t len;if(!fds_detail::get32(p,e,len)||len!=m_sides[i].size()||size_t(e-p)<len)return false;std::memcpy(m_sides[i].data(),p,len);p+=len;}return p==e;}
 
     void saveState(std::vector<uint8_t>&o)const override{
-        for(uint16_t v:{m_irqReload,m_irqCounter,m_crc})fds_detail::put16(o,v);put8(o,m_irqEnabled);put8(o,m_irqRepeat);put8(o,m_timerPending);put8(o,m_diskRegs);put8(o,m_soundRegs);put8(o,m_writeData);put8(o,m_motor);put8(o,m_resetTransfer);put8(o,m_readMode);put8(o,m_crcControl);put8(o,m_diskReady);put8(o,m_diskIrqEnabled);put8(o,m_ext);put8(o,m_badCrc);put8(o,m_endOfHead);put8(o,m_readData);put8(o,m_gapEnded);put8(o,m_scanning);put8(o,m_transferComplete);put8(o,m_diskPending);put8(o,m_prevCrc);fds_detail::put32(o,uint32_t(m_currentSide+1));fds_detail::put32(o,m_diskPos);fds_detail::put32(o,m_delay);put8(o,static_cast<uint8_t>(m_mirror));m_audio.save(o);saveMapperBattery(o);
+        for(uint16_t v:{m_irqReload,m_irqCounter,m_crc})fds_detail::put16(o,v);
+        put8(o,m_irqEnabled);
+        put8(o,m_irqRepeat);
+        put8(o,m_timerPending);
+        put8(o,m_diskRegs);
+        put8(o,m_soundRegs);
+        put8(o,m_writeData);
+        put8(o,m_motor);
+        put8(o,m_resetTransfer);
+        put8(o,m_readMode);
+        put8(o,m_crcControl);
+        put8(o,m_diskReady);
+        put8(o,m_diskIrqEnabled);
+        put8(o,m_ext);
+        put8(o,m_badCrc);
+        put8(o,m_endOfHead);
+        put8(o,m_readData);
+        put8(o,m_gapEnded);
+        put8(o,m_scanning);
+        put8(o,m_transferComplete);
+        put8(o,m_diskPending);
+        put8(o,m_prevCrc);
+        fds_detail::put32(o,uint32_t(m_currentSide+1));
+        fds_detail::put32(o,m_diskPos);
+        fds_detail::put32(o,m_delay);
+        put8(o,static_cast<uint8_t>(m_mirror));
+        m_audio.save(o);
+        saveMapperBattery(o);
     }
     bool loadState(const uint8_t*&p,const uint8_t*e)override{
         uint8_t b;uint32_t q;if(!fds_detail::get16(p,e,m_irqReload)||!fds_detail::get16(p,e,m_irqCounter)||!fds_detail::get16(p,e,m_crc))return false;
 #define FDS_BOOL(x) if(!get8(p,e,b))return false;x=b
         FDS_BOOL(m_irqEnabled);FDS_BOOL(m_irqRepeat);FDS_BOOL(m_timerPending);FDS_BOOL(m_diskRegs);FDS_BOOL(m_soundRegs);if(!get8(p,e,m_writeData))return false;FDS_BOOL(m_motor);FDS_BOOL(m_resetTransfer);FDS_BOOL(m_readMode);FDS_BOOL(m_crcControl);FDS_BOOL(m_diskReady);FDS_BOOL(m_diskIrqEnabled);if(!get8(p,e,m_ext))return false;FDS_BOOL(m_badCrc);FDS_BOOL(m_endOfHead);if(!get8(p,e,m_readData))return false;FDS_BOOL(m_gapEnded);FDS_BOOL(m_scanning);FDS_BOOL(m_transferComplete);FDS_BOOL(m_diskPending);FDS_BOOL(m_prevCrc);
 #undef FDS_BOOL
-        if(!fds_detail::get32(p,e,q))return false;m_currentSide=int(q)-1;if(!fds_detail::get32(p,e,m_diskPos)||!fds_detail::get32(p,e,m_delay)||!get8(p,e,b))return false;m_mirror=static_cast<Mirror>(b);if(!m_audio.load(p,e))return false;uint32_t count;if(!fds_detail::get32(p,e,count)||count!=m_sides.size())return false;for(size_t i=0;i<count;i++){uint32_t len;if(!fds_detail::get32(p,e,len)||len!=m_sides[i].size()||size_t(e-p)<len)return false;std::memcpy(m_sides[i].data(),p,len);p+=len;}return true;
+        if(!fds_detail::get32(p,e,q))return false;
+        m_currentSide=int(q)-1;
+        if(!fds_detail::get32(p,e,m_diskPos)||!fds_detail::get32(p,e,m_delay)||!get8(p,e,b))return false;
+        m_mirror=static_cast<Mirror>(b);
+        if(!m_audio.load(p,e))return false;
+        uint32_t count;
+        if(!fds_detail::get32(p,e,count)||count!=m_sides.size())return false;
+        for(size_t i=0;i<count;i++){uint32_t len;
+        if(!fds_detail::get32(p,e,len)||len!=m_sides[i].size()||size_t(e-p)<len)return false;
+        std::memcpy(m_sides[i].data(),p,len);
+        p+=len;
+        }return true;
     }
 private:
     void updateCrc(uint8_t value){

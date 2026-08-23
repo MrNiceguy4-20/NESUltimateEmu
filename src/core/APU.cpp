@@ -8,6 +8,23 @@
 #include <cstring>
 #include <algorithm>
 #include <cmath>
+#include <fstream>
+#include <iomanip>
+
+
+namespace {
+void traceImplicitDmc(const Bus* bus, const char* event,
+                      uint16_t bytesRemaining, uint16_t sampleLength,
+                      bool enabled, bool loop, bool bufferFull,
+                      uint8_t bitsRemaining, uint16_t timer,
+                      uint8_t implicitWindow, bool abortPending,
+                      bool forcedPending, bool dmaPending)
+{
+    (void)bus; (void)event; (void)bytesRemaining; (void)sampleLength; (void)enabled; (void)loop;
+    (void)bufferFull; (void)bitsRemaining; (void)timer; (void)implicitWindow;
+    (void)abortPending; (void)forcedPending; (void)dmaPending;
+}
+}
 
 const uint8_t APU::lengthTable[32] = {
     10,254, 20,  2, 40,  4, 80,  6, 160,  8, 60, 10, 14, 12, 26, 14,
@@ -21,8 +38,12 @@ const uint8_t APU::dutyTable[4][8] = {
     {1,0,0,1,1,1,1,1}
 };
 
-const uint16_t APU::noisePeriods[16] = {
+const uint16_t APU::noisePeriodsNtsc[16] = {
     4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068
+};
+
+const uint16_t APU::noisePeriodsPal[16] = {
+    4, 8, 14, 30, 60, 88, 118, 148, 188, 236, 354, 472, 708, 944, 1890, 3778
 };
 
 const uint8_t APU::triangleSequence[32] = {
@@ -30,9 +51,14 @@ const uint8_t APU::triangleSequence[32] = {
       0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15
 };
 
-const uint16_t APU::dmcRates[16] = {
+const uint16_t APU::dmcRatesNtsc[16] = {
     428, 380, 340, 320, 286, 254, 226, 214,
     190, 160, 142, 128, 106,  84,  72,  54
+};
+
+const uint16_t APU::dmcRatesPal[16] = {
+    398, 354, 316, 298, 276, 236, 210, 198,
+    176, 148, 132, 118,  98,  78,  66,  50
 };
 
 #ifndef NES_HEADLESS
@@ -53,6 +79,16 @@ APU::APU()
 }
 APU::~APU() { shutdownAudio(); }
 
+void APU::setTiming(ConsoleTiming timing)
+{
+    if (m_timing == timing) return;
+    m_timing = timing;
+    m_samplePeriod = double(consoleCpuClockHz(m_timing)) / double(m_outputSampleRate);
+    rebuildTriangleLoudnessTable();
+    resetOutputPipeline();
+}
+
+
 void APU::powerOn()
 {
     // Power-on initializes the APU register/control state. The reset tests
@@ -63,18 +99,21 @@ void APU::powerOn()
     m_triangle = Triangle{};
     m_noise = Noise{};
     m_dmc = Dmc{};
+    m_dmc.rate = (m_timing == ConsoleTiming::PAL) ? dmcRatesPal[0] : dmcRatesNtsc[0];
 
     m_frameMode5 = false;
     m_irqInhibit = false;
     m_frameIrqFlag = false;
+    m_frameIrqClearPending = false;
 
     // CPU::powerOn() contributes seven reset clocks. Starting the frame
     // sequencer at two makes the effective $4017=$00 write nine clocks before
     // the first instruction, inside the 9-12 clock hardware window.
     m_frameCycles = 2;
     m_apuPhase = false;
-    m_frameJitter = 0;
-    m_frameWriteThisCycle = false;
+    m_frameResetDelay = 0;
+    m_pendingFrameStartCycles = 0;
+    m_pendingFrameMode5 = false;
 
     resetOutputPipeline();
 }
@@ -105,8 +144,13 @@ void APU::reset()
     m_dmc.dmaPending = false;
     m_dmc.dmaStartDelay = 0;
     m_dmc.dmaLoadPending = false;
-    m_dmc.explicitStopWindow = 0;
+    m_dmc.dmaReloadWaitingForEnable = false;
+    m_dmc.stopBugWindow = 0;
+    m_dmc.implicitStopWindow = 0;
     m_dmc.dmaAbortPending = false;
+    m_dmc.dmaImplicitAbortPending = false;
+    m_dmc.dmaImplicitAbortDelay = 0;
+    m_dmc.dmaForcedReloadPending = false;
     m_dmc.sampleBufferFull = false;
     m_dmc.bitsRemaining = 0;
     m_dmc.silence = true;
@@ -117,10 +161,12 @@ void APU::reset()
     // $4017. Preserve mode/inhibit and restart that sequence at the same
     // reset-relative phase used at power-on.
     m_frameIrqFlag = false;
+    m_frameIrqClearPending = false;
     m_frameCycles = 2;
     m_apuPhase = false;
-    m_frameJitter = 0;
-    m_frameWriteThisCycle = false;
+    m_frameResetDelay = 0;
+    m_pendingFrameStartCycles = 0;
+    m_pendingFrameMode5 = false;
 
     resetOutputPipeline();
 }
@@ -164,7 +210,7 @@ bool APU::initAudio()
 
     m_audioDeviceId = uint32_t(device);
     m_outputSampleRate = have.freq;
-    m_samplePeriod = double(kCpuClock) / double(m_outputSampleRate);
+    m_samplePeriod = double(consoleCpuClockHz(m_timing)) / double(m_outputSampleRate);
     m_hpCoefficient = std::exp(-2.0 * 3.14159265358979323846 * 20.0 / double(m_outputSampleRate));
     resetOutputPipeline();
     m_audioOpen = true;
@@ -315,7 +361,7 @@ void APU::rebuildTriangleLoudnessTable()
     constexpr size_t count = sizeof(hz) / sizeof(hz[0]);
 
     for (size_t period = 0; period < m_triangleGain.size(); ++period) {
-        const double frequency = double(kCpuClock) / (32.0 * (double(period) + 1.0));
+        const double frequency = double(consoleCpuClockHz(m_timing)) / (32.0 * (double(period) + 1.0));
         double contour = spl[0];
         if (frequency <= hz[0]) {
             contour = spl[0];
@@ -429,14 +475,39 @@ void APU::scheduleDmcDma()
     if (!m_bus || m_dmc.dmaPending)
         return;
 
+    // If the memory reader had already committed the reload internally when
+    // $4015 disabled the DMC, the transfer still runs as an ordinary reload.
+    // AccuracyCoin's explicit-abort X=7 case distinguishes this from the
+    // one-cycle stop-bug pulse on the following two positions.
+    if (m_dmc.dmaForcedReloadPending) {
+        const bool getCycle = m_bus->dmaGetCycle();
+        if (!getCycle && m_bus->requestDmcDma(m_dmc.currentAddr, false)) {
+            m_dmc.dmaPending = true;
+            m_dmc.dmaForcedReloadPending = false;
+        }
+        return;
+    }
+
     // Explicit-stop bug. The reload request survives the stop only as a
     // one-cycle halt attempt, scheduled on the normal reload PUT phase.
     // Bus suppresses it completely when that halt attempt hits a CPU write.
     if (m_dmc.dmaAbortPending) {
+        // The output unit arms an implicit one-cycle pulse during APU::clock().
+        // The caller already prevents same-clock submission with
+        // deferImplicitAbortSchedule.  Therefore the next scheduler pass is
+        // exactly the next CPU bus cycle; do not insert another delay here.
+
         const bool getCycle = m_bus->dmaGetCycle();
-        if (!getCycle && m_bus->requestDmcDma(m_dmc.currentAddr, true)) {
+        const bool mayAttemptNow = m_dmc.dmaImplicitAbortPending || !getCycle;
+        if (m_dmc.sampleLength == 1)
+            traceImplicitDmc(m_bus, mayAttemptNow ? "ABORT_TRY_NOW" : "ABORT_WAIT_GET", m_dmc.bytesRemaining, m_dmc.sampleLength, m_dmc.enabled, m_dmc.loop, m_dmc.sampleBufferFull, m_dmc.bitsRemaining, m_dmc.timer, m_dmc.implicitStopWindow, m_dmc.dmaAbortPending, m_dmc.dmaForcedReloadPending, m_dmc.dmaPending);
+        if (mayAttemptNow && m_bus->requestDmcDma(m_dmc.currentAddr, true)) {
+            if (m_dmc.sampleLength == 1)
+                traceImplicitDmc(m_bus, "ABORT_REQUESTED", m_dmc.bytesRemaining, m_dmc.sampleLength, m_dmc.enabled, m_dmc.loop, m_dmc.sampleBufferFull, m_dmc.bitsRemaining, m_dmc.timer, m_dmc.implicitStopWindow, m_dmc.dmaAbortPending, m_dmc.dmaForcedReloadPending, true);
             m_dmc.dmaPending = true;
             m_dmc.dmaAbortPending = false;
+            m_dmc.dmaImplicitAbortPending = false;
+            m_dmc.dmaImplicitAbortDelay = 0;
         }
         return;
     }
@@ -455,7 +526,12 @@ void APU::scheduleDmcDma()
     // the 4-cycle halt/dummy/alignment/get form. If the CPU is
     // writing when RDY is attempted, Bus keeps phase 0 pending and retries on
     // the next CPU slot, so write-delay behavior remains emergent.
-    if (m_dmc.dmaLoadPending && m_dmc.dmaStartDelay != 0) {
+    // The three-cycle post-$4015 enable delay gates the memory reader
+    // independently of whether the eventual transfer is a load or reload.
+    // This distinction matters when $4015 is written while the one-byte
+    // sample buffer is already full: the later fetch is reload-timed, but it
+    // still cannot execute until the enable latch has propagated.
+    if (m_dmc.dmaStartDelay != 0) {
         --m_dmc.dmaStartDelay;
         if (m_dmc.dmaStartDelay != 0)
             return;
@@ -465,13 +541,20 @@ void APU::scheduleDmcDma()
         return;
 
     const bool getCycle = m_bus->dmaGetCycle();
-    const bool scheduledPhase = m_dmc.dmaLoadPending ? getCycle : !getCycle;
+    // Normal load DMAs are GET-aligned and normal reloads are PUT-aligned.
+    // A reload that became necessary before the delayed $4015 enable reached
+    // the memory reader is different: its request is already waiting, so the
+    // first CPU cycle on which the reader becomes enabled may acquire RDY on
+    // either phase. AccuracyCoin DMC tests L/M/N exercise this exact race.
+    const bool scheduledPhase = m_dmc.dmaReloadWaitingForEnable ? getCycle :
+        (m_dmc.dmaLoadPending ? getCycle : !getCycle);
     if (!scheduledPhase)
         return;
 
     if (m_bus->requestDmcDma(m_dmc.currentAddr)) {
         m_dmc.dmaPending = true;
         m_dmc.dmaLoadPending = false;
+        m_dmc.dmaReloadWaitingForEnable = false;
     }
 }
 
@@ -480,6 +563,7 @@ void APU::completeDmcDma(uint8_t data)
     if (!m_dmc.dmaPending)
         return;
 
+    const uint16_t fetchedAddress = m_dmc.currentAddr;
     m_dmc.dmaPending = false;
     m_dmc.sampleBuffer = data;
     m_dmc.sampleBufferFull = true;
@@ -493,6 +577,46 @@ void APU::completeDmcDma(uint8_t data)
 
     --m_dmc.bytesRemaining;
     if (m_dmc.bytesRemaining == 0) {
+        const bool oneByteImplicitStop = !m_dmc.loop && m_dmc.sampleLength == 1;
+
+        // A one-byte load that completes with the output unit already at the
+        // byte-reload boundary is the revision-dependent race.  APU::clock()
+        // runs before the DMA GET in the same Bus::clock(), so at GET
+        // completion the observable signature for "reload on the next CPU
+        // clock" is bitsRemaining==0 && timer==0.  The previous
+        // The previous pre-GET phase test described the APU state before the
+        // DMA transfer completed and therefore selected the race two CPU
+        // clocks too early.
+        const bool outputReloadNextClock =
+            m_dmc.bitsRemaining == 0 && m_dmc.timer == 0;
+        const bool lateUnexpectedReload = oneByteImplicitStop &&
+            m_dmcCpuRevision == DmcCpuRevision::Mid1990OrLater &&
+            outputReloadNextClock;
+
+        if (lateUnexpectedReload) {
+            // Late RP2A03G and RP2A03H contain an additional memory-reader
+            // race: if the one-byte load completes on the same APU cycle on
+            // which the output unit asks for a reload, the reader performs a
+            // full reload DMA from the *same* address on the following PUT
+            // slot. Rewind the otherwise-dead reader address so the existing
+            // forced-reload path naturally issues that duplicate fetch.
+            m_dmc.currentAddr = fetchedAddress;
+            m_dmc.dmaForcedReloadPending = true;
+            m_dmc.implicitStopWindow = 0;
+            traceImplicitDmc(m_bus, "LOAD_COMPLETE_ARM_LATE_RELOAD", m_dmc.bytesRemaining, m_dmc.sampleLength, m_dmc.enabled, m_dmc.loop, m_dmc.sampleBufferFull, m_dmc.bitsRemaining, m_dmc.timer, m_dmc.implicitStopWindow, m_dmc.dmaAbortPending, m_dmc.dmaForcedReloadPending, m_dmc.dmaPending);
+        }
+        else if (oneByteImplicitStop && !outputReloadNextClock) {
+            // Both early and late 2A03 revisions exhibit the one-cycle
+            // aborted-reload bug when the load completes two CPU clocks
+            // before the output unit reaches its byte-reload boundary.  The
+            // buffer is consumed on the third following APU::clock() call, so
+            // keep the opportunity alive for three clocks.  Completion at
+            // timer==0 is deliberately excluded: early CPUs perform no extra
+            // DMA there, while late CPUs take the full-reload path above.
+            m_dmc.implicitStopWindow = 3;
+            traceImplicitDmc(m_bus, "LOAD_COMPLETE_ARM_WINDOW", m_dmc.bytesRemaining, m_dmc.sampleLength, m_dmc.enabled, m_dmc.loop, m_dmc.sampleBufferFull, m_dmc.bitsRemaining, m_dmc.timer, m_dmc.implicitStopWindow, m_dmc.dmaAbortPending, m_dmc.dmaForcedReloadPending, m_dmc.dmaPending);
+        }
+
         if (m_dmc.loop) {
             m_dmc.start();
         }
@@ -500,16 +624,10 @@ void APU::completeDmcDma(uint8_t data)
             if (m_dmc.irqEnabled)
                 m_dmc.irqFlag = true;
 
-            // Implicit-stop DMA quirk. On mid-1990-or-later 2A03 CPUs, the
-            // memory-reader stop signal arrives late enough that exhausting a
-            // non-looping sample can leave one reload request behind. That
-            // request behaves like the documented one-cycle aborted DMA: it
-            // attempts one RDY halt on the normal reload phase, performs no
-            // sample fetch, and is suppressed rather than delayed if the halt
-            // slot is a CPU write. Earlier CPUs do not generate this extra
-            // one-cycle request.
-            if (m_dmcCpuRevision == DmcCpuRevision::Mid1990OrLater)
-                m_dmc.dmaAbortPending = true;
+            // The normal implicit one-cycle abort is committed later by the
+            // output-unit buffer-empty edge. The late-revision same-cycle
+            // unexpected reload above is the sole exception because hardware
+            // immediately carries that reader request into the next PUT slot.
         }
     }
 }
@@ -578,74 +696,149 @@ void APU::applyPendingLengthWrites()
 }
 
 
+void APU::clockFrameCounterPreCpuPhase()
+{
+    // A delayed $4017 divider reset whose countdown expires on this CPU
+    // period becomes visible before the CPU's M2-high bus access. This
+    // ordering is observable when a 5-step immediate half-frame clock makes
+    // a length counter reach zero on the same CPU period as a $4015 read.
+    // Ordinary frame-sequencer events remain post-CPU, as before.
+    if (m_frameResetDelay != 1)
+        return;
+
+    m_frameResetDelay = 0;
+    m_frameMode5 = m_pendingFrameMode5;
+    m_frameCycles = m_pendingFrameStartCycles;
+    if (m_frameMode5) {
+        quarterFrame();
+        halfFrame();
+    }
+    m_frameResetAppliedPreCpu = true;
+}
+
 void APU::clockFrameCounter()
 {
-    // A $4017 write establishes cycle 0. The frame sequencer phase for that
-    // same CPU clock must not advance to cycle 1 yet.
-    if (m_frameWriteThisCycle) {
-        m_frameWriteThisCycle = false;
+    const bool resetAppliedPreCpu = m_frameResetAppliedPreCpu;
+    m_frameResetAppliedPreCpu = false;
+
+    // If the pre-CPU phase consumed the pending reset and the CPU did not
+    // write a new $4017 value during this period, do not also advance the new
+    // frame sequence here. A new $4017 write installs a fresh countdown and
+    // is handled by the normal block below.
+    if (resetAppliedPreCpu && m_frameResetDelay == 0) {
+        applyPendingLengthWrites();
+        return;
+    }
+
+    // A $4015 status read requests a frame-IRQ acknowledge, but the latch is
+    // actually cleared on the next APU GET phase. Bus::clock invokes this
+    // after the CPU access for the same cycle, preserving the observed
+    // PUT->GET / GET->PUT double-read asymmetry.
+    // AccuracyCoin measures the acknowledge on the PUT->GET transition.
+    // Bus::clock() calls this after the CPU bus cycle, so a read performed on
+    // the current PUT slot must be cleared now, before a following GET-slot
+    // read can observe the latch again. dmaGetCycle() names the *current*
+    // bus slot; therefore the transition condition is its inverse.
+    const bool enteringGetPhase = m_bus ? !m_bus->dmaGetCycle() : !m_apuPhase;
+    if (m_frameIrqClearPending && enteringGetPhase) {
+        m_frameIrqFlag = false;
+        m_frameIrqClearPending = false;
+    }
+
+    // Writes to $4017 do not reset/switch the sequencer on the CPU write
+    // cycle. The divider alignment delays that effect by 3 or 4 CPU clocks.
+    // Bit 6 (IRQ inhibit) is handled immediately in cpuWrite(); only the mode
+    // and sequencer restart wait for this countdown.
+    if (m_frameResetDelay != 0) {
+        --m_frameResetDelay;
+        if (m_frameResetDelay == 0) {
+            m_frameMode5 = m_pendingFrameMode5;
+            // The externally observed frame sequence is referenced to the
+            // $4017 write, while the divider reset itself is delayed by its
+            // CPU/APU phase. Seed the elapsed portion without compensating
+            // away the real one-clock jitter between the two write phases.
+            m_frameCycles = m_pendingFrameStartCycles;
+
+            // Entering 5-step mode generates the initial quarter+half clock
+            // at the same delayed instant as the sequencer reset.
+            if (m_frameMode5) {
+                quarterFrame();
+                halfFrame();
+            }
+        }
+
         applyPendingLengthWrites();
         return;
     }
 
     ++m_frameCycles;
-    const uint32_t jitter = m_frameJitter;
 
     if (!m_frameMode5) {
-        // Blargg's hardware measurements, relative to the actual CPU write
-        // at cycle 0. IRQ is asserted on three consecutive frame clocks.
-        if (m_frameCycles == 7459u + jitter) {
+        const uint32_t q1 = (m_timing == ConsoleTiming::PAL) ? 8313u : 7457u;
+        const uint32_t qh2 = (m_timing == ConsoleTiming::PAL) ? 16627u : 14913u;
+        const uint32_t q3 = (m_timing == ConsoleTiming::PAL) ? 24939u : 22371u;
+        const uint32_t irq0 = (m_timing == ConsoleTiming::PAL) ? 33252u : 29828u;
+        const uint32_t qh4 = (m_timing == ConsoleTiming::PAL) ? 33253u : 29829u;
+        const uint32_t reset = (m_timing == ConsoleTiming::PAL) ? 33254u : 29830u;
+        // Region-specific 4-step sequence, counted from the delayed $4017 divider reset.
+        // The frame IRQ flag rises one clock before the final quarter/half
+        // clock, remains asserted across the following clocks, and is cleared
+        // only by $4015 read or IRQ-inhibit control.
+        if (m_frameCycles == q1) {
             quarterFrame();
         }
-        else if (m_frameCycles == 14915u + jitter) {
-            quarterFrame();
-            halfFrame();
-        }
-        else if (m_frameCycles == 22373u + jitter) {
-            quarterFrame();
-        }
-        else if (m_frameCycles == 29830u + jitter) {
-            if (!m_irqInhibit)
-                m_frameIrqFlag = true;
-        }
-        else if (m_frameCycles == 29831u + jitter) {
+        else if (m_frameCycles == qh2) {
             quarterFrame();
             halfFrame();
-            if (!m_irqInhibit)
-                m_frameIrqFlag = true;
         }
-        else if (m_frameCycles == 29832u + jitter) {
-            if (!m_irqInhibit)
-                m_frameIrqFlag = true;
-
-            // The 4-step sequence repeats every 29830 CPU clocks. Keeping
-            // the counter at 2 reproduces the next step-1 time of 37289.
-            m_frameCycles = 2;
-            m_frameJitter = 0;
+        else if (m_frameCycles == q3) {
+            quarterFrame();
+        }
+        else if (m_frameCycles == irq0) {
+            // The internal frame-IRQ flag pulses on the first two terminal
+            // clocks even when IRQ output is inhibited.  Bit 6 of $4017
+            // gates the IRQ pin, not these two internal latch-set events.
+            m_frameIrqFlag = true;
+        }
+        else if (m_frameCycles == qh4) {
+            quarterFrame();
+            halfFrame();
+            m_frameIrqFlag = true;
+        }
+        else if (m_frameCycles == reset) {
+            // On the third terminal clock inhibition finally determines the
+            // stored flag state.
+            m_frameIrqFlag = !m_irqInhibit;
+            m_frameCycles = 0;
         }
     }
     else {
-        // 5-step mode has an initial half/quarter clock one clock after a
-        // mode write (two clocks on the opposite APU phase) and no frame IRQ.
-        if (m_frameCycles == 1u + jitter) {
+        const uint32_t q1 = (m_timing == ConsoleTiming::PAL) ? 8313u : 7457u;
+        const uint32_t qh2 = (m_timing == ConsoleTiming::PAL) ? 16627u : 14913u;
+        const uint32_t q3 = (m_timing == ConsoleTiming::PAL) ? 24939u : 22371u;
+        const uint32_t qh5 = (m_timing == ConsoleTiming::PAL) ? 41561u : 37281u;
+        // Region-specific 5-step sequence. The initial quarter+half clock is generated
+        // by the delayed $4017 reset above; the ordinary sequence then has a
+        // blank fourth step and never generates a frame IRQ.
+        if (m_frameCycles == q1) {
+            quarterFrame();
+        }
+        else if (m_frameCycles == qh2) {
             quarterFrame();
             halfFrame();
         }
-        else if (m_frameCycles == 7459u + jitter) {
+        else if (m_frameCycles == q3) {
             quarterFrame();
         }
-        else if (m_frameCycles == 14915u + jitter) {
+        else if (m_frameCycles == qh5) {
             quarterFrame();
             halfFrame();
-        }
-        else if (m_frameCycles == 22373u + jitter) {
-            quarterFrame();
-        }
-        else if (m_frameCycles == 37283u + jitter) {
-            quarterFrame();
-            halfFrame();
-            m_frameCycles = 1;
-            m_frameJitter = 0;
+            // The 5-step sequence has a one-CPU-clock-longer wrap interval
+            // than a simple zero restart would produce.  Starting at -1
+            // (UINT32_MAX) makes the next q1/qh2 events occur 7458/14914
+            // clocks after this step-0 event, matching blargg's hardware
+            // measurements (including the 52197/52198 third-length edge).
+            m_frameCycles = UINT32_MAX;
         }
     }
 
@@ -728,7 +921,10 @@ float APU::filterOutput(float s)
     // Reserve digital headroom because cartridge expansion audio is summed
     // after the 2A03 DAC model. This is output gain only, not a hardware-level
     // calibration constant; relative channel/chip levels are determined above.
-    constexpr double outputHeadroom = 0.60;
+    // Keep enough headroom for loud expansion-audio combinations while avoiding
+    // the unnecessarily quiet 0.60 gain used by the previous phase. 0.85 keeps
+    // normal 2A03 output materially louder without changing channel balance.
+    constexpr double outputHeadroom = 0.85;
     return std::clamp(float(y * outputHeadroom * double(m_masterVolume)), -1.0f, 1.0f);
 }
 
@@ -761,18 +957,61 @@ void APU::clock()
 
     const bool dmcBufferWasFull = m_dmc.sampleBufferFull;
     m_dmc.clockTimer();
-    if (m_dmc.explicitStopWindow != 0) {
-        if (dmcBufferWasFull && !m_dmc.sampleBufferFull) {
-            // Playback was explicitly stopped in the APU cycle immediately
-            // preceding the buffer-empty event that would have created a
-            // reload DMA. Preserve only the hardware's one-cycle abort.
+    const bool dmcBufferEmptied = dmcBufferWasFull && !m_dmc.sampleBufferFull;
+
+    // The DMC stop-DMA bug is tied to the output unit emptying the sample
+    // buffer shortly after playback has stopped. A DMA already in flight is
+    // not cancelled by $4015; it finishes normally. If the stop occurred in
+    // the APU cycle immediately before a reload would have been scheduled,
+    // however, the reload survives only as a one-cycle HALT attempt.
+    if (dmcBufferEmptied) {
+        if (m_dmc.enabled && m_dmc.bytesRemaining != 0 &&
+            !m_dmc.dmaLoadPending && m_dmc.dmaStartDelay != 0) {
+            m_dmc.dmaReloadWaitingForEnable = true;
+        }
+        if (m_dmc.sampleLength == 1)
+            traceImplicitDmc(m_bus, "BUFFER_EMPTIED", m_dmc.bytesRemaining, m_dmc.sampleLength, m_dmc.enabled, m_dmc.loop, m_dmc.sampleBufferFull, m_dmc.bitsRemaining, m_dmc.timer, m_dmc.implicitStopWindow, m_dmc.dmaAbortPending, m_dmc.dmaForcedReloadPending, m_dmc.dmaPending);
+        // The first explicit-stop position is not an aborted one-cycle DMA:
+        // the reload has already committed inside the memory reader and still
+        // completes as a normal four-cycle transfer. One and two clocks later
+        // the surviving request is only the single HALT pulse.
+        if (m_dmc.stopBugWindow == 3)
+            m_dmc.dmaForcedReloadPending = true;
+        else if (m_dmc.stopBugWindow != 0 || m_dmc.implicitStopWindow != 0) {
+            // A one-byte implicit abort is latched by the output unit on this
+            // clock, but its RDY/HALT attempt is not visible until the next
+            // DMA arbitration opportunity.  Do not let the request created
+            // here run later in this same Bus::clock() call.  This distinction
+            // matters when the following CPU cycle is a JSR stack write: the
+            // one-cycle DMA must then be suppressed rather than having already
+            // consumed its halt one clock too early.  Explicit $4015-stop
+            // aborts keep their established timing.
+            const bool implicitAbort = (m_dmc.stopBugWindow == 0 && m_dmc.implicitStopWindow != 0);
             m_dmc.dmaAbortPending = true;
-            m_dmc.explicitStopWindow = 0;
+            m_dmc.dmaImplicitAbortPending = implicitAbort;
+            // APU::clock() runs before the CPU slot in Bus::clock().  Deferring
+            // scheduling for the remainder of this clock is sufficient: the
+            // next APU scheduler pass corresponds to the immediately following
+            // CPU bus cycle.  No additional delay is required.
+            m_dmc.dmaImplicitAbortDelay = 0;
+            // The output-unit edge occurs before the CPU bus slot in this
+            // Bus::clock(), so the one-cycle RDY pulse is visible immediately
+            // on that same CPU cycle. Deferring it would shift the pulse onto
+            // the following instruction cycle and break the write-suppression
+            // boundary measured by AccuracyCoin.
+            if (m_dmc.sampleLength == 1)
+                traceImplicitDmc(m_bus, "BUFFER_EMPTY_ARM_ABORT", m_dmc.bytesRemaining, m_dmc.sampleLength, m_dmc.enabled, m_dmc.loop, m_dmc.sampleBufferFull, m_dmc.bitsRemaining, m_dmc.timer, m_dmc.implicitStopWindow, m_dmc.dmaAbortPending, m_dmc.dmaForcedReloadPending, m_dmc.dmaPending);
         }
-        else {
-            --m_dmc.explicitStopWindow;
-        }
+        m_dmc.stopBugWindow = 0;
+        m_dmc.implicitStopWindow = 0;
     }
+    else {
+        if (m_dmc.stopBugWindow != 0)
+            --m_dmc.stopBugWindow;
+        if (m_dmc.implicitStopWindow != 0)
+            --m_dmc.implicitStopWindow;
+    }
+
     scheduleDmcDma();
 
     // Integrate the CPU-clock DAC across the exact host-sample window. A
@@ -834,8 +1073,12 @@ uint8_t APU::cpuRead(uint16_t addr) const
         if (m_dmc.bytesRemaining > 0) v |= 0x10;
         if (m_frameIrqFlag) v |= 0x40;
         if (m_dmc.irqFlag) v |= 0x80;
-        // Reading $4015 clears the frame IRQ flag (not DMC IRQ)
-        m_frameIrqFlag = false;
+        // $4015 does not clear the frame IRQ latch combinationally.  The
+        // clear is sampled by the APU on its next GET phase.  This matters
+        // for back-to-back reads: a read on PUT followed by one on GET sees
+        // the flag set twice, and the GET phase clears it only after the
+        // second read has completed (AccuracyCoin Frame Counter IRQ test 7).
+        m_frameIrqClearPending = true;
         return v;
     }
     return 0;
@@ -917,7 +1160,7 @@ void APU::cpuWrite(uint16_t addr, uint8_t data)
         break;
     case 0x400E:
         m_noise.mode = (data & 0x80) != 0;
-        m_noise.timerPeriod = noisePeriods[data & 0x0F];
+        m_noise.timerPeriod = (m_timing == ConsoleTiming::PAL ? noisePeriodsPal : noisePeriodsNtsc)[data & 0x0F];
         break;
     case 0x400F:
         m_noise.pendingLengthValue = lengthTable[(data >> 3) & 0x1F];
@@ -928,7 +1171,7 @@ void APU::cpuWrite(uint16_t addr, uint8_t data)
     case 0x4010:
         m_dmc.irqEnabled = (data & 0x80) != 0;
         m_dmc.loop = (data & 0x40) != 0;
-        m_dmc.rate = dmcRates[data & 0x0F];
+        m_dmc.rate = (m_timing == ConsoleTiming::PAL ? dmcRatesPal : dmcRatesNtsc)[data & 0x0F];
         if (!m_dmc.irqEnabled)
             m_dmc.irqFlag = false;
         break;
@@ -942,55 +1185,102 @@ void APU::cpuWrite(uint16_t addr, uint8_t data)
         m_dmc.sampleLength = ((uint16_t)data << 4) + 1;
         break;
 
-    case 0x4015:
+    case 0x4015: {
         m_pulse1.enabled = (data & 0x01) != 0;
         m_pulse2.enabled = (data & 0x02) != 0;
         m_triangle.enabled = (data & 0x04) != 0;
         m_noise.enabled = (data & 0x08) != 0;
-        m_dmc.enabled = (data & 0x10) != 0;
+        const bool dmcEnableWrite = (data & 0x10) != 0;
+        if (m_dmc.sampleLength == 1 || dmcEnableWrite)
+            traceImplicitDmc(m_bus, dmcEnableWrite ? "WRITE4015_ENABLE" : "WRITE4015_DISABLE", m_dmc.bytesRemaining, m_dmc.sampleLength, m_dmc.enabled, m_dmc.loop, m_dmc.sampleBufferFull, m_dmc.bitsRemaining, m_dmc.timer, m_dmc.implicitStopWindow, m_dmc.dmaAbortPending, m_dmc.dmaForcedReloadPending, m_dmc.dmaPending);
         if (!m_pulse1.enabled) { m_pulse1.length = 0; m_pulse1.pendingLengthReload = false; }
         if (!m_pulse2.enabled) { m_pulse2.length = 0; m_pulse2.pendingLengthReload = false; }
         if (!m_triangle.enabled) { m_triangle.length = 0; m_triangle.pendingLengthReload = false; }
         if (!m_noise.enabled) { m_noise.length = 0; m_noise.pendingLengthReload = false; }
-        if (!m_dmc.enabled) {
-            // $4015 stops the memory reader immediately. If a load/reload DMA
-            // has only been requested and has not yet acquired RDY, abort it
-            // as well; once RDY has been acquired the CPU cannot execute this
-            // write until that DMA finishes.
+        if (!dmcEnableWrite) {
+            // Stopping playback sets bytes_remaining to zero immediately, but
+            // does not cancel a DMA that has already been scheduled/acquired.
+            // The only post-stop DMA is the documented one-cycle reload pulse
+            // when the output unit empties the buffer in the immediately
+            // following APU timing window.
+            m_dmc.enabled = false;
             m_dmc.bytesRemaining = 0;
             m_dmc.dmaStartDelay = 0;
             m_dmc.dmaLoadPending = false;
-            m_dmc.dmaAbortPending = false;
-            // Keep a two-CPU-clock observation window. If the output unit
-            // empties the sample buffer in this immediately following APU
-            // cycle, hardware generates the one-cycle explicit-stop abort.
-            m_dmc.explicitStopWindow = m_dmc.sampleBufferFull ? 2 : 0;
-            if (m_dmc.dmaPending && m_bus && m_bus->cancelDmcDma())
-                m_dmc.dmaPending = false;
+            m_dmc.dmaReloadWaitingForEnable = false;
+            m_dmc.stopBugWindow = 3;
         }
-        else if (m_dmc.bytesRemaining == 0) {
-            m_dmc.explicitStopWindow = 0;
-            m_dmc.dmaAbortPending = false;
-            m_dmc.start();
-            m_dmc.dmaStartDelay = 3;
-            m_dmc.dmaLoadPending = true;
+        else {
+            m_dmc.stopBugWindow = 0;
+            m_dmc.implicitStopWindow = 0;
+            m_dmc.enabled = true;
+            if (m_dmc.bytesRemaining == 0) {
+                m_dmc.dmaAbortPending = false;
+                m_dmc.dmaImplicitAbortPending = false;
+                m_dmc.dmaImplicitAbortDelay = 0;
+                m_dmc.dmaForcedReloadPending = false;
+                m_dmc.dmaReloadWaitingForEnable = false;
+                m_dmc.start();
+                m_dmc.dmaStartDelay = 3;
+                // If the sample buffer is already occupied, no load DMA can
+                // occur. When the output unit later consumes that byte, the
+                // memory reader performs an ordinary reload DMA. Keep the
+                // enable delay above, but do not misclassify the future fetch
+                // as a GET-aligned load.
+                m_dmc.dmaLoadPending = !m_dmc.sampleBufferFull;
+            }
         }
         // Writing $4015 clears the DMC IRQ flag
         m_dmc.irqFlag = false;
         break;
+    }
 
     case 0x4017:
-        m_frameMode5 = (data & 0x80) != 0;
+        // If an earlier $4017 write's delayed reset is due later in this same
+        // CPU clock, do not let this new write overwrite it. Consecutive
+        // STA $4017 instructions are four clocks apart and hardware can
+        // therefore produce two distinct 5-step immediate half-frame clocks.
+        if (m_frameResetDelay == 1) {
+            m_frameResetDelay = 0;
+            m_frameMode5 = m_pendingFrameMode5;
+            m_frameCycles = m_pendingFrameStartCycles;
+            if (m_frameMode5) { quarterFrame(); halfFrame(); }
+        }
+
+        // IRQ inhibit is immediate: setting bit 6 also acknowledges an
+        // already-pending frame IRQ. The sequencer mode/reset, however, is
+        // delayed by divider phase. clockFrameCounterPhase() still runs later
+        // in this same CPU clock, so seed the countdown one higher to obtain
+        // an externally observable 3/4-clock delay after the write.
         m_irqInhibit = (data & 0x40) != 0;
         if (m_irqInhibit)
             m_frameIrqFlag = false;
 
-        // The documented step timings are measured from the actual CPU bus
-        // write (cycle 0). Opposite APU phases shift the first sequence by
-        // one CPU clock; subsequent repeats retain the resulting phase.
-        m_frameCycles = 0;
-        m_frameJitter = m_apuPhase ? 1 : 0;
-        m_frameWriteThisCycle = true;
+        m_pendingFrameMode5 = (data & 0x80) != 0;
+
+        // The divider reset/mode switch is visible 3 or 4 CPU clocks after
+        // the write. Restore the divider polarity used before Phase 50: that
+        // polarity is required by blargg's basic $80 immediate-clock test.
+        // clockFrameCounterPhase() decrements the countdown later in this same
+        // CPU clock, hence seeds of 4 and 5 produce external delays of 3/4.
+        //
+        // The actual frame-event epoch is write-relative, however. At the
+        // delayed reset, seed m_frameCycles with delay-2 (1 or 2). Combined
+        // with the decoded 7457/14913/... counts this yields the hardware-tested
+        // write-relative events at 7459/14915/... instead of starting them 3/4
+        // clocks late from the divider-reset instant.
+        if (m_apuPhase) {
+            m_frameResetDelay = 4;
+            m_pendingFrameStartCycles = 1;
+        }
+        else {
+            m_frameResetDelay = 5;
+            // Do not compensate away the divider's one-clock jitter.  The
+            // slower reset phase must leave the subsequent frame events one
+            // CPU clock later; blargg's clock_jitter test observes exactly
+            // this difference after shifting a $4017 write by one clock.
+            m_pendingFrameStartCycles = 1;
+        }
         break;
     }
 }
@@ -1091,17 +1381,24 @@ void APU::saveState(std::vector<uint8_t>& out) const
     put8(m_dmc.dmaPending ? 1 : 0);
     put8(m_dmc.dmaStartDelay);
     put8(m_dmc.dmaLoadPending ? 1 : 0);
-    put8(m_dmc.explicitStopWindow);
+    put8(m_dmc.dmaReloadWaitingForEnable ? 1 : 0);
+    put8(m_dmc.stopBugWindow);
+    put8(m_dmc.implicitStopWindow);
     put8(m_dmc.dmaAbortPending ? 1 : 0);
+    put8(m_dmc.dmaImplicitAbortPending ? 1 : 0);
+    put8(m_dmc.dmaImplicitAbortDelay);
+    put8(m_dmc.dmaForcedReloadPending ? 1 : 0);
     put8(static_cast<uint8_t>(m_dmcCpuRevision));
 
     put8(m_frameMode5 ? 1 : 0);
     put8(m_irqInhibit ? 1 : 0);
     put8(m_frameIrqFlag ? 1 : 0);
+    put8(m_frameIrqClearPending ? 1 : 0);
     put32(m_frameCycles);
     put8(m_apuPhase ? 1 : 0);
-    put8(m_frameJitter);
-    put8(m_frameWriteThisCycle ? 1 : 0);
+    put8(m_frameResetDelay);
+    put8(m_pendingFrameStartCycles);
+    put8(m_pendingFrameMode5 ? 1 : 0);
     put8(m_chipMod ? 1 : 0);
     putDouble(m_sampleTimer);
 }
@@ -1198,20 +1495,23 @@ bool APU::loadState(const uint8_t*& p, const uint8_t* end)
         !get16(m_dmc.sampleAddr) || !get16(m_dmc.sampleLength) ||
         !get16(m_dmc.currentAddr) || !get16(m_dmc.bytesRemaining) ||
         !getBool(m_dmc.dmaPending) || !get8(m_dmc.dmaStartDelay) ||
-        !getBool(m_dmc.dmaLoadPending) || !get8(m_dmc.explicitStopWindow) ||
-        !getBool(m_dmc.dmaAbortPending)) return false;
+        !getBool(m_dmc.dmaLoadPending) || !getBool(m_dmc.dmaReloadWaitingForEnable) ||
+        !get8(m_dmc.stopBugWindow) ||
+        !get8(m_dmc.implicitStopWindow) || !getBool(m_dmc.dmaAbortPending) ||
+        !getBool(m_dmc.dmaImplicitAbortPending) || !get8(m_dmc.dmaImplicitAbortDelay) ||
+        !getBool(m_dmc.dmaForcedReloadPending)) return false;
     uint8_t dmcRevision = 0;
     if (!get8(dmcRevision) || dmcRevision > static_cast<uint8_t>(DmcCpuRevision::Mid1990OrLater))
         return false;
     m_dmcCpuRevision = static_cast<DmcCpuRevision>(dmcRevision);
-    if (m_dmc.dmaStartDelay > 3 || m_dmc.explicitStopWindow > 2) return false;
+    if (m_dmc.dmaStartDelay > 3 || m_dmc.stopBugWindow > 3 || m_dmc.implicitStopWindow > 3 || m_dmc.dmaImplicitAbortDelay > 1) return false;
 
     if (!getBool(m_frameMode5) || !getBool(m_irqInhibit) ||
-        !getBool(m_frameIrqFlag) || !get32(m_frameCycles) ||
-        !getBool(m_apuPhase) || !get8(m_frameJitter) ||
-        !getBool(m_frameWriteThisCycle) || !getBool(m_chipMod) ||
+        !getBool(m_frameIrqFlag) || !getBool(m_frameIrqClearPending) || !get32(m_frameCycles) ||
+        !getBool(m_apuPhase) || !get8(m_frameResetDelay) ||
+        !get8(m_pendingFrameStartCycles) || !getBool(m_pendingFrameMode5) || !getBool(m_chipMod) ||
         !getDouble(m_sampleTimer)) return false;
-    if (m_frameJitter > 1) return false;
+    if (m_frameResetDelay > 5 || m_pendingFrameStartCycles > 2) return false;
 
     // Pending length-control/reload flags exist only between a CPU register
     // access and the frame-counter phase of the same Bus clock. Save states

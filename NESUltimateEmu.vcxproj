@@ -74,7 +74,9 @@
     <ClInclude Include="src\core\APU.hpp" />
     <ClInclude Include="src\core\Cartridge.hpp" />
     <ClInclude Include="src\core\Mapper.hpp" />
+    <ClInclude Include="src\core\RomDatabase.hpp" />
     <ClInclude Include="src\frontend\Frontend.hpp" />
+      <ClInclude Include="src\core\Timing.hpp" />
   </ItemGroup>
 
   <!-- ImGui sources -->

@@ -3,15 +3,38 @@
   <ItemGroup>
     <Filter Include="Tests"><UniqueIdentifier>{A2D7C18E-7DF2-4DB3-B108-25F25A000002}</UniqueIdentifier></Filter>
     <Filter Include="Core"><UniqueIdentifier>{A2D7C18E-7DF2-4DB3-B108-25F25A000003}</UniqueIdentifier></Filter>
+    <Filter Include="Tests\Probes"><UniqueIdentifier>{A2D7C18E-7DF2-4DB3-B108-25F25A000004}</UniqueIdentifier></Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="tests\HeadlessRunner.cpp"><Filter>Tests</Filter></ClCompile>
+    <ClCompile Include="tests\probes\ProbeSuite.cpp"><Filter>Tests\Probes</Filter></ClCompile>
+    <ClCompile Include="tests\probes\InterruptHijackProbe.cpp"><Filter>Tests\Probes</Filter></ClCompile>
+    <ClCompile Include="tests\probes\DmcLoadStartProbe.cpp"><Filter>Tests\Probes</Filter></ClCompile>
+    <ClCompile Include="tests\probes\PpuOpenBusOamProbe.cpp"><Filter>Tests\Probes</Filter></ClCompile>
+    <ClCompile Include="tests\probes\DmcPpuConflictProbe.cpp"><Filter>Tests\Probes</Filter></ClCompile>
+    <ClCompile Include="tests\probes\DmcApuConflictProbe.cpp"><Filter>Tests\Probes</Filter></ClCompile>
     <ClCompile Include="src\core\CPU.cpp"><Filter>Core</Filter></ClCompile>
     <ClCompile Include="src\core\Bus.cpp"><Filter>Core</Filter></ClCompile>
     <ClCompile Include="src\core\PPU.cpp"><Filter>Core</Filter></ClCompile>
     <ClCompile Include="src\core\APU.cpp"><Filter>Core</Filter></ClCompile>
     <ClCompile Include="src\core\Cartridge.cpp"><Filter>Core</Filter></ClCompile>
     <ClCompile Include="src\core\Mapper.cpp"><Filter>Core</Filter></ClCompile>
+    <ClCompile Include="tests\probes\PpuConformanceProbe.cpp">
+      <Filter>Tests\Probes</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\probes\CpuConformanceProbe.cpp">
+      <Filter>Tests\Probes</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\probes\TimingConformanceProbe.cpp"><Filter>Tests\Probes</Filter></ClCompile>
+    <ClCompile Include="tests\probes\ApuConformanceProbe.cpp">
+      <Filter>Tests\Probes</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\probes\MapperConformanceProbe.cpp">
+      <Filter>Tests\Probes</Filter>
+    </ClCompile>
+    <ClCompile Include="tests\probes\CartridgeConformanceProbe.cpp">
+      <Filter>Tests\Probes</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\core\CPU.hpp"><Filter>Core</Filter></ClInclude>
@@ -20,5 +43,18 @@
     <ClInclude Include="src\core\APU.hpp"><Filter>Core</Filter></ClInclude>
     <ClInclude Include="src\core\Cartridge.hpp"><Filter>Core</Filter></ClInclude>
     <ClInclude Include="src\core\Mapper.hpp"><Filter>Core</Filter></ClInclude>
+    <ClInclude Include="src\core\RomDatabase.hpp"><Filter>Core</Filter></ClInclude>
+    <ClInclude Include="tests\probes\ProbeSuite.hpp"><Filter>Tests\Probes</Filter></ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="tests\probes\dmc_apu_conflict.nes"><Filter>Tests\Probes</Filter></None>
+    <None Include="tests\probes\dmc_ppu_conflict_probe.nes"><Filter>Tests\Probes</Filter></None>
+    <None Include="tests\probes\dmc_ppu_conflict_probe_align.nes"><Filter>Tests\Probes</Filter></None>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\core\Timing.hpp"><Filter>Core</Filter></ClInclude>
+    <ClCompile Include="tests\probes\DmaArbitrationProbe.cpp">
+      <Filter>Source Files\tests\probes</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

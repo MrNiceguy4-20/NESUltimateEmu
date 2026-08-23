@@ -61,8 +61,14 @@
     <ClInclude Include="src\core\Mapper.hpp">
       <Filter>Core</Filter>
     </ClInclude>
+    <ClInclude Include="src\core\RomDatabase.hpp">
+      <Filter>Core</Filter>
+    </ClInclude>
     <ClInclude Include="src\frontend\Frontend.hpp">
       <Filter>Frontend</Filter>
     </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\core\Timing.hpp"><Filter>Core</Filter></ClInclude>
   </ItemGroup>
 </Project>

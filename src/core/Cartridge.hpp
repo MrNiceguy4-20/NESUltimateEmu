@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include "Mapper.hpp"
+#include "Timing.hpp"
 
 class CPU;
 
@@ -16,6 +17,8 @@ public:
     ~Cartridge();
 
     bool loadFromFile(const std::string& path);
+    bool loadFromMemory(const std::vector<uint8_t>& data, const std::string& logicalPath,
+        const std::string& containerPath = std::string());
     void connectCPU(CPU* cpu) { m_cpu = cpu; }
 
     void saveBattery() const;
@@ -35,6 +38,8 @@ public:
     uint8_t submapper() const { return m_submapper; }
     bool isNes20() const { return m_nes20; }
     bool isFds() const { return m_fds; }
+    ConsoleTiming timing() const { return m_timing; }
+    bool isMultiRegion() const { return m_multiRegion; }
     bool mapperSupported() const { return m_mapper && m_mapper->implementationSupported(); }
     Mirror mirroring() const { return m_mapper ? m_mapper->mirroring() : m_headerMirror; }
     bool hasChrRam() const { return !m_chrRam.empty(); }
@@ -54,10 +59,12 @@ public:
     // must remain CPU open bus instead of being forced to zero.
     bool cpuRead(uint16_t addr, uint8_t& data);
     void    cpuWrite(uint16_t addr, uint8_t data, uint64_t cpuCycle = ~uint64_t(0));
+    void    observeCpuWrite(uint16_t addr, uint8_t data);
     uint8_t ppuRead(uint16_t addr, PpuFetchKind kind = PpuFetchKind::Cpu);
     void    ppuWrite(uint16_t addr, uint8_t data);
     bool    mapPatternCiram(uint16_t addr, uint32_t& mapped) const;
     bool    mapNametable(uint16_t addr, NametableSource& source, uint32_t& mapped) const;
+    bool    mapNametableWrite(uint16_t addr, NametableSource& source, uint32_t& mapped) const;
     uint8_t readNametableBacking(NametableSource source, uint32_t mapped) const;
     void    writeNametableBacking(NametableSource source, uint32_t mapped, uint8_t data);
 
@@ -65,6 +72,10 @@ public:
     void notifyPpuScanline(int scanline, bool rendering);
     void clockCpu();
     void scanlineTick();
+    void resetMapper(bool hard);
+    // iNES RAM-cartridge extracts can request a hard-reset bootstrap through
+    // their trainer. Returns true when CPU reset completion should redirect.
+    bool hardResetBootstrap(uint16_t normalVector, uint16_t& entry, bool& jsr) const;
 
     void saveState(std::vector<uint8_t>& out) const;
     bool loadState(const uint8_t*& p, const uint8_t* end);
@@ -75,6 +86,10 @@ private:
     bool m_battery = false;
     bool m_nes20 = false;
     bool m_fds = false;
+    ConsoleTiming m_timing = ConsoleTiming::NTSC;
+    bool m_multiRegion = false;
+    bool m_hasTrainer = false;
+    uint16_t m_trainerLoadAddress = 0x7000;
 
     std::vector<uint8_t> m_prgRom;
     std::vector<uint8_t> m_chrRom;

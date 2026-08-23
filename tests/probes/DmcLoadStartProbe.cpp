@@ -20,9 +20,13 @@ static int runCase(int preclocks) {
     std::printf("writeParity=%llu onset=%d\n", (unsigned long long)(writeCycle&1), onset);
     return onset;
 }
-int main(){
+int runDmcLoadStartProbe(){
     int a=runCase(0); int b=runCase(1);
     bool ok=(a==4 && b==3) || (a==3 && b==4);
     std::puts(ok?"PASS":"FAIL");
     return ok?0:1;
 }
+
+#ifndef NES_PROBE_SUITE
+int main() { return runDmcLoadStartProbe(); }
+#endif

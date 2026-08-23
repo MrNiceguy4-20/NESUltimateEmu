@@ -29,6 +29,19 @@
   <PropertyGroup Label="UserMacros" />
   <ItemGroup>
     <ClCompile Include="tests\HeadlessRunner.cpp" />
+    <ClCompile Include="tests\probes\ProbeSuite.cpp" />
+    <ClCompile Include="tests\probes\InterruptHijackProbe.cpp" />
+    <ClCompile Include="tests\probes\DmcLoadStartProbe.cpp" />
+    <ClCompile Include="tests\probes\DmaArbitrationProbe.cpp" />
+    <ClCompile Include="tests\probes\PpuOpenBusOamProbe.cpp" />
+    <ClCompile Include="tests\probes\PpuConformanceProbe.cpp" />
+    <ClCompile Include="tests\probes\DmcPpuConflictProbe.cpp" />
+    <ClCompile Include="tests\probes\DmcApuConflictProbe.cpp" />
+    <ClCompile Include="tests\probes\CpuConformanceProbe.cpp" />
+    <ClCompile Include="tests\probes\TimingConformanceProbe.cpp" />
+    <ClCompile Include="tests\probes\ApuConformanceProbe.cpp" />
+    <ClCompile Include="tests\probes\MapperConformanceProbe.cpp" />
+    <ClCompile Include="tests\probes\CartridgeConformanceProbe.cpp" />
     <ClCompile Include="src\core\CPU.cpp" />
     <ClCompile Include="src\core\Bus.cpp" />
     <ClCompile Include="src\core\PPU.cpp" />
@@ -39,10 +52,19 @@
   <ItemGroup>
     <ClInclude Include="src\core\CPU.hpp" /><ClInclude Include="src\core\Bus.hpp" /><ClInclude Include="src\core\PPU.hpp" />
     <ClInclude Include="src\core\APU.hpp" /><ClInclude Include="src\core\Cartridge.hpp" /><ClInclude Include="src\core\Mapper.hpp" />
+    <ClInclude Include="src\core\RomDatabase.hpp" />
+    <ClInclude Include="tests\probes\ProbeSuite.hpp" />
+      <ClInclude Include="src\core\Timing.hpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="tests\probes\dmc_apu_conflict.nes"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
+    <None Include="tests\probes\dmc_ppu_conflict_probe.nes"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
+    <None Include="tests\probes\dmc_ppu_conflict_probe_align.nes"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
   </ItemGroup>
   <ItemDefinitionGroup>
     <ClCompile>
-      <PreprocessorDefinitions>NES_HEADLESS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NES_HEADLESS;NES_PROBE_SUITE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir)src\core;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <WarningLevel>Level4</WarningLevel>
     </ClCompile>

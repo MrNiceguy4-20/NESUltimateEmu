@@ -18,6 +18,9 @@ public:
     void reset();
     void clock();
     void nmi();   // Non-maskable interrupt (from PPU VBlank)
+    // Sample the asynchronous /NMI edge at the CPU input phase. The system
+    // bus calls this once per CPU clock at the RP2A03 sampling boundary.
+    void sampleNmiInput();
     // Cancel an asynchronous NMI edge that has not yet been sampled by the
     // CPU. The PPU uses this only for the very narrow VBlank race where a
     // $2002 read or $2000 NMI-disable immediately after VBlank suppresses an
@@ -33,10 +36,10 @@ public:
 
     // Canonical description of the CPU bus slot that would execute on the
     // next CPU clock. Every NMOS 6502 clock is externally a read or a write.
-    // `exact` is false only for instruction families that are still executed
-    // atomically by this core; those synthesized slots are deliberately
-    // visible so later cycle-conversion phases can remove them without hiding
-    // assumptions inside DMA code.
+    // `exact` is true for every executable opcode bus slot. The deliberate
+    // JAM/KIL halted state is the sole exception after its opcode fetch; a
+    // false value therefore remains a defensive signal that a finite CPU bus
+    // sequence is not authoritative and must not be treated as one by DMA.
     enum class BusCycleType : uint8_t { Read = 0, Write = 1 };
     struct BusCycle {
         BusCycleType type = BusCycleType::Read;
@@ -46,6 +49,23 @@ public:
         bool exact = false;
     };
     BusCycle nextBusCycle() const;
+
+    // Called by the system bus when RDY stretches the current CPU read.
+    // The unstable SH* store family has a documented NMOS quirk: if RDY is
+    // asserted on the provisional indexed read immediately before its write,
+    // the usual high-byte (H+1) mask drops out and the opcode degenerates to
+    // its underlying store (SHA->SAX-like, SHX->STX, SHY->STY, SHS->TXS/store).
+    void notifyRdyReadStall();
+
+#ifdef NES_HEADLESS
+    // Regression-only interrupt-latch observability. These accessors let the
+    // PPU conformance probe verify whether a generated NMI edge is still
+    // asynchronous/cancelable or has been committed by the CPU.
+    bool testNmiPending() const { return m_nmiPending || m_nmiSampled; }
+    bool testNmiPolled() const { return m_nmiPolled; }
+    uint8_t testAccumulator() const { return m_a; }
+    uint16_t testProgramCounter() const { return m_pc; }
+#endif
 
     // Save states
     void saveState(std::vector<uint8_t>& out) const;
@@ -68,6 +88,7 @@ private:
     // instruction boundary.  Looking at the live IRQ line only at the
     // boundary is too late and makes APU IRQs arrive one instruction early.
     bool m_nmiPending = false;
+    bool m_nmiSampled = false;
     bool m_nmiPolled = false;
     bool m_irqLine = false;
     bool m_irqPolled = false;
@@ -75,6 +96,7 @@ private:
     bool m_irqDisableBeforeInstruction = true;
     uint8_t m_currentOpcode = 0;
     bool m_branchPageCrossed = false;
+    bool m_unstableHighStoreRdy = false;
 
     // The CPU core is instruction-oriented, but external bus accesses still
     // need the correct relative cycle ordering. Loads/stores that use this
@@ -217,7 +239,11 @@ private:
         // Phase 26I: close remaining normal indexed-zero-page gaps.
         ZpXNop,
         ZpYLax,
-        ZpYSax
+        ZpYSax,
+
+        // Phase 27A: exact second-cycle execution for one-byte implied and
+        // accumulator instructions. Appended to preserve serialized enum values.
+        Implied
     };
     PendingIoOp m_pendingIoOp = PendingIoOp::None;
     uint16_t m_pendingIoAddr = 0;
@@ -241,6 +267,7 @@ private:
     bool isDirectMemorySequence() const;
     bool isDirectRmwSequence() const;
     bool isImmediateSequence() const;
+    bool isImpliedSequence() const;
     bool isJmpSequence() const;
     bool isBranchSequence() const;
     void clockResetSequence();
@@ -255,9 +282,11 @@ private:
     void clockDirectMemorySequence();
     void clockDirectRmwSequence();
     void clockImmediateSequence();
+    void clockImpliedSequence();
     void clockJmpSequence();
     void clockBranchSequence();
     void applyImmediate(uint8_t value);
+    void applyImplied();
     void applyDirectMemoryRead(uint8_t value);
     uint8_t directStoreValue() const;
     void applyAbsIndexedRead(uint8_t value);

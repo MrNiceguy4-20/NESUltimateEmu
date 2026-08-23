@@ -3,6 +3,7 @@
 #include "imgui.h"
 #include <array>
 #include <string>
+#include "../core/Timing.hpp"
 
 class CPU;
 class Bus;
@@ -57,6 +58,9 @@ private:
     bool m_settingsOpen = false;
     float m_masterVolume = 1.50f;
 
+    enum class TimingOverride : int { Auto = 0, NTSC = 1, PAL = 2, Dendy = 3 };
+    TimingOverride m_timingOverride = TimingOverride::Auto;
+
     void processEvents();
     void updateControllers();
     void drawUI();
@@ -74,6 +78,8 @@ private:
     void setDefaultBindings();
     void loadFrontendConfig();
     void saveFrontendConfig() const;
+    ConsoleTiming effectiveTiming() const;
+    void applyTimingOverride(bool resetSystem);
     bool handleBindingCapture(const SDL_Event& e);
     bool handleHotkey(SDL_Keycode key);
     void saveState();

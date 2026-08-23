@@ -3,6 +3,7 @@
 #include <array>
 #include <vector>
 #include "Mapper.hpp"
+#include "Timing.hpp"
 
 class Cartridge;
 class CPU;
@@ -24,6 +25,12 @@ public:
     void powerOn();
 
     void clock();
+    void setTiming(ConsoleTiming timing);
+    ConsoleTiming timing() const { return m_timing; }
+    // CPU/PPU master-clock subphase class used for CPU-side PPU I/O timing.
+    // False is the established/default alignment; true selects the alternate
+    // alignment observed by hardware tests for delayed register effects.
+    void setCpuPpuIoLatePhase(bool late) { m_cpuPpuIoLatePhase = late; }
 
     uint8_t cpuRead(uint16_t addr);
     void    cpuWrite(uint16_t addr, uint8_t data);
@@ -46,6 +53,62 @@ public:
     uint8_t testReadBuffer() const { return m_dataBuffer; }
     uint8_t testStatus() const { return m_status; }
     bool testWriteToggle() const { return m_w; }
+    bool testSpriteZeroPossible() const { return m_spriteZeroPossible; }
+    uint8_t testSpriteX(unsigned slot) const { return slot < 8 ? m_spriteX[slot] : 0; }
+    uint8_t testSpriteAttr(unsigned slot) const { return slot < 8 ? m_spriteAttr[slot] : 0; }
+    void testClearFetchTrace() { m_testFetchTrace.clear(); }
+    const std::vector<uint32_t>& testFetchTrace() const { return m_testFetchTrace; }
+    void testBypassRegisterWriteInhibit() { m_registerWriteInhibitUntilClock = m_masterClock; }
+    bool testRegisterWriteInhibited() const { return registerWriteInhibited(); }
+    uint32_t testColor(uint8_t index) const { return nesColor(index); }
+    uint8_t testNmiCancelWindow() const { return m_nmiDelay; }
+    uint8_t testEffectiveRenderMask() const { return m_renderMask; }
+    uint8_t testRenderMaskDelay() const { return m_renderMaskDelay; }
+    uint8_t testVramAddressDelay() const { return m_vramAddressDelay; }
+    uint8_t testPpudataIncrementDelay() const { return m_ppudataIncrementDelay; }
+    bool testOamCorruptionPending() const { return m_oamCorruptionPending; }
+    uint8_t testOamCorruptionSeed() const { return m_oamCorruptionSeed; }
+    void testSetCpuPpuIoLatePhase(bool late) { m_cpuPpuIoLatePhase = late; }
+    uint16_t testTempVramAddress() const { return m_t; }
+    void testSetTimingPosition(int scanline, int cycle) { m_scanline = scanline; m_cycle = cycle; }
+    void testSetScrollAddresses(uint16_t v, uint16_t t) { m_v = v; m_t = t; }
+    void testForceEffectiveRenderMask(uint8_t mask) { m_mask = mask; m_renderMask = static_cast<uint8_t>(mask & 0x18); m_pendingRenderMask = m_renderMask; m_renderMaskDelay = 0; }
+    void testSetStatusFlags(uint8_t flags) { m_status = static_cast<uint8_t>((m_status & 0x1F) | (flags & 0xE0)); updateNmiLine(); }
+    bool testSpriteZeroHitRule(int cycle, bool spriteZeroActive, bool fgOpaque, bool bgOpaque) const {
+        return spriteZeroHitEligible(cycle, spriteZeroActive, fgOpaque ? 1 : 0, bgOpaque ? 1 : 0);
+    }
+    void testSetBackgroundPatternShifters(uint16_t lo, uint16_t hi) { m_bgShifterPatternLo = lo; m_bgShifterPatternHi = hi; }
+    void testClockBackgroundShifters() { updateBackgroundShifters(); }
+    uint16_t testBackgroundPatternLo() const { return m_bgShifterPatternLo; }
+    uint16_t testBackgroundPatternHi() const { return m_bgShifterPatternHi; }
+    // Prime a single visible pixel so conformance probes can exercise the
+    // real renderer/masking/collision path instead of only the helper rule.
+    void testPrimeSpriteZeroHitPixel(int cycle, uint8_t mask, bool bgOpaque = true, bool spriteOpaque = true, int scanline = 0) {
+        m_scanline = scanline;
+        m_cycle = cycle;
+        m_mask = mask;
+        m_renderMask = static_cast<uint8_t>(mask & 0x18);
+        m_pendingRenderMask = m_renderMask;
+        m_renderMaskDelay = 0;
+        m_status &= static_cast<uint8_t>(~0x40);
+        m_x = 0;
+        m_bgShifterPatternLo = bgOpaque ? 0xFFFF : 0x0000;
+        m_bgShifterPatternHi = 0;
+        m_bgShifterAttrLo = 0;
+        m_bgShifterAttrHi = 0;
+        m_spriteCount = 1;
+        m_spriteZeroPossible = true;
+        m_spriteX[0] = 0;
+        m_spriteAttr[0] = 0;
+        m_spriteShifterLo[0] = spriteOpaque ? 0xFF : 0x00;
+        m_spriteShifterHi[0] = 0;
+        for (unsigned i = 1; i < 8; ++i) {
+            m_spriteX[i] = 0xFF;
+            m_spriteShifterLo[i] = 0;
+            m_spriteShifterHi[i] = 0;
+            m_spriteAttr[i] = 0;
+        }
+    }
 #endif
 
     void saveState(std::vector<uint8_t>& out) const;
@@ -59,9 +122,17 @@ private:
     int  m_cycle = 0;
     bool m_frameComplete = false;
     bool m_oddFrame = false;
+    ConsoleTiming m_timing = ConsoleTiming::NTSC;
 
     uint8_t m_ctrl = 0;
     uint8_t m_mask = 0;
+    // CPU-visible PPUMASK is accepted immediately, but the two rendering
+    // enable signals (background/sprites) propagate through the PPU before
+    // reaching the rendering pipeline. Keep those effective bits separate so
+    // color emphasis/left clipping can remain tied to the register value.
+    uint8_t m_renderMask = 0;
+    uint8_t m_pendingRenderMask = 0;
+    uint8_t m_renderMaskDelay = 0;
     uint8_t m_status = 0;
     uint8_t m_oamAddr = 0;
 
@@ -71,21 +142,64 @@ private:
     bool     m_w = false;
 
     uint8_t m_dataBuffer = 0;
+    enum class RenderFetchTarget : uint8_t { None = 0, BgNt, BgAttr, BgLow, BgHigh, SpriteGarbage, SpriteLow, SpriteHigh, DummyNt337, DummyNt339 };
+    bool m_renderFetchPending = false;
+    uint16_t m_renderFetchAddress = 0;
+    PpuFetchKind m_renderFetchKind = PpuFetchKind::Background;
+    RenderFetchTarget m_renderFetchTarget = RenderFetchTarget::None;
+    uint8_t m_renderFetchSpriteSlot = 0;
+    bool m_renderFetchStoreData = true;
+    // External AD0-AD7 latch used by the PPU multiplexed address/data bus.
+    uint8_t m_ppuAddressLatchLow = 0;
+    bool m_renderAleThisClock = false;
+    uint16_t m_renderAleAddress = 0;
+    uint8_t m_renderAlePreviousLow = 0;
+    bool m_renderFetchLowOverride = false;
+    bool m_renderFetchUseLiveHigh = false;
+
+    // Rendering-time $2007 reads do not refill the buffer immediately.
+    // In this CPU/PPU scheduler phase, the external refill /RD matures six
+    // PPU dots after the CPU access point; its ALE phase occurs two dots
+    // earlier and can collide with the normal rendering cadence.
+    bool m_ppudataReadPending = false;
+    uint8_t m_ppudataReadDelay = 0;
+    uint16_t m_ppudataReadAddress = 0;
+    bool m_ppuBusReadThisClock = false;
+    uint8_t m_ppuBusReadData = 0;
+    uint16_t m_ppuBusReadAddress = 0;
+    // External /RD is active for a two-dot fetch window.  These fields carry
+    // the preceding dot's rendering read into the second half of that window
+    // so a coincident $2007 buffer refill sees the same memory result.
+    bool m_ppuBusReadHeldThisClock = false;
+    uint8_t m_ppuBusReadHeldData = 0;
+    uint16_t m_ppuBusReadHeldAddress = 0;
+    const char* m_ppuBusReadHeldSource = "none";
+    // Phase 102 instrumentation only. A CPU access to $2004/$2006/$2007
+    // opens a short trace window around the external PPU bus.
+    uint8_t m_ppuBusTraceDots = 0;
+    const char* m_ppuBusReadSource = "none";
     uint8_t m_oam[256] = {};
     uint8_t m_oamSecondary[32] = {};  // 8 sprites × 4 bytes
     uint8_t m_spriteCount = 0;
     bool    m_spriteZeroPossible = false;
     bool    m_spriteZeroBeingRendered = false;
 
-    // Dot-timed sprite evaluator state used for the $2002 overflow flag.
-    // Rendering still consumes the batch-built secondary OAM below, but the
-    // overflow detector follows primary OAM during dots 65-256 so flag timing
-    // and the hardware diagonal-byte bug remain externally observable.
+    // Dot-timed sprite evaluator state. Dots 65-256 both drive the externally
+    // visible OAM bus/overflow behavior and populate the secondary OAM that the
+    // renderer consumes during sprite fetch; there is no separate batch scan.
     uint8_t m_spriteEvalN = 0;      // primary OAM sprite index (0-64)
     uint8_t m_spriteEvalM = 0;      // byte within sprite (0-3)
     uint8_t m_spriteEvalFound = 0;  // sprites copied into secondary OAM (0-8)
     uint8_t m_spriteEvalData = 0;   // odd-dot primary OAM read latch
+    uint8_t m_spriteEvalStartAddr = 0; // OAMADDR sampled when evaluation begins
+    uint8_t m_spriteEvalCopyRemaining = 0; // +1 increments left after an in-range byte
+    uint8_t m_spriteEvalWrapBusData = 0xFF; // OAM2-side bus value latched when primary OAM wraps
+    uint8_t m_spriteEvalOverflowIncRemaining = 0; // +1 latch-chain steps after overflow in-range hit
+    bool    m_spriteEvalOverflowHandoff = false; // one evaluation pair where OAM2 owns the visible bus
     bool    m_spriteEvalFull = false;
+    bool    m_spriteEvalOverflowDiagonal = false; // secondary OAM full, diagonal bug still active
+    bool    m_spriteEvalWrapped = false; // primary OAM address overflowed during evaluation
+    bool    m_spriteZeroNext = false; // dot-66 in-range result for the next scanline
 
     // Per-sprite shift state for current scanline
     uint8_t m_spriteShifterLo[8] = {};
@@ -96,7 +210,14 @@ private:
     uint8_t m_nametable[4096] = {};  // 4KB for four-screen
     uint8_t m_palette[32] = {};
 
+#ifdef NES_PROBE_SUITE
+    // Probe functions intentionally instantiate many PPUs. Heap-backing the
+    // framebuffer in test builds prevents sanitizer-inflated stack frames from
+    // overflowing while leaving the production PPU layout unchanged.
+    std::vector<uint32_t> m_framebuffer = std::vector<uint32_t>(256 * 240);
+#else
     std::array<uint32_t, 256 * 240> m_framebuffer{};
+#endif
 
     // Background pipeline
     uint8_t  m_bgNextTileId = 0;
@@ -107,6 +228,11 @@ private:
     uint16_t m_bgShifterPatternHi = 0;
     uint16_t m_bgShifterAttrLo = 0;
     uint16_t m_bgShifterAttrHi = 0;
+    // True when the pattern-byte fetch at dot % 8 == 7 completed while
+    // rendering was enabled. The actual 16-bit shifter reload is applied at
+    // the following tile boundary in this renderer, but must be suppressed if
+    // forced blank covered the hardware reload dot.
+    bool m_bgPatternLoadArmed = false;
 
     // OAM decay (Mesen-style curve)
     uint64_t m_masterClock = 0;
@@ -122,38 +248,82 @@ private:
 
     // VBlank/NMI edge state. The PPU NMI output is effectively
     // (PPUSTATUS.VBlank && PPUCTRL.NMI-enable). A low-to-high edge is
-    // presented to the CPU immediately, but for the edge dot and the next
-    // PPU dot it remains cancelable by the VBlank race: reading $2002 or
-    // disabling NMI through $2000 can withdraw an edge not yet sampled.
+    // presented to the CPU immediately. A $2002 read on the set dot is
+    // handled by the register-race path; after the edge is created it remains
+    // cancelable through the immediately following PPU dot only.
     bool     m_nmiLine = false;
     uint8_t  m_nmiDelay = 0; // remaining cancelable PPU dots (legacy state slot)
     bool     m_suppressVBlank = false;
+    bool     m_renderingActiveLastClock = false;
+    bool     m_oamCorruptionPending = false;
+    uint8_t  m_oamCorruptionSeed = 0;
 
-    uint8_t  ppuRead(uint16_t addr, PpuFetchKind kind = PpuFetchKind::Cpu);
+    // After PPU reset, the internal reset signal continues clearing PPUCTRL,
+    // PPUMASK, PPUSCROLL/PPUADDR latches and the shared write toggle until
+    // near the end of the first frame. Writes to $2000/$2001/$2005/$2006
+    // are ignored during this interval; the other PPU ports remain live.
+    uint64_t m_registerWriteInhibitUntilClock = 0;
+
+    // A completed PPUADDR ($2006) pair does not reach the active VRAM/scroll
+    // address immediately. On 2C02-family hardware the t->v transfer appears
+    // roughly three PPU dots after the second CPU write. Keep the written value
+    // captured separately so later changes to t do not retroactively alter the
+    // in-flight transfer.
+    uint16_t m_pendingVramAddress = 0;
+    uint8_t  m_vramAddressDelay = 0;
+    uint8_t  m_ppudataIncrementDelay = 0;
+    bool m_ppudataIncrementPending = false;
+    bool m_cpuPpuIoLatePhase = false;
+    bool m_suppressScrollXThisClock = false;
+    bool m_suppressScrollYThisClock = false;
+
+#ifdef NES_HEADLESS
+    // Probe-only PPU address trace: scanline is intentionally omitted because
+    // the conformance probes clear this vector immediately before the window
+    // they inspect. Upper 16 bits = dot, lower 14 bits = PPU address.
+    std::vector<uint32_t> m_testFetchTrace;
+#endif
+
+    uint8_t  ppuRead(uint16_t addr, PpuFetchKind kind = PpuFetchKind::Cpu, bool driveAddress = true);
     void     ppuWrite(uint16_t addr, uint8_t data);
     uint16_t mirrorNametable(uint16_t addr) const;
 
     void setVBlank();
-    void clearVBlank();
+    void clearVBlank(bool allowPendingEdgeCancel = true);
     void updateNmiLine();
     void clockNmiDelay();
     void notifyPpuAddress(uint16_t addr);
-    bool renderingEnabled() const { return (m_mask & 0x18) != 0; }
+    void armPpuBusTrace(const char* event, uint16_t cpuAddr, uint8_t data = 0);
+    void tracePpuBus(const char* event, const char* source, uint16_t addr, uint8_t data);
+    bool renderingEnabled() const { return (m_renderMask & 0x18) != 0; }
+    bool backgroundRenderingEnabled() const { return (m_renderMask & 0x08) != 0; }
+    bool spriteRenderingEnabled() const { return (m_renderMask & 0x10) != 0; }
+    void beginRenderFetch(uint16_t addr, PpuFetchKind kind, RenderFetchTarget target, uint8_t spriteSlot = 0, bool storeData = true);
+    void completeRenderFetch();
+    void clockRenderMaskDelay();
+    void clockPpudataIncrementDelay();
+    void clockPpudataReadBufferDelay();
+    void clockVramAddressDelay();
+    bool registerWriteInhibited() const { return m_masterClock < m_registerWriteInhibitUntilClock; }
+    uint64_t registerWriteInhibitDuration() const;
 
     void loadBackgroundShifters();
     void updateBackgroundShifters();
     void incrementScrollX();
     void incrementScrollY();
+    void incrementVramAddressAfterCpuAccess();
     void transferAddressX();
     void transferAddressY();
 
-    void evaluateSprites();
     void resetSpriteOverflowEvaluation();
     void clockSpriteOverflowEvaluation();
     void rebuildSpriteOverflowEvaluation();
     bool spriteEvalValueInRange(uint8_t value) const;
-    void loadSpriteShifters();
+    void clockSpriteFetches();
+    uint16_t spritePatternAddress(uint8_t slot) const;
+    static uint8_t reverseBits(uint8_t value);
     void getSpritePixel(uint8_t& pixel, uint8_t& palette, uint8_t& priority);
+    static bool spriteZeroHitEligible(int cycle, bool spriteZeroActive, uint8_t fgPixel, uint8_t bgPixel);
 
     // OAM decay helpers
     void touchOamRow(uint8_t row);
@@ -163,6 +333,8 @@ private:
 
     // PPU I/O open-bus helpers
     uint8_t readBusLatchWithDecay();
+    uint8_t oamDataReadValue() const;
+    uint8_t currentSecondaryOamAddressForCorruption() const;
     void driveBusLatch(uint8_t value, uint8_t drivenMask);
 
     uint32_t nesColor(uint8_t index) const;

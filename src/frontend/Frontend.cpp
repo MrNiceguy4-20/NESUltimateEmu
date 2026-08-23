@@ -5,6 +5,9 @@
 #include <cstring>
 #include <cstdio>
 #include <cctype>
+#include <filesystem>
+#include <sstream>
+#include <limits>
 #include "../core/CPU.hpp"
 #include "../core/Bus.hpp"
 #include "../core/Cartridge.hpp"
@@ -21,6 +24,164 @@
 #include <commdlg.h>
 #endif
 
+#ifdef _WIN32
+namespace {
+std::string lowerCopy(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+bool endsWithI(const std::string& value, const char* suffix)
+{
+    const std::string a = lowerCopy(value);
+    const std::string b = lowerCopy(suffix);
+    return a.size() >= b.size() && a.compare(a.size() - b.size(), b.size(), b) == 0;
+}
+
+bool isArchivePath(const std::string& path)
+{
+    static const char* kArchiveExtensions[] = {
+        ".zip", ".7z", ".rar", ".tar", ".tgz", ".tar.gz", ".gz",
+        ".tbz", ".tbz2", ".tar.bz2", ".bz2", ".txz", ".tar.xz", ".xz"
+    };
+    for (const char* ext : kArchiveExtensions)
+        if (endsWithI(path, ext)) return true;
+    return false;
+}
+
+bool hasNesExtension(const std::string& path)
+{
+    return endsWithI(path, ".nes");
+}
+
+bool hasFdsExtension(const std::string& path)
+{
+    return endsWithI(path, ".fds");
+}
+
+bool hasNesSignature(const std::vector<uint8_t>& data)
+{
+    return data.size() >= 16 && data[0] == 'N' && data[1] == 'E' &&
+        data[2] == 'S' && data[3] == 0x1A;
+}
+
+bool hasHeaderedFdsSignature(const std::vector<uint8_t>& data)
+{
+    return data.size() >= 16 && data[0] == 'F' && data[1] == 'D' &&
+        data[2] == 'S' && data[3] == 0x1A;
+}
+
+std::string quoteWindowsArg(const std::string& arg)
+{
+    std::string out = "\"";
+    unsigned slashes = 0;
+    for (char ch : arg) {
+        if (ch == '\\') { ++slashes; continue; }
+        if (ch == '"') {
+            out.append(slashes * 2 + 1, '\\');
+            out.push_back('"');
+            slashes = 0;
+            continue;
+        }
+        out.append(slashes, '\\');
+        slashes = 0;
+        out.push_back(ch);
+    }
+    out.append(slashes * 2, '\\');
+    out.push_back('"');
+    return out;
+}
+
+bool runTarCapture(const std::vector<std::string>& args, std::vector<uint8_t>& output,
+    std::size_t maxBytes, DWORD& exitCode)
+{
+    output.clear();
+    exitCode = ERROR_GEN_FAILURE;
+
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    HANDLE readPipe = nullptr;
+    HANDLE writePipe = nullptr;
+    if (!CreatePipe(&readPipe, &writePipe, &sa, 0)) return false;
+    SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
+
+    HANDLE nullErr = CreateFileA("NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = writePipe;
+    si.hStdError = (nullErr != INVALID_HANDLE_VALUE) ? nullErr : writePipe;
+
+    PROCESS_INFORMATION pi{};
+    std::string command = "tar.exe";
+    for (const auto& arg : args) {
+        command.push_back(' ');
+        command += quoteWindowsArg(arg);
+    }
+    std::vector<char> mutableCommand(command.begin(), command.end());
+    mutableCommand.push_back('\0');
+
+    const BOOL created = CreateProcessA(nullptr, mutableCommand.data(), nullptr, nullptr, TRUE,
+        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    CloseHandle(writePipe);
+    if (nullErr != INVALID_HANDLE_VALUE) CloseHandle(nullErr);
+    if (!created) { CloseHandle(readPipe); return false; }
+
+    bool withinLimit = true;
+    uint8_t buffer[16384];
+    for (;;) {
+        DWORD got = 0;
+        if (!ReadFile(readPipe, buffer, sizeof(buffer), &got, nullptr) || got == 0) break;
+        if (output.size() + got > maxBytes) {
+            withinLimit = false;
+            TerminateProcess(pi.hProcess, ERROR_FILE_TOO_LARGE);
+            break;
+        }
+        output.insert(output.end(), buffer, buffer + got);
+    }
+    CloseHandle(readPipe);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return withinLimit && exitCode == 0;
+}
+
+bool listArchiveEntries(const std::string& archive, std::vector<std::string>& entries)
+{
+    std::vector<uint8_t> text;
+    DWORD code = 0;
+    if (!runTarCapture({ "-tf", archive }, text, 4u * 1024u * 1024u, code)) return false;
+    std::string listing(text.begin(), text.end());
+    std::istringstream lines(listing);
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line.back() == '/' || line.back() == '\\') continue;
+        entries.push_back(line);
+    }
+    return !entries.empty();
+}
+
+bool extractArchiveEntry(const std::string& archive, const std::string& entry,
+    std::vector<uint8_t>& data)
+{
+    DWORD code = 0;
+    // -O writes the selected member to stdout without touching the filesystem.
+    return runTarCapture({ "-xOf", archive, "--", entry }, data,
+        512u * 1024u * 1024u, code);
+}
+}
+#endif
+
+
 
 Frontend::Frontend(SDL_Window* window, SDL_Renderer* renderer,
     CPU& cpu, Bus& bus, Cartridge& cart, PPU& ppu, APU& apu)
@@ -32,7 +193,7 @@ Frontend::Frontend(SDL_Window* window, SDL_Renderer* renderer,
     , m_ppu(ppu)
     , m_apu(apu)
     , m_running(true)
-    , m_statusMessage("No ROM loaded. Click \"Load ROM...\" to choose a .nes or .fds file.")
+    , m_statusMessage("No ROM loaded. Click \"Load ROM...\" to choose a ROM or archive.")
 {
     m_nesTexture = SDL_CreateTexture(
         m_renderer,
@@ -148,7 +309,6 @@ void Frontend::stepInstruction()
 
 void Frontend::run()
 {
-    const double targetFrameMs = 1000.0 / 60.0988; // NTSC
     Uint64 freq = SDL_GetPerformanceFrequency();
     Uint64 last = SDL_GetPerformanceCounter();
 
@@ -184,6 +344,7 @@ void Frontend::run()
             ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), m_renderer);
         SDL_RenderPresent(m_renderer);
 
+        const double targetFrameMs = 1000.0 / consoleFrameRate(m_bus.timing());
         Uint64 now = SDL_GetPerformanceCounter();
         double elapsedMs = (double)(now - last) / (double)freq * 1000.0;
         if (elapsedMs < targetFrameMs) {
@@ -223,6 +384,11 @@ void Frontend::loadFrontendConfig()
         } else if (key == "volume") {
             in >> m_masterVolume;
             m_masterVolume = std::clamp(m_masterVolume, 0.0f, 2.5f);
+        } else if (key == "timing_override") {
+            int timing = 0;
+            in >> timing;
+            if (timing >= int(TimingOverride::Auto) && timing <= int(TimingOverride::Dendy))
+                m_timingOverride = static_cast<TimingOverride>(timing);
         } else if ((key == "p1key" || key == "p2key" || key == "p1pad" || key == "hotkey") && (in >> index >> value)) {
             if (key == "p1key" && index >= 0 && index < int(m_p1Keys.size()))
                 m_p1Keys[index] = static_cast<SDL_Scancode>(value);
@@ -243,12 +409,31 @@ void Frontend::saveFrontendConfig() const
 {
     std::ofstream out("nesultimate.cfg", std::ios::out | std::ios::trunc);
     if (!out) return;
-    out << "config_version 2\n";
+    out << "config_version 3\n";
     out << "volume " << m_masterVolume << '\n';
+    out << "timing_override " << int(m_timingOverride) << '\n';
     for (int i = 0; i < int(m_p1Keys.size()); ++i) out << "p1key " << i << ' ' << int(m_p1Keys[i]) << '\n';
     for (int i = 0; i < int(m_p2Keys.size()); ++i) out << "p2key " << i << ' ' << int(m_p2Keys[i]) << '\n';
     for (int i = 0; i < int(m_p1PadButtons.size()); ++i) out << "p1pad " << i << ' ' << int(m_p1PadButtons[i]) << '\n';
     for (int i = 0; i < int(m_hotkeys.size()); ++i) out << "hotkey " << i << ' ' << int(m_hotkeys[i]) << '\n';
+}
+
+ConsoleTiming Frontend::effectiveTiming() const
+{
+    switch (m_timingOverride) {
+    case TimingOverride::NTSC:  return ConsoleTiming::NTSC;
+    case TimingOverride::PAL:   return ConsoleTiming::PAL;
+    case TimingOverride::Dendy: return ConsoleTiming::Dendy;
+    case TimingOverride::Auto:
+    default:                    return m_cart.timing();
+    }
+}
+
+void Frontend::applyTimingOverride(bool resetSystem)
+{
+    if (!m_cart.isLoaded()) return;
+    m_bus.setTiming(effectiveTiming());
+    if (resetSystem) m_bus.powerOn();
 }
 
 bool Frontend::handleBindingCapture(const SDL_Event& e)
@@ -399,6 +584,29 @@ void Frontend::drawUI()
             m_controllerConfigOpen = true;
         if (ImGui::MenuItem("Hotkeys..."))
             m_settingsOpen = true;
+        if (ImGui::BeginMenu("Console Timing")) {
+            struct TimingChoice { const char* label; TimingOverride value; };
+            static constexpr TimingChoice choices[] = {
+                { "Auto (ROM header/database)", TimingOverride::Auto },
+                { "NTSC", TimingOverride::NTSC },
+                { "PAL", TimingOverride::PAL },
+                { "Dendy", TimingOverride::Dendy },
+            };
+            for (const auto& choice : choices) {
+                if (ImGui::MenuItem(choice.label, nullptr, m_timingOverride == choice.value)) {
+                    m_timingOverride = choice.value;
+                    saveFrontendConfig();
+                    if (m_cart.isLoaded()) {
+                        applyTimingOverride(true);
+                        m_paused = false;
+                        m_statusMessage = std::string("Console timing: ") + consoleTimingName(m_bus.timing()) +
+                            (m_timingOverride == TimingOverride::Auto ? " (auto)." : " (forced override). System restarted.");
+                        m_statusIsError = false;
+                    }
+                }
+            }
+            ImGui::EndMenu();
+        }
         ImGui::Separator();
         char fullscreenLabel[96];
         std::snprintf(fullscreenLabel, sizeof(fullscreenLabel), "Borderless Fullscreen    [%s]",
@@ -468,6 +676,11 @@ void Frontend::drawUI()
                 ImGui::Text("Mapper : %u%s", static_cast<unsigned>(m_cart.mapper()),
                     m_cart.mapperSupported() ? " (implemented)" : " (fallback – may not run)");
         }
+        ImGui::Text("Timing : %s%s", consoleTimingName(m_bus.timing()),
+            m_timingOverride == TimingOverride::Auto ? " (auto)" : " (forced)");
+        if (m_cart.isMultiRegion() && m_timingOverride == TimingOverride::Auto)
+            ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.3f, 1.0f),
+                "ROM is multi-region; use Settings > Console Timing to choose PAL/Dendy when needed.");
         ImGui::Text("PRG ROM: %zu KB", m_cart.prgRomSize() / 1024);
         ImGui::Text("CHR ROM: %zu KB", m_cart.chrRomSize() / 1024);
         if (m_cart.prgRamSize())
@@ -581,35 +794,76 @@ bool Frontend::openRomDialog()
     OPENFILENAMEA ofn = {};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = nullptr;
-    ofn.lpstrFilter = "NES / FDS Images (*.nes;*.fds)\0*.nes;*.fds\0NES ROMs (*.nes)\0*.nes\0FDS Images (*.fds)\0*.fds\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFilter = "NES ROMs / Archives (*.nes;*.nes2;*.fds;*.bin;*.rom;*.zip;*.7z;*.rar;*.tar;*.gz)\0*.nes;*.nes2;*.fds;*.bin;*.rom;*.zip;*.7z;*.rar;*.tar;*.tgz;*.gz;*.bz2;*.xz\0NES / FDS Images (*.nes;*.nes2;*.fds;*.bin;*.rom)\0*.nes;*.nes2;*.fds;*.bin;*.rom\0Archives (*.zip;*.7z;*.rar;*.tar;*.gz)\0*.zip;*.7z;*.rar;*.tar;*.tgz;*.gz;*.bz2;*.xz\0All Files (*.*)\0*.*\0";
     ofn.lpstrFile = filename;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    ofn.lpstrTitle = "Select NES / FDS Image";
+    ofn.lpstrTitle = "Select NES ROM, FDS Image, or Archive";
 
     if (!GetOpenFileNameA(&ofn))
         return false;
 
     m_cart.saveBattery();
-    if (m_cart.loadFromFile(filename)) {
-        m_bus.powerOn();
+
+    // Native images are signature-validated by Cartridge, so iNES/NES 2.0
+    // files still load even when they have a nonstandard extension.
+    if (!isArchivePath(filename) && m_cart.loadFromFile(filename)) {
+        applyTimingOverride(true);
         m_statusMessage = "Loaded: " + m_cart.fileName();
         m_statusIsError = false;
         m_paused = false;
         return true;
     }
-    else {
-        {
-            std::string failedPath = filename;
-            for (char& c : failedPath) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            if (failedPath.size() >= 4 && failedPath.substr(failedPath.size() - 4) == ".fds")
-                m_statusMessage = "Failed to load FDS image. Place a valid 8 KiB disksys.rom beside the .fds file.";
-            else
-                m_statusMessage = "Failed to load ROM (invalid iNES/NES 2.0 image).";
+
+    // Windows 10/11 ship tar.exe based on libarchive. Use it as a general
+    // archive reader instead of binding the emulator to one compression
+    // format or extracting members to temporary files. bsdtar supports ZIP,
+    // 7-Zip, RAR and the common tar/compressor families when enabled by the
+    // installed Windows build.
+    std::vector<std::string> entries;
+    if (listArchiveEntries(filename, entries)) {
+        std::vector<std::size_t> order;
+        order.reserve(entries.size());
+        for (std::size_t i = 0; i < entries.size(); ++i)
+            if (hasNesExtension(entries[i])) order.push_back(i);
+        for (std::size_t i = 0; i < entries.size(); ++i)
+            if (hasFdsExtension(entries[i])) order.push_back(i);
+
+        // If no conventional extension is present, inspect archive members by
+        // signature. This lets renamed .bin/.rom iNES files load from archives.
+        if (order.empty()) {
+            const std::size_t inspectCount = std::min<std::size_t>(entries.size(), 64);
+            for (std::size_t i = 0; i < inspectCount; ++i) order.push_back(i);
         }
+
+        for (std::size_t index : order) {
+            std::vector<uint8_t> image;
+            if (!extractArchiveEntry(filename, entries[index], image)) continue;
+            const bool namedMedia = hasNesExtension(entries[index]) || hasFdsExtension(entries[index]);
+            if (!namedMedia && !hasNesSignature(image) && !hasHeaderedFdsSignature(image)) continue;
+            if (!m_cart.loadFromMemory(image, entries[index], filename)) continue;
+
+            applyTimingOverride(true);
+            m_statusMessage = "Loaded from archive: " + m_cart.fileName();
+            m_statusIsError = false;
+            m_paused = false;
+            return true;
+        }
+
+        m_statusMessage = "Archive opened, but it contains no loadable iNES/NES 2.0 or FDS image.";
         m_statusIsError = true;
         return false;
     }
+
+    std::string failedPath = lowerCopy(filename);
+    if (endsWithI(failedPath, ".fds"))
+        m_statusMessage = "Failed to load FDS image. Place a valid 8 KiB disksys.rom beside the image/archive.";
+    else if (isArchivePath(failedPath))
+        m_statusMessage = "Failed to open archive. The Windows archive backend may not support this file or it may be encrypted/corrupt.";
+    else
+        m_statusMessage = "Failed to load ROM/archive (invalid or unsupported image).";
+    m_statusIsError = true;
+    return false;
 #else
     m_statusMessage = "Native file dialog only on Windows.";
     m_statusIsError = true;
@@ -683,7 +937,7 @@ std::string Frontend::statePath(int slot) const
 }
 
 namespace {
-constexpr uint8_t kSaveStateVersion = 43;
+constexpr uint8_t kSaveStateVersion = 71;
 
 void appendU32(std::vector<uint8_t>& out, uint32_t value)
 {
@@ -851,12 +1105,26 @@ bool Frontend::loadStateFromPath(const std::string& path)
         return false;
     }
 
-    const uint8_t* p = payload;
-    const uint8_t* end = payload + payloadSize;
-    if (!m_cpu.loadState(p, end) || !m_ppu.loadState(p, end) ||
-        !m_bus.loadState(p, end) || !m_apu.loadState(p, end) ||
-        !m_cart.loadState(p, end) || p != end) {
-        m_statusMessage = "Save state load failed (corrupt or wrong ROM).";
+    // Loading is transactional. Component deserializers mutate as they parse,
+    // so preserve the current machine first; if a later component rejects a
+    // corrupt/incompatible payload, restore the exact pre-load state.
+    std::vector<uint8_t> rollback;
+    m_cpu.saveState(rollback);
+    m_ppu.saveState(rollback);
+    m_bus.saveState(rollback);
+    m_apu.saveState(rollback);
+    m_cart.saveState(rollback);
+
+    auto loadPayload = [&](const uint8_t* begin, const uint8_t* finish) {
+        const uint8_t* cursor = begin;
+        return m_cpu.loadState(cursor, finish) && m_ppu.loadState(cursor, finish) &&
+            m_bus.loadState(cursor, finish) && m_apu.loadState(cursor, finish) &&
+            m_cart.loadState(cursor, finish) && cursor == finish;
+    };
+
+    if (!loadPayload(payload, payload + payloadSize)) {
+        (void)loadPayload(rollback.data(), rollback.data() + rollback.size());
+        m_statusMessage = "Save state load failed (corrupt or wrong ROM); current state was preserved.";
         m_statusIsError = true;
         return false;
     }
