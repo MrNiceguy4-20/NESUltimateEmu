@@ -33,10 +33,7 @@ static uint64_t runOam(bool injectDmc, uint64_t injectAt)
 
 int runDmaArbitrationProbe()
 {
-    // Starting on this deterministic PUT phase produces the 513-cycle OAM
-    // form: halt + 256 GET/PUT pairs. A reload-style DMC request made while
-    // OAM owns the CPU overlaps its halt/dummy/alignment slots; only the DMC
-    // GET plus OAM's re-alignment extend the transfer, for +2 clocks.
+
     const uint64_t plain = runOam(false, 0);
     const uint64_t overlapped = runOam(true, 9);
     bool ok = plain == 513 && overlapped == 515;
@@ -44,11 +41,6 @@ int runDmaArbitrationProbe()
               << " delta=" << (overlapped >= plain ? overlapped - plain : 0)
               << (ok ? " PASS\n" : " FAIL\n");
 
-    // AccuracyCoin Page 14 / APU Register Activation test 4. OAM DMA from
-    // page $40 must not activate $4015 merely because the OAM source address
-    // reaches $4015. The internal APU decoder is enabled by the halted 6502's
-    // A15-A5; here there is no CPU read in $4000-$401F, so frame IRQ must
-    // survive the entire DMA.
     Bus activationBus;
     PPU activationPpu;
     APU activationApu;
@@ -65,13 +57,6 @@ int runDmaArbitrationProbe()
     std::cout << "oam_apu_decode_gated=" << (oamDoesNotDecodeApu ? "PASS" : "FAIL") << "\n";
     ok &= oamDoesNotDecodeApu;
 
-    // AccuracyCoin Page 14 / APU Register Activation test 6. Once RDY has
-    // frozen the CPU address bus inside $4000-$401F, A4-A0 from the OAM bus
-    // select readable APU/I/O registers and repeat them every $20 bytes.
-    // The open-bus keeper is asymmetric: an internal register may discharge
-    // a previously-high bit, but a high internal bit does not charge a low
-    // external/open-bus bit. Reproduce the key $40 -> status -> controller ->
-    // $00 transition used by AccuracyCoin's expected OAM table.
     Bus positiveBus;
     PPU positivePpu;
     APU positiveApu;
@@ -79,7 +64,7 @@ int runDmaArbitrationProbe()
     positiveBus.connectAPU(&positiveApu);
     positiveApu.connectBus(&positiveBus);
     positiveBus.powerOn();
-    positiveBus.write(0x0000, 0x40); // seed external/open bus
+    positiveBus.write(0x0000, 0x40);
     positiveApu.testSetFrameIrqFlag(true);
     const uint8_t apu4015 = positiveBus.testReadOamDmaSource(0x4015, 0x4001);
 
@@ -87,17 +72,12 @@ int runDmaArbitrationProbe()
     positiveBus.testLatchControllers();
     const uint8_t openControllerHigh = positiveBus.testReadOamDmaSource(0x4016, 0x4001);
 
-    // By the next $20 mirror the first status read has acknowledged the frame
-    // IRQ. The second status read must return zero and discharge D6 from the
-    // persistent open-bus latch; controller 1 then contributes only D0.
     positiveApu.testSetFrameIrqFlag(false);
     const uint8_t apu4035 = positiveBus.testReadOamDmaSource(0x4035, 0x4001);
     positiveBus.setController1(0x01);
     positiveBus.testLatchControllers();
     const uint8_t openControllerLow = positiveBus.testReadOamDmaSource(0x4036, 0x4001);
 
-    // With a real external RAM byte driving D0-D7, controller activation may
-    // still clock the port but must not replace the OAM DMA byte.
     positiveBus.setController1(0x00);
     positiveBus.testLatchControllers();
     positiveBus.write(0x0216, 0xFF);

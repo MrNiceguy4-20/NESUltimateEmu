@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
 
   <ItemGroup Label="ProjectConfigurations">
@@ -54,9 +54,7 @@
   </ImportGroup>
 
   <PropertyGroup Label="UserMacros" />
-
-  <!-- NES emulator sources -->
-  <ItemGroup>
+<ItemGroup>
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\core\CPU.cpp" />
     <ClCompile Include="src\core\Bus.cpp" />
@@ -65,6 +63,14 @@
     <ClCompile Include="src\core\Cartridge.cpp" />
     <ClCompile Include="src\core\CheatSystem.cpp" />
     <ClCompile Include="src\core\Mapper.cpp" />
+    <ClCompile Include="src\core\MapperNintendoDiscrete.cpp" />
+    <ClCompile Include="src\core\MapperMmc1.cpp" />
+    <ClCompile Include="src\core\MapperMmc3.cpp" />
+    <ClCompile Include="src\core\MapperMmc5.cpp" />
+    <ClCompile Include="src\core\MapperNamco.cpp" />
+    <ClCompile Include="src\core\MapperVrc.cpp" />
+    <ClCompile Include="src\core\MapperSunsoft.cpp" />
+    <ClCompile Include="src\core\MapperUnlicensed.cpp" />
     <ClCompile Include="src\frontend\Frontend.cpp" />
   </ItemGroup>
 
@@ -80,9 +86,7 @@
     <ClInclude Include="src\frontend\Frontend.hpp" />
       <ClInclude Include="src\core\Timing.hpp" />
   </ItemGroup>
-
-  <!-- ImGui sources -->
-  <ItemGroup>
+<ItemGroup>
     <ClCompile Include="C:\kevin\imgui-1.92.9b\imgui.cpp" />
     <ClCompile Include="C:\kevin\imgui-1.92.9b\imgui_draw.cpp" />
     <ClCompile Include="C:\kevin\imgui-1.92.9b\imgui_tables.cpp" />
@@ -91,9 +95,7 @@
     <ClCompile Include="C:\kevin\imgui-1.92.9b\backends\imgui_impl_sdl2.cpp" />
     <ClCompile Include="C:\kevin\imgui-1.92.9b\backends\imgui_impl_sdlrenderer2.cpp" />
   </ItemGroup>
-
-  <!-- Build settings for SDL2 + ImGui -->
-  <ItemDefinitionGroup>
+<ItemDefinitionGroup>
     <ClCompile>
       <AdditionalIncludeDirectories>
         C:\kevin\SDL2-2.32.8\include;
@@ -123,8 +125,7 @@
   <ItemDefinitionGroup>
     <ClCompile>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <!-- C26819: unannotated fallthrough inside SDL headers (third-party) -->
-      <DisableSpecificWarnings>26819;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+<DisableSpecificWarnings>26819;%(DisableSpecificWarnings)</DisableSpecificWarnings>
     </ClCompile>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

@@ -21,10 +21,6 @@ std::filesystem::path probeAsset(const char* executablePath, const char* fileNam
         if (!ec) exeDir = exe.parent_path();
     }
 
-    // Probe assets may be copied beside the executable (MSBuild/CMake), or they
-    // may remain in tests/probes when running a binary directly from a build
-    // directory. Search both the executable and working-directory ancestry so
-    // a fresh source checkout does not depend on a particular output layout.
     auto findFrom = [&](std::filesystem::path base) -> std::filesystem::path {
         for (unsigned depth = 0; !base.empty() && depth < 5; ++depth) {
             const std::filesystem::path beside = base / fileName;
@@ -51,8 +47,6 @@ std::filesystem::path probeAsset(const char* executablePath, const char* fileNam
             return found;
     }
 
-    // Keep the failure path deterministic so the probe itself reports a normal
-    // load/setup error rather than throwing from filesystem discovery.
     return (exeDir.empty() ? cwd : exeDir) / fileName;
 }
 }

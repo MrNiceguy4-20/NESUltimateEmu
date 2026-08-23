@@ -90,7 +90,6 @@ bool CheatSystem::decodeGameGenie(const std::string& input, GameGenieCode& out)
     return true;
 }
 
-
 bool CheatSystem::decodeRawCpuCode(const std::string& input, GameGenieCode& out)
 {
     const std::string code = trimCopy(input);
@@ -130,8 +129,7 @@ std::string CheatSystem::normalizedTitle(std::string value)
 {
     value = std::filesystem::path(value).stem().string();
     value = stripCheatSuffix(std::move(value));
-    // ROM filenames often omit No-Intro region/revision tags while libretro's
-    // files include them. Compare the stable title prefix before the first tag.
+
     const std::size_t tag = value.find(" (");
     if (tag != std::string::npos) value.resize(tag);
     std::string out;
@@ -285,9 +283,7 @@ void CheatSystem::disableAll()
 
 uint8_t CheatSystem::applyGameGenie(uint16_t address, uint8_t original) const
 {
-    // This function is on the hottest cartridge-read path in the emulator.
-    // In particular, loading a large per-game cheat database must have zero
-    // per-read cost while every cheat is disabled.
+
     if (address < 0x8000 || m_activeGameGenieCodes.empty()) return original;
     uint8_t value = original;
     for (const auto& code : m_activeGameGenieCodes) {
@@ -300,8 +296,7 @@ uint8_t CheatSystem::applyGameGenie(uint16_t address, uint8_t original) const
 
 uint8_t CheatSystem::applyRawCpuRead(uint16_t address, uint8_t original) const
 {
-    // Likewise, ordinary CPU RAM/I/O reads bypass cheat scanning entirely
-    // unless at least one raw address:value code is actually enabled.
+
     if (m_activeRawCpuCodes.empty()) return original;
     uint8_t value = original;
     for (const auto& code : m_activeRawCpuCodes) {

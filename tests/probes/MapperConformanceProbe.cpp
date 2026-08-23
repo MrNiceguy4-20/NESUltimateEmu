@@ -39,10 +39,6 @@ int runMapperConformanceProbe()
 {
     bool ok = true;
 
-    // Namco 163's internal 128-byte sound RAM is mapper-owned persistent
-    // storage only when the cartridge actually supplies battery backup. A
-    // plain mapper-19 image must not acquire battery semantics merely because
-    // the ASIC contains writable internal RAM.
     auto n163Volatile = makeMapper(19, 0x8000, 0x2000, 0, 0, 0, false, Mirror::Horizontal, false);
     auto n163Battery = makeMapper(19, 0x8000, 0x2000, 0, 0, 0, false, Mirror::Horizontal, true);
     const bool n163BatteryGate = n163Volatile->mapperBatterySize() == 0 &&
@@ -52,10 +48,8 @@ int runMapperConformanceProbe()
         n163Battery->mapperBatterySize());
     ok &= n163BatteryGate;
 
-    // Phase 47 bundled multicart pass: seven small, well-defined iNES boards
-    // share one implementation but retain their individual address/data wiring.
     auto m202 = makeMapper(202, 0x20000, 0x10000, 0, 0, 0, false, Mirror::Vertical);
-    m202->cpuWrite(0x800F, 0x00, 0); // bank 7 => NROM-256 pair 6/7, CHR 7, H mirror
+    m202->cpuWrite(0x800F, 0x00, 0);
     uint32_t m202l=0,m202h=0,m202c=0;
     const bool p47_202=m202->cpuMapRead(0x8123,m202l)&&m202->cpuMapRead(0xC123,m202h)&&
         m202->ppuMapRead(0x0456,m202c)&&m202l==0x18123&&m202h==0x1C123&&m202c==0x0E456&&
@@ -113,9 +107,6 @@ int runMapperConformanceProbe()
         p47_gate?"PASS":"FAIL");
     ok &= phase47;
 
-    // Phase 38: Mapper 153 / Bandai LZ93D50 + 8 KiB WRAM.  The four
-    // former CHR bank outputs at $8000-$8003 become a 256 KiB outer PRG
-    // selector indexed by live PPU A11:A10. CHR is fixed 8 KiB RAM.
     auto m153 = makeMapper(153, 0x80000, 0, 0x2000, 0x2000, 0, true, Mirror::Horizontal, true);
     m153->cpuWrite(0x8000,0,0); m153->cpuWrite(0x8001,1,0);
     m153->cpuWrite(0x8002,0,0); m153->cpuWrite(0x8003,1,0);
@@ -152,9 +143,6 @@ int runMapperConformanceProbe()
         m153State?"PASS":"FAIL",m153Gate?"PASS":"FAIL");
     ok &= mapper153;
 
-    // Phase 39: Mapper 125 / UNL-LH32. The FDS-conversion board exposes a
-    // switchable 8 KiB PRG bank at $6000, overlays WRAM at $C000-$DFFF, and
-    // keeps the final 32 KiB of PRG fixed in the normal upper CPU window.
     auto m125 = makeMapper(125, 0x20000, 0, 0x2000, 0x2000);
     uint32_t m125boot=0,m125fixed0=0,m125fixed1=0,m125ram=0,m125chr=0;
     const bool m125BootRead=m125->cpuMapRead(0x6000,m125boot);
@@ -179,9 +167,6 @@ int runMapperConformanceProbe()
         (m125load&&m125restored==0x06000)?"PASS":"FAIL",m125reset==0x1E000?"PASS":"FAIL",m125Gate?"PASS":"FAIL");
     ok &= mapper125;
 
-    // Phase 40: mapper 122 is the historical fwNES assignment for the same
-    // Sunsoft-1 hardware standardized as mapper 184. Both numbers must expose
-    // identical fixed PRG and split 4 KiB CHR banking behavior.
     auto m122 = makeMapper(122, 0x8000, 0x20000, 0, 0);
     auto m184alias = makeMapper(184, 0x8000, 0x20000, 0, 0);
     uint32_t m122prg0=0,m122prg1=0,m184prg0=0,m184prg1=0;
@@ -208,12 +193,6 @@ int runMapperConformanceProbe()
         m122State?"PASS":"FAIL",m122Gate?"PASS":"FAIL");
     ok &= mapper122;
 
-    // Phase 41: iNES Mapper 155 identifies the MMC1A silicon revision.
-    // Unlike MMC1B/C, PRG-register bit 4 does not disable WRAM. When that
-    // bit is set in 16 KiB PRG modes, PRG bit 3 directly drives A17 even for
-    // the fixed bank. In mode 3 with bit 3 clear, MMC1A therefore fixes
-    // $C000-$FFFF to bank 7 of the low 128 KiB half, while MMC1B/C fixes it
-    // to bank 15 of the full 256 KiB region.
     auto mmc1b = makeMapper(1, 0x40000, 0x2000, 0x2000, 0);
     auto mmc1a = makeMapper(155, 0x40000, 0x2000, 0x2000, 0);
     mmc1Serial(*mmc1b, 0x8000, 0x0C, 100);
@@ -227,8 +206,7 @@ int runMapperConformanceProbe()
         mmc1bHi==0x3C000&&mmc1aHi==0x1C000;
     const bool mmc1RevRam=!mmc1b->mapPrgRam(0x6123,mmc1bRam,false)&&
         mmc1a->mapPrgRam(0x6123,mmc1aRam,false)&&mmc1aRam==0x0123;
-    // With PRG bit 3 set, MMC1A selects the upper 128 KiB half for both the
-    // switchable and fixed windows.
+
     mmc1Serial(*mmc1a, 0xE000, 0x18, 140);
     uint32_t mmc1aUpperLo=0,mmc1aUpperHi=0;
     const bool mmc1RevUpper=mmc1a->cpuMapRead(0x8000,mmc1aUpperLo)&&
@@ -240,10 +218,6 @@ int runMapperConformanceProbe()
         mmc1RevPrg?"PASS":"FAIL",mmc1RevRam?"PASS":"FAIL",mmc1RevUpper?"PASS":"FAIL",mmc1aGate?"PASS":"FAIL");
     ok &= phase41;
 
-    // Phase 42: Mapper 174 / NTDEC 5-in-1.  The write address itself is
-    // the register: A7 selects 16/32 KiB PRG mode, A6-A4 select PRG,
-    // A3-A1 select CHR, and A0 selects H/V mirroring.  Soft reset preserves
-    // the selected game; only hard reset returns the latch to zero.
     auto m174 = makeMapper(174, 0x20000, 0x10000, 0, 0, 0, false, Mirror::Horizontal);
     m174->reset(true);
     uint32_t m174bootLo=0,m174bootHi=0,m174bootChr=0;
@@ -251,16 +225,12 @@ int runMapperConformanceProbe()
         m174->ppuMapRead(0x0456,m174bootChr)&&m174bootLo==0x0123&&m174bootHi==0x0123&&
         m174bootChr==0x0456&&m174->mirroring()==Mirror::Vertical;
 
-    // 0x80DD: O=1, P=5, C=6, M=1. In 32 KiB mode P0 is ignored, so P=5
-    // selects 32 KiB bank 2. The data byte is deliberately arbitrary.
     const bool m174Write32=m174->cpuWrite(0x80DD,0x00,0);
     uint32_t m174p32a=0,m174p32b=0,m174c32=0;
     const bool m174Mode32=m174->cpuMapRead(0x8123,m174p32a)&&m174->cpuMapRead(0xE123,m174p32b)&&
         m174->ppuMapRead(0x0456,m174c32)&&m174p32a==0x10123&&m174p32b==0x16123&&
         m174c32==0x0C456&&m174->mirroring()==Mirror::Horizontal;
 
-    // 0x8034: O=0, P=3, C=2, M=0. The selected 16 KiB PRG bank is mirrored
-    // into both halves of the CPU ROM window.
     const bool m174Write16=m174->cpuWrite(0x8034,0xFF,0);
     uint32_t m174p16a=0,m174p16b=0,m174c16=0;
     const bool m174Mode16=m174->cpuMapRead(0x8123,m174p16a)&&m174->cpuMapRead(0xC123,m174p16b)&&
@@ -284,10 +254,6 @@ int runMapperConformanceProbe()
         m174State?"PASS":"FAIL",m174Hard?"PASS":"FAIL",m174Gate?"PASS":"FAIL");
     ok &= phase42;
 
-
-    // Phase 43: Mapper 200 simple NROM multicart. A2-A0 select the shared
-    // 16 KiB PRG / 8 KiB CHR bank and A3 selects H/V mirroring. PRG is
-    // mirrored into both CPU halves and the data byte is ignored.
     auto m200 = makeMapper(200, 0x20000, 0x10000, 0, 0, 0, false, Mirror::Horizontal);
     m200->reset(true);
     uint32_t m200bootLo=0,m200bootHi=0,m200bootChr=0;
@@ -295,8 +261,6 @@ int runMapperConformanceProbe()
         m200->ppuMapRead(0x0456,m200bootChr)&&m200bootLo==0x0123&&m200bootHi==0x0123&&
         m200bootChr==0x0456&&m200->mirroring()==Mirror::Vertical;
 
-    // Low address bits 0b101 select shared bank 5; A3=1 selects horizontal.
-    // The data byte deliberately disagrees with the address to verify it is ignored.
     const bool m200Write=m200->cpuWrite(0x800D,0x00,0);
     uint32_t m200pLo=0,m200pHi=0,m200c=0;
     const bool m200Banks=m200->cpuMapRead(0x8123,m200pLo)&&m200->cpuMapRead(0xC123,m200pHi)&&
@@ -304,7 +268,6 @@ int runMapperConformanceProbe()
         m200c==0x0A456&&m200->mirroring()==Mirror::Horizontal;
     const bool m200Ignored=!m200->cpuWrite(0x7FFF,0xFF,0);
 
-    // A3=0 returns to vertical mirroring while retaining address-selected banking.
     m200->cpuWrite(0x8002,0xFF,0);
     uint32_t m200p2=0,m200c2=0;
     const bool m200AddressLatch=m200->cpuMapRead(0x8000,m200p2)&&m200->ppuMapRead(0x0000,m200c2)&&
@@ -327,10 +290,6 @@ int runMapperConformanceProbe()
         m200State?"PASS":"FAIL",m200Soft?"PASS":"FAIL",m200Hard?"PASS":"FAIL",m200Gate?"PASS":"FAIL");
     ok &= phase43;
 
-    // MMC1: D7 reset is never subject to the consecutive-cycle serial-data
-    // suppression. Start a partial load, reset on the immediately following
-    // CPU cycle, then load PRG bank 2. If reset were incorrectly ignored, the
-    // partial serial state would corrupt/early-commit the following value.
     auto mmc1 = makeMapper(1);
     mmc1->cpuWrite(0xE000, 1, 10);
     mmc1->cpuWrite(0xE000, 0x80, 11);
@@ -342,15 +301,9 @@ int runMapperConformanceProbe()
         mmc1ResetWins ? "PASS" : "FAIL", unsigned(mmc1Mapped));
     ok &= mmc1ResetWins;
 
-    // NES 2.0 Mapper 1 submapper 5 (SEROM/SHROM/SH1ROM) has 32 KiB of
-    // physically unbanked PRG-ROM. Even if software programs the MMC1 into
-    // 16 KiB switching mode and selects bank 1, $8000 must remain the first
-    // half of the ROM rather than aliasing the fixed upper half. Submappers
-    // 6 (2ME EEPROM) and 7 (KS-7058) are intentionally not advertised until
-    // their additional board hardware is implemented.
     auto mmc1s5 = makeMapper(1, 0x8000, 0x2000, 0, 0, 5, true);
-    mmc1Serial(*mmc1s5, 0x8000, 0x0C, 30); // 16 KiB switch at $8000
-    mmc1Serial(*mmc1s5, 0xE000, 0x01, 40); // would select bank 1 normally
+    mmc1Serial(*mmc1s5, 0x8000, 0x0C, 30);
+    mmc1Serial(*mmc1s5, 0xE000, 0x01, 40);
     uint32_t mmc1s5Lo=0, mmc1s5Hi=0;
     const bool mmc1s5ReadLo = mmc1s5->cpuMapRead(0x8000, mmc1s5Lo);
     const bool mmc1s5ReadHi = mmc1s5->cpuMapRead(0xC000, mmc1s5Hi);
@@ -362,10 +315,6 @@ int runMapperConformanceProbe()
         mmc1SubGate ? "PASS" : "FAIL");
     ok &= mmc1s5Prg && mmc1SubGate;
 
-    // NES 2.0 submappers 1/2 disambiguate bus-conflict behavior for the
-    // discrete UxROM/CNROM/AxROM families. Legacy/submapper-0 UxROM and CNROM
-    // use the strict hardware-compatible conflict default, while AxROM keeps
-    // its compatibility default of no conflicts.
     auto m2Legacy = makeMapper(2);
     auto m2s0 = makeMapper(2, 0x20000, 0, 0, 0x2000, 0, true);
     auto m2s1 = makeMapper(2, 0x20000, 0, 0, 0x2000, 1, true);
@@ -395,29 +344,23 @@ int runMapperConformanceProbe()
         int(m7s0->hasBusConflicts()), int(m7s1->hasBusConflicts()), int(m7s2->hasBusConflicts()));
     ok &= discreteBusConflicts;
 
-    // Phase 37: Mapper 132 / TXC 22111.  Four low registers live in the
-    // $4100 decode region.  Reads matching mask $E100 expose (R1 XOR R2)|$40,
-    // while a high write copies R2 to the PRG/CHR output latch.  Changes to
-    // R2 must therefore remain invisible to banking until another high write.
     auto m132 = makeMapper(132, 0x20000, 0x8000, 0, 0, 0, true, Mirror::Vertical);
     const bool m132w1 = m132->cpuWrite(0x4101, 0x05, 0);
-    const bool m132w2 = m132->cpuWrite(0x4302, 0x0A, 0); // $4102 alias under $E103
+    const bool m132w2 = m132->cpuWrite(0x4302, 0x0A, 0);
     uint8_t m132read0=0, m132readAlias=0;
     const bool m132r0 = m132->cpuReadRegister(0x4100, m132read0);
-    const bool m132ra = m132->cpuReadRegister(0x43FC, m132readAlias); // read mask $E100
+    const bool m132ra = m132->cpuReadRegister(0x43FC, m132readAlias);
     const bool m132Protection = m132w1 && m132w2 && m132r0 && m132ra &&
         m132read0 == 0x4F && m132readAlias == 0x4F;
 
-    // Bank outputs are still reset to zero before the high-address latch.
     uint32_t m132p0=0,m132c0=0;
     const bool m132Default = m132->cpuMapRead(0x8123,m132p0) && m132->ppuMapRead(0x0456,m132c0) &&
         m132p0==0x0123 && m132c0==0x0456;
-    const bool m132Latch = m132->cpuWrite(0xA123,0xFF,0); // data byte ignored
+    const bool m132Latch = m132->cpuWrite(0xA123,0xFF,0);
     uint32_t m132p=0,m132c=0;
     m132->cpuMapRead(0x8123,m132p); m132->ppuMapRead(0x0456,m132c);
     const bool m132Banks = m132p==0x10123 && m132c==0x04456;
 
-    // Stage a different R2 but do not latch it yet.
     m132->cpuWrite(0x4102,0x05,0);
     uint32_t m132pHold=0,m132cHold=0;
     m132->cpuMapRead(0x8000,m132pHold); m132->ppuMapRead(0x0000,m132cHold);
@@ -442,10 +385,6 @@ int runMapperConformanceProbe()
         (m132Hold&&m132Relatch)?"PASS":"FAIL",m132State?"PASS":"FAIL",m132Gate?"PASS":"FAIL");
     ok &= mapper132;
 
-    // Mapper 152 is the one-screen-mirroring variant historically split out
-    // of Mapper 70. Unlike Mapper 70, its discrete register overlaps PRG-ROM
-    // output and is subject to wired-AND bus conflicts. Verify that the
-    // conflicted value controls PRG, CHR, and the one-screen mirroring bit.
     auto m70 = makeMapper(70, 0x20000, 0x20000, 0, 0, 0, true);
     auto m152 = makeMapper(152, 0x20000, 0x20000, 0, 0, 0, true);
     const uint8_t m152Effective = m152->resolveBusConflict(0x8000, 0xFF, 0x2B);
@@ -463,11 +402,6 @@ int runMapperConformanceProbe()
         (mapperImplementationSupported(152,0) && !mapperImplementationSupported(152,1)) ? "PASS" : "FAIL");
     ok &= mapper152;
 
-    // Mapper 78 has two incompatible mirroring wirings. NES 2.0 submapper 1
-    // (Uchuusen/Cosmo Carrier) uses one-screen A/B, while submapper 3 (Holy
-    // Diver) uses horizontal/vertical. Legacy images commonly distinguish
-    // Holy Diver with the iNES alternative-nametables flag. All variants are
-    // discrete UNROM+CNROM hardware and therefore retain bus conflicts.
     auto m78s1 = makeMapper(78, 0x20000, 0x20000, 0, 0, 1, true);
     auto m78s3 = makeMapper(78, 0x20000, 0x20000, 0, 0, 3, true);
     auto m78LegacyCosmo = makeMapper(78, 0x20000, 0x20000);
@@ -498,10 +432,6 @@ int runMapperConformanceProbe()
         m78Banks?"PASS":"FAIL", m78Gate?"PASS":"FAIL");
     ok &= mapper78;
 
-    // Mapper 71 uses different PRG latch widths on its two NES 2.0 boards.
-    // Normal BF9093 boards expose four bank bits; Fire Hawk's BF9097 exposes
-    // only three. Legacy iNES starts in the normal-board compatibility mode
-    // and switches to the Fire Hawk interpretation after a $9000-$9FFF write.
     auto m71s0 = makeMapper(71, 0x40000, 0, 0, 0x2000, 0, true, Mirror::Vertical);
     auto m71s1 = makeMapper(71, 0x40000, 0, 0, 0x2000, 1, true, Mirror::Vertical);
     auto m71legacy = makeMapper(71, 0x40000, 0, 0, 0x2000, 0, false, Mirror::Vertical);
@@ -532,13 +462,6 @@ int runMapperConformanceProbe()
         unsigned(m71legacyBefore),unsigned(m71legacyAfter),unsigned(m71statePrg));
     ok &= mapper71;
 
-    // Mapper 68 / Sunsoft-4. Normal boards can expose the full 4-bit PRG
-    // register and always fix $C000-$FFFF to the final PRG bank. NES 2.0
-    // submapper 1 is Nantettatte!! Baseball's Dual Cartridge System: bit 3
-    // selects internal/external ROM, the fixed bank remains the last 16 KiB
-    // of the 128 KiB internal ROM, and writes to $6000-$7FFF reset the
-    // licensing timer only while WRAM is disabled and the external ROM is
-    // selected.
     auto m68normal = makeMapper(68, 0x40000, 0x20000, 0x2000, 0, 0, true);
     m68normal->cpuWrite(0xF000, 0x0A, 0);
     uint32_t m68NormLo=0,m68NormHi=0;
@@ -546,13 +469,11 @@ int runMapperConformanceProbe()
         m68normal->cpuMapRead(0xC000,m68NormHi);
     const bool m68Normal = m68NormRead && m68NormLo==0x28000 && m68NormHi==0x3C000;
 
-    // Append a 16 KiB synthetic option ROM after the 128 KiB internal image
-    // so the mapper probe can exercise the DCS socket without a second file.
     auto m68dual = makeMapper(68, 0x24000, 0x20000, 0x2000, 0, 1, true);
-    m68dual->cpuWrite(0xF000, 0x00, 0); // external bank 0, WRAM disabled
+    m68dual->cpuWrite(0xF000, 0x00, 0);
     uint32_t m68Ext=0,m68Fixed=0,m68Internal=0,m68Ram=0;
     const bool m68ExpiredInitially = !m68dual->cpuMapRead(0x8000,m68Ext);
-    m68dual->cpuWrite(0x6000, 0x00, 0); // reset licensing timer
+    m68dual->cpuWrite(0x6000, 0x00, 0);
     const bool m68ExtLive = m68dual->cpuMapRead(0x8000,m68Ext) && m68Ext==0x20000;
     const bool m68FixedInternal = m68dual->cpuMapRead(0xC000,m68Fixed) && m68Fixed==0x1C000;
 
@@ -565,10 +486,10 @@ int runMapperConformanceProbe()
     const bool m68StateLoad=m68dual->loadState(m68StatePtr,m68StatePtr+m68State.size());
     const bool m68StateRestoresTimer=m68StateLoad && m68dual->cpuMapRead(0x8000,m68Ext) && m68Ext==0x20000;
 
-    m68dual->cpuWrite(0xF000, 0x0B, 0); // internal bank 3
+    m68dual->cpuWrite(0xF000, 0x0B, 0);
     const bool m68InternalRead=m68dual->cpuMapRead(0x8000,m68Internal) && m68Internal==0x0C000;
-    m68dual->cpuWrite(0xF000, 0x10, 0); // external selected, WRAM enabled
-    m68dual->cpuWrite(0x6000, 0x00, 0); // must not arm licensing timer
+    m68dual->cpuWrite(0xF000, 0x10, 0);
+    m68dual->cpuWrite(0x6000, 0x00, 0);
     const bool m68Wram=m68dual->mapPrgRam(0x6000,m68Ram,true) && m68Ram==0 &&
         !m68dual->cpuMapRead(0x8000,m68Ext);
     const bool m68Gate=mapperImplementationSupported(68,0) && mapperImplementationSupported(68,1) &&
@@ -581,9 +502,6 @@ int runMapperConformanceProbe()
         m68Expires?"PASS":"FAIL",m68StateRestoresTimer?"PASS":"FAIL",m68Gate?"PASS":"FAIL");
     ok &= mapper68;
 
-    // MMC3: $C001 requests a reload on the next filtered A12 rising edge.
-    // A short low pulse must not clock the counter; a qualified low period
-    // followed by A12 rising decrements 1->0 and asserts IRQ.
     auto mmc3 = makeMapper(4);
     mmc3->cpuWrite(0xC000, 0x01, 0);
     mmc3->cpuWrite(0xC001, 0x00, 0);
@@ -597,22 +515,18 @@ int runMapperConformanceProbe()
     mmc3->notifyPpuAddress(0x0000, 14);
     mmc3->notifyPpuAddress(0x1000, 22);
     const bool mmc3QualifiedIrq = mmc3->irqActive();
-    // Hardware-verified blargg MMC3 details: the counter keeps running while
-    // IRQ output is disabled; $C001 only marks the *next* qualified edge for
-    // reload; and revision-B MMC3s assert IRQ when a zero reload leaves the
-    // counter at zero. Also pin the A12 low-pass threshold itself at 8 PPU
-    // clocks: seven low clocks must be rejected, eight must qualify.
+
     auto mmc3Disabled = makeMapper(4);
     mmc3Disabled->cpuWrite(0xC000, 0x02, 0);
     mmc3Disabled->cpuWrite(0xC001, 0x00, 0);
     mmc3Disabled->cpuWrite(0xE000, 0x00, 0);
     mmc3Disabled->notifyPpuAddress(0x0000, 100);
-    mmc3Disabled->notifyPpuAddress(0x1000, 108); // reload 2, IRQ disabled
+    mmc3Disabled->notifyPpuAddress(0x1000, 108);
     mmc3Disabled->notifyPpuAddress(0x0000, 109);
-    mmc3Disabled->notifyPpuAddress(0x1000, 117); // 2 -> 1 while disabled
+    mmc3Disabled->notifyPpuAddress(0x1000, 117);
     mmc3Disabled->cpuWrite(0xE001, 0x00, 0);
     mmc3Disabled->notifyPpuAddress(0x0000, 118);
-    mmc3Disabled->notifyPpuAddress(0x1000, 126); // 1 -> 0, now IRQ
+    mmc3Disabled->notifyPpuAddress(0x1000, 126);
     const bool mmc3RunsDisabled = mmc3Disabled->irqActive();
 
     auto mmc3Deferred = makeMapper(4);
@@ -629,10 +543,10 @@ int runMapperConformanceProbe()
     mmc3Threshold->cpuWrite(0xC001, 0x00, 0);
     mmc3Threshold->cpuWrite(0xE001, 0x00, 0);
     mmc3Threshold->notifyPpuAddress(0x0000, 300);
-    mmc3Threshold->notifyPpuAddress(0x1000, 307); // 7 clocks: reject
+    mmc3Threshold->notifyPpuAddress(0x1000, 307);
     const bool mmc3SevenRejected = !mmc3Threshold->irqActive();
     mmc3Threshold->notifyPpuAddress(0x0000, 308);
-    mmc3Threshold->notifyPpuAddress(0x1000, 316); // 8 clocks: qualify
+    mmc3Threshold->notifyPpuAddress(0x1000, 316);
     const bool mmc3EightAccepted = mmc3Threshold->irqActive();
 
     std::printf("mmc3_reload=%s short_filter=%s qualified_irq=%s disabled_run=%s c001_deferred=%s revB_zero=%s a12_7=%s a12_8=%s\n",
@@ -648,9 +562,6 @@ int runMapperConformanceProbe()
         mmc3RunsDisabled && mmc3C001NoImmediateIrq && mmc3RevBZeroIrq &&
         mmc3SevenRejected && mmc3EightAccepted;
 
-    // Mapper 12.0 (Gouder SL-5020B): Huang-1 operates as an MMC3A and
-    // an external GAL at $4132 independently supplies CHR A18 for the two
-    // PPU pattern-table halves. The GAL is outside MMC3 CHR inversion.
     auto m12 = makeMapper(12, 0x40000, 0x80000, 0, 0, 0, true);
     uint32_t m12LoA=0,m12HiA=0,m12LoB=0,m12HiB=0;
     m12->cpuWrite(0x4132, 0x01, 0);
@@ -674,9 +585,6 @@ int runMapperConformanceProbe()
         m12Mmc3aZero?"PASS":"FAIL",m12Gate?"PASS":"FAIL");
     ok &= mapper12;
 
-    // Front Fareast RAM-cartridge extracts. Mapper 6 selects one of the
-    // latch-based Magic Card modes, mapper 8 is mapper 6 mode 4, mapper 12.1
-    // powers up in 4M mode, and mapper 17 adds 1 KiB CHR banking + IRQ.
     auto m6 = makeMapper(6, 0x20000, 0, 0x29000, 0x8000, 0, true);
     uint32_t m6Lo0=0,m6Hi0=0,m6Lo3=0;
     m6->mapPrgRam(0x8000,m6Lo0,false); m6->mapPrgRam(0xC000,m6Hi0,false);
@@ -707,9 +615,6 @@ int runMapperConformanceProbe()
         mapper6?"PASS":"FAIL",mapper8?"PASS":"FAIL",mapper12smc?"PASS":"FAIL",mapper17?"PASS":"FAIL",smcGate?"PASS":"FAIL");
     ok &= mapper6 && mapper8 && mapper12smc && mapper17 && smcGate;
 
-    // Nintendo MMC3 multicarts. Mappers 37 and 47 replace WRAM with an outer
-    // bank latch; mapper 49 adds an outer block register plus a 32 KiB PRG
-    // mode. All retain the underlying MMC3 banking/IRQ engine.
     auto m37 = makeMapper(37, 0x40000, 0x40000, 0, 0);
     uint32_t m37Prg0=0,m37Prg3=0,m37Prg4=0,m37Chr4=0;
     m37->cpuMapRead(0xE000,m37Prg0);
@@ -726,11 +631,11 @@ int runMapperConformanceProbe()
 
     auto m49 = makeMapper(49, 0x80000, 0x80000, 0, 0);
     uint32_t m49Mode32Lo=0,m49Mode32Hi=0,m49Blocked=0,m49Mmc3=0,m49Chr=0;
-    m49->cpuWrite(0x6000,0x20,0); // P=2, 32 KiB mode
+    m49->cpuWrite(0x6000,0x20,0);
     m49->cpuMapRead(0x8000,m49Mode32Lo); m49->cpuMapRead(0xE000,m49Mode32Hi);
-    m49->cpuWrite(0xA001,0x00,0); // disable outer-register writes
+    m49->cpuWrite(0xA001,0x00,0);
     m49->cpuWrite(0x6000,0xC1,0); m49->cpuMapRead(0x8000,m49Blocked);
-    m49->cpuWrite(0xA001,0x80,0); // enable + writable
+    m49->cpuWrite(0xA001,0x80,0);
     m49->cpuWrite(0x6000,0xC1,0); m49->cpuMapRead(0xE000,m49Mmc3); m49->ppuMapRead(0x0000,m49Chr);
     const bool mapper49 = m49Mode32Lo == 0x10000 && m49Mode32Hi == 0x16000 &&
         m49Blocked == 0x10000 && m49Mmc3 == 0x7E000 && m49Chr == 0x60000;
@@ -738,16 +643,14 @@ int runMapperConformanceProbe()
         mapper37 ? "PASS" : "FAIL", mapper47 ? "PASS" : "FAIL", mapper49 ? "PASS" : "FAIL");
     ok &= mapper37 && mapper47 && mapper49;
 
-    // Mapper 114/115: MMC3 clones with NROM override and outer CHR banking.
-    // Mapper 114 additionally scrambles MMC3 register addresses and bank indices.
     auto m114 = makeMapper(114, 0x80000, 0x80000, 0, 0, 0, true, Mirror::Vertical);
-    m114->cpuWrite(0xA000, 0x04, 0); // sub0: real $8000, index 4 -> MMC3 reg 6
-    m114->cpuWrite(0xC000, 0x03, 0); // sub0: real $8001
+    m114->cpuWrite(0xA000, 0x04, 0);
+    m114->cpuWrite(0xC000, 0x03, 0);
     uint32_t m114Bank=0,m114NromLo=0,m114NromHi=0,m114Chr=0;
     m114->cpuMapRead(0x8000,m114Bank);
-    m114->cpuWrite(0x8001, 0x01, 0); // sub0: real $A000 mirroring
+    m114->cpuWrite(0x8001, 0x01, 0);
     const bool m114Mirror = m114->mirroring() == Mirror::Horizontal;
-    m114->cpuWrite(0x6000, 0x83, 0); // NROM-128, bank 3
+    m114->cpuWrite(0x6000, 0x83, 0);
     m114->cpuMapRead(0x8000,m114NromLo); m114->cpuMapRead(0xC000,m114NromHi);
     m114->cpuWrite(0x6001, 0x01, 0); m114->ppuMapRead(0x0000,m114Chr);
     m114->cpuWrite(0xE001, 0, 0); m114->scanlineTick();
@@ -756,13 +659,13 @@ int runMapperConformanceProbe()
         m114NromLo == 0x0C000 && m114NromHi == 0x0C000 && m114Chr == 0x40000 && m114IrqZero;
 
     auto m114s1 = makeMapper(114, 0x80000, 0x80000, 0, 0, 1, true, Mirror::Vertical);
-    m114s1->cpuWrite(0x8001, 0x01, 0); // sub1: real $8001, not mirroring
+    m114s1->cpuWrite(0x8001, 0x01, 0);
     const bool mapper114Sub1 = m114s1->mirroring() == Mirror::Vertical;
 
     auto m115 = makeMapper(115, 0x80000, 0x80000, 0, 0, 0, true);
     uint32_t m115Low=0,m115Outer=0,m115Chr=0;
     m115->cpuMapRead(0xE000,m115Low);
-    m115->cpuWrite(0x6000, 0x40, 0); // normal MMC3 + PRG A18
+    m115->cpuWrite(0x6000, 0x40, 0);
     m115->cpuMapRead(0xE000,m115Outer);
     m115->cpuWrite(0x6001, 1, 0); m115->ppuMapRead(0x0000,m115Chr);
     m115->cpuWrite(0xE001, 0, 0); m115->scanlineTick();
@@ -772,8 +675,6 @@ int runMapperConformanceProbe()
         mapper114?"PASS":"FAIL", mapper114Sub1?"PASS":"FAIL", mapper115?"PASS":"FAIL");
     ok &= mapper114 && mapper114Sub1 && mapper115;
 
-    // Mapper 197 changes only MMC3 CHR wiring. Submapper 0 exposes one 4 KiB
-    // bank plus two 2 KiB banks; submapper 3 also has a WRAM-gated PRG A17 latch.
     auto m197 = makeMapper(197, 0x40000, 0x80000, 0, 0, 0, true);
     m197->cpuWrite(0x8000, 0x00, 0); m197->cpuWrite(0x8001, 0x02, 0);
     uint32_t m197c0=0,m197c3=0;
@@ -781,28 +682,25 @@ int runMapperConformanceProbe()
     const bool mapper197Chr = m197c0 == 0x01000 && m197c3 == 0x01C00;
 
     auto m197s3 = makeMapper(197, 0x40000, 0x80000, 0, 0, 3, true);
-    m197s3->cpuWrite(0x6000, 0x09, 0); // S=1, PRG A17=1
+    m197s3->cpuWrite(0x6000, 0x09, 0);
     uint32_t m197Prg=0; m197s3->cpuMapRead(0xE000,m197Prg);
     const bool mapper197Outer = m197Prg == 0x3E000;
     std::printf("mapper197_chr=%s outer=%s\n", mapper197Chr?"PASS":"FAIL", mapper197Outer?"PASS":"FAIL");
     ok &= mapper197Chr && mapper197Outer;
 
-    // MMC6 (NES 2.0 mapper 4 submapper 1): 1 KiB internal RAM is mirrored
-    // through $7000-$7FFF and split into independently readable/writable 512B
-    // halves. $8000 bit 5 is the global RAM enable.
     auto mmc6 = makeMapper(4, 0x40000, 0x20000, 0, 0, 1, true);
-    mmc6->cpuWrite(0x8000, 0x20, 0); // global RAM enable
-    mmc6->cpuWrite(0xA001, 0x30, 0); // low half read+write only
+    mmc6->cpuWrite(0x8000, 0x20, 0);
+    mmc6->cpuWrite(0xA001, 0x30, 0);
     mmc6->cpuWrite(0x7000, 0xA5, 0);
     uint8_t mmc6Low=0, mmc6High=0, mmc6Mirror=0;
     const bool mmc6LowDriven = mmc6->cpuReadRegister(0x7000, mmc6Low);
     const bool mmc6HighDriven = mmc6->cpuReadRegister(0x7200, mmc6High);
     const bool mmc6MirrorDriven = mmc6->cpuReadRegister(0x7400, mmc6Mirror);
-    mmc6->cpuWrite(0xA001, 0x20, 0); // low read only
+    mmc6->cpuWrite(0xA001, 0x20, 0);
     mmc6->cpuWrite(0x7000, 0x5A, 0);
     uint8_t mmc6Protected=0;
     mmc6->cpuReadRegister(0x7000, mmc6Protected);
-    mmc6->cpuWrite(0x8000, 0x00, 0); // global disable also clears protections
+    mmc6->cpuWrite(0x8000, 0x00, 0);
     uint8_t mmc6Open=0;
     const bool mmc6DisabledDriven = mmc6->cpuReadRegister(0x7000, mmc6Open);
     const bool mmc6Ram = mmc6LowDriven && mmc6Low == 0xA5 && mmc6HighDriven && mmc6High == 0x00 &&
@@ -811,11 +709,6 @@ int runMapperConformanceProbe()
         mmc6Ram ? "PASS" : "FAIL", mmc6Low, mmc6High, mmc6Mirror);
     ok &= mmc6Ram;
 
-    // MMC5 Phase 48: scanline/frame state must be inferred from the PPU bus,
-    // not injected from the emulator's scanline counter. Two matching NT
-    // reads are insufficient; three arm synchronization and the following PPU
-    // read detects the scanline. Three CPU clocks without a PPU read leave the
-    // frame and acknowledge pending IRQ state.
     auto mmc5 = makeMapper(5);
     auto mmc5Scanline = [&](uint16_t nt) {
         mmc5->notifyPpuAddressContext(nt, 0, 0, 337);
@@ -840,11 +733,11 @@ int runMapperConformanceProbe()
     mmc5Scanline(0x2001);
     const bool mmc5ZeroNoIrq = !mmc5->irqActive();
     mmc5->cpuWrite(0x5203, 0x03, 0);
-    mmc5Scanline(0x2002); // counter 2 after the earlier zero-compare line
-    mmc5Scanline(0x2003); // counter 3 -> pending
+    mmc5Scanline(0x2002);
+    mmc5Scanline(0x2003);
     const bool mmc5IrqRaised = mmc5->irqActive();
-    mmc5->clockCpu(); // consumes the PPU-read-seen latch
-    mmc5->clockCpu(); mmc5->clockCpu(); mmc5->clockCpu(); // three idle M2 rises
+    mmc5->clockCpu();
+    mmc5->clockCpu(); mmc5->clockCpu(); mmc5->clockCpu();
     const bool mmc5FrameAck = !mmc5->irqActive();
     mmc5->cpuReadRegister(0x5204, mmc5Status);
     const bool mmc5IdleLeavesFrame = (mmc5Status & 0x40) == 0;
@@ -858,13 +751,9 @@ int runMapperConformanceProbe()
     ok &= mmc5TwoReadsNoFrame && mmc5ThirdArmsOnly && mmc5FourthStartsFrame &&
         mmc5ZeroNoIrq && mmc5IrqRaised && mmc5FrameAck && mmc5IdleLeavesFrame;
 
-    // MMC5 Phase 49: vertical split position is based on the 34 nametable
-    // tile fetches, not on PPU dot/8. Two prefetched tiles mean scanline dot 1
-    // corresponds to split column 2. With a left split threshold of 3, dot 1
-    // must be inside the split and dot 9 (column 3) must be outside it.
     auto mmc5Split = makeMapper(5);
     mmc5Split->cpuWrite(0x5104, 0x00, 0);
-    mmc5Split->cpuWrite(0x5200, 0x83, 0); // enable, left side, threshold 3
+    mmc5Split->cpuWrite(0x5200, 0x83, 0);
     mmc5Split->cpuWrite(0x5201, 0x00, 0);
     mmc5Split->cpuWrite(0x5202, 0x02, 0);
     auto syncMmc5Line = [&](uint16_t nt, int line) {
@@ -873,10 +762,10 @@ int runMapperConformanceProbe()
         mmc5Split->notifyPpuAddressContext(nt, 0, line, 1);
         mmc5Split->notifyPpuAddressContext(uint16_t((nt & 0x2C00) | 0x03C0), 0, line, 3);
     };
-    syncMmc5Line(0x2000, 0); // enter frame
+    syncMmc5Line(0x2000, 0);
     mmc5Split->notifyPpuAddressContext(0x2000, 0, 0, 337);
     mmc5Split->notifyPpuAddressContext(0x2000, 0, 0, 339);
-    mmc5Split->notifyPpuAddressContext(0x2000, 0, 1, 1); // column 2
+    mmc5Split->notifyPpuAddressContext(0x2000, 0, 1, 1);
     NametableSource splitSrc = NametableSource::Ciram;
     uint32_t splitMapped = 0;
     const bool splitDot1Mapped = mmc5Split->mapNametable(0x2000, splitSrc, splitMapped) &&
@@ -892,12 +781,9 @@ int runMapperConformanceProbe()
         splitDot1Mapped ? "PASS" : "FAIL", splitDot9Normal ? "PASS" : "FAIL");
     ok &= mmc5SplitFetchCounter;
 
-
-    // NES 2.0 submapper distinctions that represent genuinely different
-    // boards must not be collapsed into the generic mapper behavior.
     auto g101Major = makeMapper(32, 0x20000, 0x20000, 0, 0, 1, true);
     g101Major->cpuWrite(0x8000, 1, 0);
-    g101Major->cpuWrite(0x9000, 3, 0); // must be ignored on Major League board
+    g101Major->cpuWrite(0x9000, 3, 0);
     uint32_t g101Mapped = 0;
     g101Major->cpuMapRead(0x8000, g101Mapped);
     const bool g101MajorLeague = g101Mapped == 0x2000 && g101Major->mirroring() == Mirror::OnescreenHi;
@@ -917,16 +803,14 @@ int runMapperConformanceProbe()
         holy->mirroring() == Mirror::Vertical;
 
     auto vrc7b = makeMapper(85, 0x40000, 0x20000, 0x2000, 0, 1, true);
-    // VRC7b uses CPU A3 as ASIC An. A4 is not a reject condition: it aliases
-    // the same register, so $8010 -> $8000 and $8018 -> $8008.
+
     const bool vrc7bAliasA4Low = vrc7b->cpuWrite(0x8010, 3, 0);
     uint32_t vrc7bLowMapped = 0; vrc7b->cpuMapRead(0x8000, vrc7bLowMapped);
     const bool vrc7bAliasA4High = vrc7b->cpuWrite(0x8018, 5, 0);
     uint32_t vrc7bHighMapped = 0; vrc7b->cpuMapRead(0xA000, vrc7bHighMapped);
 
     auto vrc7a = makeMapper(85, 0x40000, 0x20000, 0x2000, 0, 2, true);
-    // VRC7a uses CPU A4 as ASIC An. A3 is ignored, so $8008 -> $8000
-    // while $8010 selects the canonical second PRG register.
+
     const bool vrc7aAliasA3Low = vrc7a->cpuWrite(0x8008, 3, 0);
     uint32_t vrc7aLowMapped = 0; vrc7a->cpuMapRead(0x8000, vrc7aLowMapped);
     const bool vrc7aSelectA4High = vrc7a->cpuWrite(0x8010, 5, 0);
@@ -941,9 +825,6 @@ int runMapperConformanceProbe()
         mapper78Submaps ? "PASS" : "FAIL", vrc7Submaps ? "PASS" : "FAIL");
     ok &= g101MajorLeague && camericaSubmaps && mapper78Submaps && vrc7Submaps;
 
-    // VRC7 $E000 bit 6 is an audio reset, not a temporary mixer mute. A note
-    // must not resume after reset is released, and register writes made while
-    // reset is asserted must be ignored.
     auto vrc7Audio = makeMapper(85, 0x40000, 0x20000, 0x2000, 0, 0, false);
     auto vrc7WriteReg = [&](uint8_t reg, uint8_t value) {
         vrc7Audio->cpuWrite(0x9010, reg, 0);
@@ -958,12 +839,12 @@ int runMapperConformanceProbe()
         return peak;
     };
     vrc7WriteReg(0x10, 0xFF);
-    vrc7WriteReg(0x20, 0x19); // fnum high=1, octave=4, key on
-    vrc7WriteReg(0x30, 0x10); // preset 1, maximum volume
+    vrc7WriteReg(0x20, 0x19);
+    vrc7WriteReg(0x30, 0x10);
     const bool vrc7SoundBeforeReset = vrc7Peak(20000) > 0.0001f;
     vrc7Audio->cpuWrite(0xE000, 0x40, 0);
     const bool vrc7MutedInReset = std::fabs(vrc7Audio->expansionAudioSample()) < 0.000001f;
-    vrc7WriteReg(0x10, 0xFF); // all ignored while reset is asserted
+    vrc7WriteReg(0x10, 0xFF);
     vrc7WriteReg(0x20, 0x19);
     vrc7WriteReg(0x30, 0x10);
     vrc7Audio->cpuWrite(0xE000, 0x00, 0);
@@ -980,10 +861,6 @@ int runMapperConformanceProbe()
         vrc7StaysSilentAfterReset ? "PASS" : "FAIL", vrc7CanRestart ? "PASS" : "FAIL");
     ok &= vrc7AudioReset;
 
-
-    // UNROM-512: NES 2.0 submappers define conflicts and mirroring/address
-    // decode. Battery-backed variants expose the SST39SF040 flash at
-    // $8000-$BFFF while the bank latch remains at $C000-$FFFF.
     auto u512Conflict = makeMapper(30, 0x80000, 0, 0, 0x8000, 2, true);
     auto u512NoConflict = makeMapper(30, 0x80000, 0, 0, 0x8000, 1, true);
     const bool u512ConflictModes = u512Conflict->hasBusConflicts() && !u512NoConflict->hasBusConflicts();
@@ -996,7 +873,7 @@ int runMapperConformanceProbe()
     u512Led->cpuWrite(0xC000, 0x02, 0);
     uint32_t u512Before=0,u512After=0;
     u512Led->cpuMapRead(0x8000,u512Before);
-    u512Led->cpuWrite(0x8000,0x1F,0); // LED register, must not alter bank
+    u512Led->cpuWrite(0x8000,0x1F,0);
     u512Led->cpuMapRead(0x8000,u512After);
 
     auto u512Flash = makeMapper(30, 0x80000, 0, 0, 0x8000, 1, true, Mirror::Horizontal, true);
@@ -1015,19 +892,16 @@ int runMapperConformanceProbe()
         return std::pair<bool,uint8_t>{drove, value};
     };
 
-    // Byte program: AA@5555, 55@2AAA, A0@5555, then target write.
     u512Unlock(0xA0);
     u512Select(5); u512Flash->cpuWrite(0x8123, 0x5A, 0);
     const auto u512Programmed = u512Read(5, 0x8123);
     const bool u512Program = u512Programmed.first && u512Programmed.second == 0x5A;
 
-    // NOR programming may only clear bits without an erase.
     u512Unlock(0xA0);
     u512Select(5); u512Flash->cpuWrite(0x8123, 0xF0, 0);
     const auto u512Anded = u512Read(5, 0x8123);
     const bool u512NorAnd = u512Anded.first && u512Anded.second == (0x5A & 0xF0);
 
-    // 4 KiB sector erase: unlock 80, unlock again, then 30 in target sector.
     u512Unlock(0x80);
     u512Select(1); u512Flash->cpuWrite(0x9555, 0xAA, 0);
     u512Select(0); u512Flash->cpuWrite(0xAAAA, 0x55, 0);
@@ -1035,7 +909,6 @@ int runMapperConformanceProbe()
     const auto u512Erased = u512Read(5, 0x8123);
     const bool u512SectorErase = u512Erased.first && u512Erased.second == 0xFF;
 
-    // Reprogram, then verify mapper-owned flash survives battery serialization.
     u512Unlock(0xA0);
     u512Select(5); u512Flash->cpuWrite(0x8123, 0xA5, 0);
     std::vector<uint8_t> u512Battery;
@@ -1049,7 +922,6 @@ int runMapperConformanceProbe()
     const bool u512BatteryRead = u512Reloaded->cpuReadRegister(0x8123, u512PersistedValue) &&
         u512PersistedValue == 0xA5;
 
-    // Save states include the mutable flash image, not merely the latch.
     std::vector<uint8_t> u512State;
     u512Flash->saveState(u512State);
     u512Unlock(0x80);
@@ -1074,21 +946,18 @@ int runMapperConformanceProbe()
         u512StatePersistence?"PASS":"FAIL");
     ok &= u512;
 
-    // Mapper 15: exercise all four PRG banking modes and mirroring latch.
     auto m15 = makeMapper(15, 0x100000, 0, 0, 0x2000);
     uint32_t m15a=0,m15b=0,m15c=0,m15d=0;
-    m15->cpuWrite(0x8000, 0x42, 0); // mode 0, P=2, H mirror
+    m15->cpuWrite(0x8000, 0x42, 0);
     m15->cpuMapRead(0x8000,m15a); m15->cpuMapRead(0xC000,m15b);
-    m15->cpuWrite(0x8002, 0x82, 0); // mode 2, P=2, p=1
+    m15->cpuWrite(0x8002, 0x82, 0);
     m15->cpuMapRead(0x8000,m15c); m15->cpuMapRead(0xE000,m15d);
     const bool mapper15 = m15a == 0x8000 && m15b == 0xC000 && m15c == 0xA000 && m15d == 0xA000 &&
-        m15->mirroring() == Mirror::Vertical; // second write clears D6
+        m15->mirroring() == Mirror::Vertical;
     std::printf("mapper15_modes=%s m0=%05X/%05X m2=%05X/%05X\n", mapper15?"PASS":"FAIL",
         unsigned(m15a),unsigned(m15b),unsigned(m15c),unsigned(m15d));
     ok &= mapper15;
 
-    // Mapper 31: eight independent 4 KiB slots at $8000-$FFFF, selected by
-    // writes to $5FF8-$5FFF; the final slot powers up to bank $FF.
     auto m31 = makeMapper(31, 0x100000, 0, 0, 0x2000);
     uint32_t m31Last=0,m31Slot=0;
     m31->cpuMapRead(0xF000,m31Last);
@@ -1099,36 +968,28 @@ int runMapperConformanceProbe()
         unsigned(m31Last),unsigned(m31Slot));
     ok &= mapper31;
 
-    // Mapper 116 (Huang-1/Huang-2): three independent mapper personalities
-    // selected by $4100. State must survive switching, VRC2 CHR registers
-    // power up to $FF, and supervisor bit 2 supplies CHR A18.
     auto m116 = makeMapper(116, 0x40000, 0x80000, 0x2000, 0, 0, true);
-    m116->cpuWrite(0x8000, 0x06, 0); m116->cpuWrite(0x8001, 0x03, 0); // MMC3 R6=3
+    m116->cpuWrite(0x8000, 0x06, 0); m116->cpuWrite(0x8001, 0x03, 0);
     uint32_t m116Mmc3Before=0,m116Vrc=0,m116VrcChr=0,m116Mmc3After=0,m116OuterChr=0;
     m116->cpuMapRead(0x8000,m116Mmc3Before);
-    m116->cpuWrite(0x4100,0x00,10); // VRC2
-    m116->ppuMapRead(0x0000,m116VrcChr); // power-on CHR bank $FF
+    m116->cpuWrite(0x4100,0x00,10);
+    m116->ppuMapRead(0x0000,m116VrcChr);
     m116->cpuWrite(0x8000,0x05,11); m116->cpuMapRead(0x8000,m116Vrc);
-    m116->cpuWrite(0x4100,0x01,12); // MMC3 state must reappear
+    m116->cpuWrite(0x4100,0x01,12);
     m116->cpuMapRead(0x8000,m116Mmc3After);
-    m116->cpuWrite(0x4100,0x05,13); // MMC3 + CHR A18
+    m116->cpuWrite(0x4100,0x05,13);
     m116->ppuMapRead(0x0000,m116OuterChr);
     const bool mapper116Modes = m116Mmc3Before == 0x06000 && m116Vrc == 0x0A000 &&
         m116VrcChr == 0x3FC00 && m116Mmc3After == 0x06000 && m116OuterChr == 0x40000;
 
-    // Huang-1 -W (submapper 0) resets MMC1's serial latch when entering MMC1.
-    // Start a partial serial transaction, leave MMC1, return, then write a full
-    // PRG register. It must decode from a clean latch.
     auto m116w = makeMapper(116, 0x40000, 0x20000, 0x2000, 0, 0, true);
     m116w->cpuWrite(0x4100,0x02,20);
-    m116w->cpuWrite(0xE000,1,22); m116w->cpuWrite(0xE000,1,24); // partial
+    m116w->cpuWrite(0xE000,1,22); m116w->cpuWrite(0xE000,1,24);
     m116w->cpuWrite(0x4100,0x01,26); m116w->cpuWrite(0x4100,0x02,28);
     mmc1Serial(*m116w,0xE000,2,30);
     uint32_t m116wPrg=0; m116w->cpuMapRead(0x8000,m116wPrg);
     const bool mapper116WReset = m116wPrg == 0x08000;
 
-    // Huang-2 changes the MMC1 PRG output wiring so register bank 2 selects
-    // what corresponds to bank 4 on a normal 16 KiB MMC1 board.
     auto m116h2 = makeMapper(116, 0x40000, 0x20000, 0x2000, 0, 2, true);
     m116h2->cpuWrite(0x4100,0x02,40);
     mmc1Serial(*m116h2,0xE000,2,42);
@@ -1139,24 +1000,20 @@ int runMapperConformanceProbe()
         unsigned(m116Mmc3Before), unsigned(m116Vrc), unsigned(m116VrcChr));
     ok &= mapper116Modes && mapper116WReset && mapper116H2;
 
-    // Mapper 116 submapper 3: Mario 5-in-1 uses the Reset button as an
-    // outer selector. Game 0 occupies 256 KiB; games 1-4 occupy consecutive
-    // 128 KiB windows. Internal mapper state remains live while Reset changes
-    // only the outer ROM window, and a hard reset returns to game 0.
     auto m116multi = makeMapper(116, 0xC0000, 0xC0000, 0x2000, 0, 3, true);
-    m116multi->cpuWrite(0x4100, 0x00, 100); // VRC2 mode
-    m116multi->cpuWrite(0x8000, 0x01, 102); // deterministic 8 KiB inner bank
+    m116multi->cpuWrite(0x4100, 0x00, 100);
+    m116multi->cpuWrite(0x8000, 0x01, 102);
     uint32_t resetBanks[6] = {};
     m116multi->cpuMapRead(0x8000, resetBanks[0]);
     for (int i = 1; i < 6; ++i) {
         m116multi->reset(false);
         m116multi->cpuMapRead(0x8000, resetBanks[i]);
     }
-    m116multi->reset(false); // game 1
-    m116multi->reset(false); // game 2
+    m116multi->reset(false);
+    m116multi->reset(false);
     std::vector<uint8_t> m116State;
     m116multi->saveState(m116State);
-    m116multi->reset(false); // game 3
+    m116multi->reset(false);
     const uint8_t* m116StateP = m116State.data();
     const bool m116StateLoaded = m116multi->loadState(m116StateP, m116StateP + m116State.size()) &&
         m116StateP == m116State.data() + m116State.size();
@@ -1175,30 +1032,26 @@ int runMapperConformanceProbe()
         unsigned(restoredResetBank), unsigned(hardResetBank));
     ok &= mapper116Reset;
 
-
-    // Mapper 45 / GA23C: four sequential outer registers mask and OR
-    // the underlying MMC3 PRG/CHR bank numbers. Register #3 locks further
-    // outer writes; any $6001-decode write clears the outer state and unlocks.
     auto m45 = makeMapper(45, 0x800000, 0x400000, 0x2000, 0);
-    m45->cpuWrite(0x8000, 0x06, 0); m45->cpuWrite(0x8001, 0x2A, 0); // R6
-    m45->cpuWrite(0x8000, 0x02, 0); m45->cpuWrite(0x8001, 0x55, 0); // R2
+    m45->cpuWrite(0x8000, 0x06, 0); m45->cpuWrite(0x8001, 0x2A, 0);
+    m45->cpuWrite(0x8000, 0x02, 0); m45->cpuWrite(0x8001, 0x55, 0);
     uint32_t m45BasePrg=0,m45BaseChr=0;
     m45->cpuMapRead(0x8000,m45BasePrg); m45->ppuMapRead(0x1000,m45BaseChr);
-    m45->cpuWrite(0x6000, 0x80, 0); // #0 CHR OR low
-    m45->cpuWrite(0x6000, 0x41, 0); // #1 PRG OR low/A19-A20
-    m45->cpuWrite(0x6000, 0x8E, 0); // #2 CHR mask/high + PRG A21-A22
-    m45->cpuWrite(0x6000, 0x70, 0); // #3 PRG mask + lock
+    m45->cpuWrite(0x6000, 0x80, 0);
+    m45->cpuWrite(0x6000, 0x41, 0);
+    m45->cpuWrite(0x6000, 0x8E, 0);
+    m45->cpuWrite(0x6000, 0x70, 0);
     uint32_t m45OuterPrg=0,m45OuterChr=0,m45LockedChr=0;
     m45->cpuMapRead(0x8000,m45OuterPrg); m45->ppuMapRead(0x1000,m45OuterChr);
-    m45->cpuWrite(0x6000, 0x01, 0); // locked: must not replace register #0
+    m45->cpuWrite(0x6000, 0x01, 0);
     m45->ppuMapRead(0x1000,m45LockedChr);
 
     std::vector<uint8_t> m45State;
     m45->saveState(m45State);
-    m45->cpuWrite(0x6001, 0x00, 0); // outer reset + unlock
+    m45->cpuWrite(0x6001, 0x00, 0);
     uint32_t m45ResetPrg=0,m45ResetChr=0,m45UnlockedChr=0;
     m45->cpuMapRead(0x8000,m45ResetPrg); m45->ppuMapRead(0x1000,m45ResetChr);
-    m45->cpuWrite(0x6000, 0x20, 0); // must be register #0 after reset
+    m45->cpuWrite(0x6000, 0x20, 0);
     m45->ppuMapRead(0x1000,m45UnlockedChr);
     const uint8_t* m45StateP = m45State.data();
     const bool m45StateLoaded = m45->loadState(m45StateP, m45StateP + m45State.size()) &&
@@ -1216,8 +1069,6 @@ int runMapperConformanceProbe()
         m45LockedChr == m45OuterChr ? "PASS" : "FAIL", m45StateLoaded ? "PASS" : "FAIL");
     ok &= mapper45;
 
-    // Mapper 185: CNROM protection-only latch. NES 2.0 submappers 4-7
-    // identify which low-two-bit latch value enables the single 8 KiB CHR ROM.
     auto m185s4 = makeMapper(185, 0x8000, 0x2000, 0, 0, 4, true);
     uint32_t m185Mapped = 0;
     const bool m185PowerEnabled = m185s4->ppuMapRead(0x0123, m185Mapped) && m185Mapped == 0x0123;
@@ -1227,9 +1078,7 @@ int runMapperConformanceProbe()
     const bool m185WrongInitially = !m185s6->ppuMapRead(0x0000, m185Mapped);
     m185s6->cpuWrite(0x8000, 0x02, 0);
     const bool m185Enabled2 = m185s6->ppuMapRead(0x1ABC, m185Mapped) && m185Mapped == 0x1ABC;
-    // Legacy/iNES submapper 0 cannot identify the programmed CS value. The
-    // compatibility rule is two CPU $2007 pattern reads of open bus ($FF)
-    // after reset, without allowing renderer fetches to consume that window.
+
     auto m185legacy = makeMapper(185, 0x8000, 0x2000, 0, 0, 0, false);
     uint8_t legacyData = 0; uint32_t legacyMapped = 0;
     const bool legacyRenderMaps = !m185legacy->ppuReadOverride(0x0010, PpuFetchKind::Background, legacyData) &&
@@ -1241,7 +1090,6 @@ int runMapperConformanceProbe()
     const bool legacyRead3Maps = !m185legacy->ppuReadOverride(0x0123, PpuFetchKind::Cpu, legacyData) &&
         m185legacy->ppuMapReadEx(0x0123, legacyMapped, PpuFetchKind::Cpu) && legacyMapped == 0x0123;
 
-    // Save state must preserve how many startup reads have already occurred.
     m185legacy->reset(true);
     m185legacy->ppuReadOverride(0x0000, PpuFetchKind::Cpu, legacyData);
     std::vector<uint8_t> m185State; m185legacy->saveState(m185State);
@@ -1263,14 +1111,10 @@ int runMapperConformanceProbe()
     std::printf("mapper185_protection=%s legacy=%s\n", mapper185 ? "PASS" : "FAIL", mapper185Legacy ? "PASS" : "FAIL");
     ok &= mapper185;
 
-    // Mapper 210: Namco 175/340. Legacy submapper 0 is resolved from RAM/
-    // battery metadata: RAM-bearing images use the 175, otherwise the 340.
-    // The 175 has hardwired mirroring and only $C000-$C7FF controls WRAM;
-    // the 340 has no WRAM and uses E000 bits 7-6 as 1A/V/1B/H.
     auto m210Legacy175 = makeMapper(210, 0x80000, 0x40000, 0x0800, 0, 0, true, Mirror::Vertical, false);
     uint32_t m210RamMap = 0;
     const bool m210RamInitiallyLocked = !m210Legacy175->mapPrgRam(0x6000, m210RamMap, true);
-    m210Legacy175->cpuWrite(0xC800, 0x01, 0); // nonexistent on N175
+    m210Legacy175->cpuWrite(0xC800, 0x01, 0);
     const bool m210C800Ignored = !m210Legacy175->mapPrgRam(0x6000, m210RamMap, true);
     m210Legacy175->cpuWrite(0xC000, 0x01, 0);
     const bool m210RamEnabled = m210Legacy175->mapPrgRam(0x6000, m210RamMap, true) && m210RamMap == 0;
@@ -1306,11 +1150,8 @@ int runMapperConformanceProbe()
         m210Gate ? "PASS" : "FAIL");
     ok &= mapper210;
 
-    // Mapper 228: Action 52/Cheetahmen II encode almost all banking in the
-    // write address. Validate 32 KiB mode, mirrored-16 KiB mode, CHR banking,
-    // mirroring, and the physically absent PRG chip-2 open-bus selection.
     auto m228 = makeMapper(228, 0x180000, 0x80000, 0, 0, 0, false, Mirror::Vertical);
-    // chip 1, page 6, 32 KiB mode; CHR high nibble 9 and low bits 2.
+
     const uint16_t a228_32 = uint16_t(0x8000 | 0x0800 | (6u << 6) | 0x0009);
     m228->cpuWrite(a228_32, 0x02, 0);
     uint32_t m228Lo=0,m228Hi=0,m228Chr=0;
@@ -1321,14 +1162,13 @@ int runMapperConformanceProbe()
         m228Lo == 0x98000 && m228Hi == 0x9C000 &&
         m228ChrRead && m228Chr == 0x4C000 && m228->mirroring() == Mirror::Vertical;
 
-    // chip 3, page 3, mirrored 16 KiB mode, horizontal mirroring.
     const uint16_t a228_16 = uint16_t(0x8000 | 0x2000 | 0x1800 | (3u << 6) | 0x0020 | 0x0004);
     m228->cpuWrite(a228_16, 0x01, 0);
     uint32_t m228MirrorLo=0,m228MirrorHi=0;
     const bool m228Mirrored = m228->cpuMapRead(0x8000,m228MirrorLo) && m228->cpuMapRead(0xC000,m228MirrorHi) &&
         m228MirrorLo == 0x10C000 && m228MirrorHi == 0x10C000 && m228->mirroring() == Mirror::Horizontal;
 
-    const uint16_t a228Missing = uint16_t(0x8000 | 0x1000); // chip 2
+    const uint16_t a228Missing = uint16_t(0x8000 | 0x1000);
     m228->cpuWrite(a228Missing, 0, 0);
     uint32_t m228MissingMap=0;
     const bool m228OpenBus = !m228->cpuMapRead(0x8000,m228MissingMap);
@@ -1338,23 +1178,21 @@ int runMapperConformanceProbe()
         unsigned(m228MirrorLo), m228OpenBus ? "PASS" : "FAIL");
     ok &= mapper228;
 
-    // J.Y. Company ASIC (mappers 90/209/211): verify the shared banking,
-    // arithmetic/IRQ hardware and the PCB-specific nametable jumper behavior.
     auto jy90 = makeMapper(90, 0x200000, 0x200000, 0x2000, 0, 0, true);
-    jy90->cpuWrite(0xD000, 0x1A, 0); // 8 KiB PRG, 1 KiB CHR
+    jy90->cpuWrite(0xD000, 0x1A, 0);
     jy90->cpuWrite(0x8000, 0x03, 0);
     jy90->cpuWrite(0x9000, 0x05, 0);
     jy90->cpuWrite(0xA000, 0x00, 0);
-    jy90->cpuWrite(0xD003, 0x15, 0); // PRG outer=2, CHR outer=2 + A18
+    jy90->cpuWrite(0xD003, 0x15, 0);
     uint32_t jyPrg=0,jyChr=0;
     jy90->cpuMapRead(0x8000,jyPrg); jy90->ppuMapRead(0x0000,jyChr);
     const bool jyOuter = jyPrg == 0x106000 && jyChr == 0x141400;
 
-    jy90->cpuWrite(0xD000, 0x03, 0); // reversed-bit 8 KiB PRG mode
+    jy90->cpuWrite(0xD000, 0x03, 0);
     jy90->cpuWrite(0xD003, 0x00, 0);
     jy90->cpuWrite(0x8000, 0x02, 0);
     jy90->cpuMapRead(0x8000,jyPrg);
-    const bool jyReverse = jyPrg == 0x40000; // reverse7(2)=32 -> 32*8 KiB
+    const bool jyReverse = jyPrg == 0x40000;
 
     jy90->cpuWrite(0x5800, 12, 0); jy90->cpuWrite(0x5801, 13, 0);
     uint8_t jyMulLo=0,jyMulHi=0; jy90->cpuReadRegister(0x5800,jyMulLo); jy90->cpuReadRegister(0x5801,jyMulHi);
@@ -1362,7 +1200,7 @@ int runMapperConformanceProbe()
     for(int i=0;i<8;i++) jy90->clockCpu();
     jy90->cpuReadRegister(0x5800,jyMulLo); jy90->cpuReadRegister(0x5801,jyMulHi);
     const bool jyMul = jyMulDeferred && (uint16_t(jyMulLo)|(uint16_t(jyMulHi)<<8)) == 156;
-    jy90->cpuWrite(0xC001,0x40,0); // CPU M2, increment
+    jy90->cpuWrite(0xC001,0x40,0);
     jy90->cpuWrite(0xC004,0xFF,0); jy90->cpuWrite(0xC005,0xFF,0); jy90->cpuWrite(0xC003,0,0);
     jy90->clockCpu();
     const bool jyIrq = jy90->irqActive();
@@ -1377,14 +1215,14 @@ int runMapperConformanceProbe()
     jy209->cpuWrite(0xD001,0x08,0); jy209->cpuWrite(0xB000,1,0);
     const bool jy209Ext = jy209->mapNametable(0x2000,jyNtSource,jyNtMap) &&
         jyNtSource==NametableSource::Ciram && jyNtMap==0x400;
-    jy209->cpuWrite(0xD001,0x00,0); jy209->cpuWrite(0xD000,0x60,0); // ROM NT global
+    jy209->cpuWrite(0xD001,0x00,0); jy209->cpuWrite(0xD000,0x60,0);
     jy209->cpuWrite(0xB000,0x02,0); jy209->cpuWrite(0xB004,0x00,0);
     const bool jyRomNt = jy209->mapNametable(0x2000,jyNtSource,jyNtMap) &&
         jyNtSource==NametableSource::ChrRom && jyNtMap==0x800;
     const bool jyWriteCiram = jy209->mapNametableWrite(0x2000,jyNtSource,jyNtMap) &&
         jyNtSource==NametableSource::Ciram && jyNtMap==0;
-    jy209->cpuWrite(0xD000,0x0A,0); // 4 KiB CHR + 8 KiB PRG
-    jy209->cpuWrite(0xD003,0x80,0); // enable MMC4-like latches
+    jy209->cpuWrite(0xD000,0x0A,0);
+    jy209->cpuWrite(0xD003,0x80,0);
     jy209->cpuWrite(0x9000,0x00,0); jy209->cpuWrite(0x9002,0x04,0);
     uint32_t jyLatch0=0,jyLatch1=0; jy209->ppuMapRead(0x0000,jyLatch0);
     jy209->notifyPpuAddress(0x0FE8,0); jy209->ppuMapRead(0x0000,jyLatch1);
@@ -1399,13 +1237,10 @@ int runMapperConformanceProbe()
         jyRomNt?"PASS":"FAIL", jyWriteCiram?"PASS":"FAIL", jyMmc4Latch?"PASS":"FAIL", jy35Wram?"PASS":"FAIL");
     ok &= mapperJY;
 
-    // Mapper 176 / 8025-FK23C foundations. Submapper 0 is the six-bit
-    // MMC3 variant; submapper 1 expands to eight MMC3 PRG bits and adds
-    // extended MMC3 plus CNROM/NROM CHR modes.
     auto m176s0 = makeMapper(176, 0x200000, 0x100000, 0x2000, 0, 0, true);
     uint32_t m176s0Fixed=0,m176s0Outer=0;
     m176s0->cpuMapRead(0xE000,m176s0Fixed);
-    m176s0->cpuWrite(0x5000,0x01,0); // 256 KiB MMC3 outer window
+    m176s0->cpuWrite(0x5000,0x01,0);
     m176s0->cpuWrite(0x5001,0x70,0);
     m176s0->cpuWrite(0x8000,0x06,0); m176s0->cpuWrite(0x8001,0x03,0);
     m176s0->cpuMapRead(0x8000,m176s0Outer);
@@ -1413,52 +1248,48 @@ int runMapperConformanceProbe()
 
     auto m176s1 = makeMapper(176, 0x400000, 0x100000, 0x2000, 0, 1, true);
     uint32_t m176Ext=0,m176Ignored=0,m176Cnrom=0,m176Nrom=0;
-    m176s1->cpuWrite(0x5003,0x02,0); // extended MMC3
+    m176s1->cpuWrite(0x5003,0x02,0);
     m176s1->cpuWrite(0x8000,0x08,0); m176s1->cpuWrite(0x8001,0x22,0);
     m176s1->cpuMapRead(0xC000,m176Ext);
-    m176s1->cpuWrite(0x8002,0x07,0); // E003 decode: must not alias $8000/$8001
+    m176s1->cpuWrite(0x8002,0x07,0);
     m176s1->cpuMapRead(0xC000,m176Ignored);
     m176s1->cpuWrite(0x5003,0x00,0);
     m176s1->cpuWrite(0x5002,0x20,0);
-    m176s1->cpuWrite(0x5000,0x40,0); // CNROM 32 KiB mode
+    m176s1->cpuWrite(0x5000,0x40,0);
     m176s1->cpuWrite(0x8000,0x02,0); m176s1->ppuMapRead(0x0000,m176Cnrom);
-    m176s1->cpuWrite(0x5000,0x60,0); // NROM CHR mode
+    m176s1->cpuWrite(0x5000,0x60,0);
     m176s1->ppuMapRead(0x0000,m176Nrom);
     const bool m176Fk23 = m176Ext==0x44000 && m176Ignored==m176Ext &&
         m176Cnrom==0x44000 && m176Nrom==0x40000;
-    // Submapper 2 / Waixing FS005: swapped MMC3 $46/$47 banks, 32 KiB
-    // banked WRAM/protection aperture, mixed CHR RAM, and one-screen mirroring.
+
     auto m176s2 = makeMapper(176, 0x4000000, 0x200000, 0x8000, 0x2000, 2, true);
     m176s2->cpuWrite(0x8000,0x06,0); m176s2->cpuWrite(0x8001,0x03,0);
-    uint32_t s2a=0; m176s2->cpuMapRead(0xA000,s2a); // swapped #6 write lands in #7
-    m176s2->cpuWrite(0xA001,0xA1,0); // config on, bank 1, outer regs hidden
+    uint32_t s2a=0; m176s2->cpuMapRead(0xA000,s2a);
+    m176s2->cpuWrite(0xA001,0xA1,0);
     uint32_t s2Prot=0,s2Ram1=0;
     const bool s2ProtMap=m176s2->mapPrgRam(0x5000,s2Prot,false);
     const bool s2RamMap=m176s2->mapPrgRam(0x6000,s2Ram1,false);
-    m176s2->cpuWrite(0xA001,0xE8,0); // config + outer regs + CHR RAM
+    m176s2->cpuWrite(0xA001,0xE8,0);
     m176s2->cpuWrite(0xA000,0x03,0);
     const bool s2Mirror=m176s2->mirroring()==Mirror::OnescreenHi;
     const bool s2ChrRam=m176s2->ppuUsesChrRam(0x0000);
-    m176s2->cpuWrite(0x5000,0x88,0); // PRG A21/A22
-    m176s2->cpuWrite(0x5002,0xE0,0); // PRG A23/A24/A25
+    m176s2->cpuWrite(0x5000,0x88,0);
+    m176s2->cpuWrite(0x5002,0xE0,0);
     uint32_t s2High=0; m176s2->cpuMapRead(0xE000,s2High);
     const bool m176Fs005=s2a==0x06000 && s2ProtMap&&s2Prot==0x5000 &&
         s2RamMap&&s2Ram1==0x2000 && s2Mirror && s2ChrRam && s2High==0x3E7E000;
 
-    // Submapper 3 / JX9003B adds independent PRG/CHR high registers.
     auto m176s3 = makeMapper(176, 0x2000000, 0x1000000, 0x2000, 0, 3, true);
-    m176s3->cpuWrite(0x5005,0x02,0); // PRG A22
-    m176s3->cpuWrite(0x5006,0x01,0); // CHR A21
+    m176s3->cpuWrite(0x5005,0x02,0);
+    m176s3->cpuWrite(0x5006,0x01,0);
     uint32_t s3Prg=0,s3Chr=0; m176s3->cpuMapRead(0xE000,s3Prg); m176s3->ppuMapRead(0x0000,s3Chr);
     const bool m176Jx9003=s3Prg==0x5FE000 && s3Chr==0x200000;
 
-    // Submapper 4 sources PRG A21 from CHR-base bit 7.
     auto m176s4 = makeMapper(176, 0x400000, 0x200000, 0x2000, 0, 4, true);
     m176s4->cpuWrite(0x5002,0x80,0);
     uint32_t s4Prg=0,s4Chr=0; m176s4->cpuMapRead(0xE000,s4Prg); m176s4->ppuMapRead(0x0000,s4Chr);
     const bool m176Smart=s4Prg==0x27E000 && s4Chr==0x100000;
 
-    // Submapper 5 / HST-162 sources PRG A24..A19 from $4800.
     auto m176s5 = makeMapper(176, 0x800000, 0x100000, 0x2000, 0, 5, true);
     m176s5->cpuWrite(0x4800,0x01,0);
     uint32_t s5Prg=0; m176s5->cpuMapRead(0xE000,s5Prg);
@@ -1475,62 +1306,51 @@ int runMapperConformanceProbe()
         m176Jx9003?"PASS":"FAIL",m176Smart?"PASS":"FAIL",m176Hst?"PASS":"FAIL",m176Support?"PASS":"FAIL");
     ok &= m176SixBit && m176Fk23 && m176Fs005 && m176Jx9003 && m176Smart && m176Hst && m176Support;
 
-
-    // Mapper 268 / AA6023 CoolBoy/MindKids. Submappers 0-3 share the ASIC
-    // but move the six outer registers and, on AA6023B, alter register #1.
     auto m268s0 = makeMapper(268, 0x2000000, 0, 0x2000, 0x40000, 0, true);
     uint32_t c0Base=0,c0Outer=0,c0GnLo=0,c0GnHi=0,c0Chr=0;
     m268s0->cpuMapRead(0xE000,c0Base);
-    m268s0->cpuWrite(0x6000,0x77,0); // A24/A23 + forced A19..A17
-    m268s0->cpuWrite(0x6001,0x1C,0); // A22/A21/A20 offsets
+    m268s0->cpuWrite(0x6000,0x77,0);
+    m268s0->cpuWrite(0x6001,0x1C,0);
     m268s0->cpuMapRead(0xE000,c0Outer);
     m268s0->reset(true);
-    m268s0->cpuWrite(0x6001,0x02,0); // original revision: L=1 -> 32 KiB
-    m268s0->cpuWrite(0x6002,0x0A,0); // GNROM CHR A16..A13
-    m268s0->cpuWrite(0x6003,0x1C,0); // GNROM, QQ=3
+    m268s0->cpuWrite(0x6001,0x02,0);
+    m268s0->cpuWrite(0x6002,0x0A,0);
+    m268s0->cpuWrite(0x6003,0x1C,0);
     m268s0->cpuMapRead(0x8000,c0GnLo); m268s0->cpuMapRead(0xC000,c0GnHi); m268s0->ppuMapRead(0x0000,c0Chr);
     const bool coolboy0 = c0Base==0x7E000 && c0Outer==0x1FFE000 && c0GnLo==0x18000 && c0GnHi==0x7C000 && c0Chr==0x14000;
 
-    // Lockout freezes all outer registers except #2 while in MMC3 mode.
     m268s0->reset(true); m268s0->cpuWrite(0x6000,0x40,0); m268s0->cpuWrite(0x6003,0x80,0);
     uint32_t c0LockedA=0,c0LockedB=0; m268s0->cpuMapRead(0xE000,c0LockedA);
     m268s0->cpuWrite(0x6000,0x00,0); m268s0->cpuMapRead(0xE000,c0LockedB);
     const bool coolboyLock = c0LockedA==c0LockedB;
 
-    // MindKids moves the registers to $5000. AA6023B (submapper 2) moves
-    // them to $7000 and flips the L control's sense/position.
     auto m268s1 = makeMapper(268, 0x2000000, 0, 0x2000, 0x40000, 1, true);
     m268s1->cpuWrite(0x5000,0x77,0); m268s1->cpuWrite(0x5001,0x1C,0);
     uint32_t c1Outer=0; m268s1->cpuMapRead(0xE000,c1Outer);
     auto m268s2 = makeMapper(268, 0x2000000, 0, 0x2000, 0x40000, 2, true);
-    m268s2->cpuWrite(0x7002,0x0A,0); m268s2->cpuWrite(0x7003,0x1C,0); // L=0 => 32 KiB
+    m268s2->cpuWrite(0x7002,0x0A,0); m268s2->cpuWrite(0x7003,0x1C,0);
     uint32_t c2GnLo=0,c2GnHi=0; m268s2->cpuMapRead(0x8000,c2GnLo); m268s2->cpuMapRead(0xC000,c2GnHi);
     const bool coolboyVariants = c1Outer==0x1FFE000 && c2GnLo==0x18000 && c2GnHi==0x7C000;
-    // Later wiring families (submappers 4-11).
-    // 4/5 return to the 6K/5K register windows and cap PRG addressing at 4 MiB.
+
     auto m268s4 = makeMapper(268, 0x800000, 0x400000, 0x2000, 0, 4, true);
     uint32_t s4Before=0,s4After=0,s4Wrong=0;
     m268s4->cpuMapRead(0xE000,s4Before);
-    m268s4->cpuWrite(0x7000,0x70,0); m268s4->cpuMapRead(0xE000,s4Wrong); // must be ignored
+    m268s4->cpuWrite(0x7000,0x70,0); m268s4->cpuMapRead(0xE000,s4Wrong);
     m268s4->cpuWrite(0x6000,0x70,0); m268s4->cpuMapRead(0xE000,s4After);
     const bool coolboy45 = s4Wrong==s4Before && s4After!=s4Before && s4After<0x400000;
 
-    // 6/7 select between two equal PRG chips. With A=1, D directly chooses chip.
     auto m268s6 = makeMapper(268, 0x200000, 0, 0x2000, 0x20000, 6, true);
     uint32_t s6Chip0=0,s6Chip1=0;
     m268s6->cpuWrite(0x6000,0x80,0); m268s6->cpuMapRead(0xE000,s6Chip0);
     m268s6->cpuWrite(0x6000,0x88,0); m268s6->cpuMapRead(0xE000,s6Chip1);
     const bool coolboy67 = s6Chip0<0x100000 && s6Chip1>=0x100000;
 
-    // 8/9 expose up to 256 KiB CHR-RAM and D ($xxx0.4) write-protects it.
     auto m268s8 = makeMapper(268, 0x200000, 0, 0x2000, 0x40000, 8, true);
     uint32_t s8Chr=0; const bool s8Writable=m268s8->ppuMapWrite(0x0000,s8Chr);
     m268s8->cpuWrite(0x6000,0x10,0);
     const bool s8Protected=!m268s8->ppuMapWrite(0x0000,s8Chr);
     const bool coolboy89=s8Writable&&s8Protected;
 
-    // 10/11 borrow outer bits for one-screen mirroring. S=0 uses C as CIRAM A10;
-    // S=1 reconnects the ordinary MMC3 H/V mirroring register.
     auto m268s10 = makeMapper(268, 0x800000, 0, 0x2000, 0x40000, 10, true);
     NametableSource ntSrc=NametableSource::MapperRam; uint32_t ntMap=0;
     m268s10->cpuWrite(0x6000,0x00,0); const bool ntLo=m268s10->mapNametable(0x2400,ntSrc,ntMap)&&ntSrc==NametableSource::Ciram&&ntMap==0;
@@ -1539,7 +1359,6 @@ int runMapperConformanceProbe()
     const bool ntNormal=!m268s10->mapNametable(0x2400,ntSrc,ntMap)&&m268s10->mirroring()==Mirror::Horizontal;
     const bool coolboy1011=ntLo&&ntHi&&ntNormal;
 
-    // Mixed CHR-ROM/RAM mode ($xxx4): D0 enables, D1-D7 select the MMC3 bank value.
     auto m268mix = makeMapper(268,0x200000,0x20000,0x2000,0x20000,0,true);
     const bool mixRom=!m268mix->ppuUsesChrRam(0x0000);
     m268mix->cpuWrite(0x6004,0x01,0);
@@ -1558,8 +1377,6 @@ int runMapperConformanceProbe()
         coolboy89?"PASS":"FAIL",coolboy1011?"PASS":"FAIL",coolboyMixed?"PASS":"FAIL",coolboySupport?"PASS":"FAIL");
     ok &= mapper268;
 
-    // Color Dreams mapper 11 uses D1-D0 for PRG and D7-D4 for CHR. The old
-    // implementation had those fields reversed.
     auto colorDreams = makeMapper(11, 0x20000, 0x20000, 0, 0);
     colorDreams->cpuWrite(0x8000, 0xA2, 0);
     uint32_t cdPrg = 0, cdChr = 0;
@@ -1580,8 +1397,6 @@ int runMapperConformanceProbe()
         colorDreamsBits ? "PASS" : "FAIL", supportedSubmaps ? "PASS" : "FAIL");
     ok &= colorDreamsBits && supportedSubmaps;
 
-    // Namco 163: address-port auto-increment saturates at $7F; it does not
-    // wrap to $00. Two writes with $FF selected therefore both hit byte $7F.
     auto n163 = makeMapper(19);
     n163->cpuWrite(0xF800, 0xFF, 0);
     n163->cpuWrite(0x4800, 0xAA, 0);
@@ -1596,25 +1411,21 @@ int runMapperConformanceProbe()
         n163Saturates ? "PASS" : "FAIL", n163Last, n163Zero);
     ok &= n163Saturates;
 
-    // NES 2.0 Mapper 19 submappers encode the N163 cartridge mixing
-    // resistor. Submappers 1/2 have no expansion sound, while 3/4/5 are
-    // progressively louder hardware mixes. Program one active channel and
-    // verify both the mute variants and relative resistor gains.
     auto n163Level = [](uint8_t submapper) {
         auto m = makeMapper(19, 0x20000, 0x20000, 0x2000, 0, submapper, true);
         auto writeRam = [&](uint8_t a, uint8_t d) {
             m->cpuWrite(0xF800, a, 0);
             m->cpuWrite(0x4800, d, 0);
         };
-        writeRam(0x00, 0x00); // waveform samples 0/0 => positive full-scale
-        writeRam(0x78, 0x01); // channel 7 frequency low
-        writeRam(0x79, 0x00); // phase low
-        writeRam(0x7A, 0x00); // frequency middle
-        writeRam(0x7B, 0x00); // phase middle
-        writeRam(0x7C, 0xFC); // 4-sample waveform, frequency high = 0
-        writeRam(0x7D, 0x00); // phase high
-        writeRam(0x7E, 0x00); // waveform address
-        writeRam(0x7F, 0x0F); // one channel, maximum volume
+        writeRam(0x00, 0x00);
+        writeRam(0x78, 0x01);
+        writeRam(0x79, 0x00);
+        writeRam(0x7A, 0x00);
+        writeRam(0x7B, 0x00);
+        writeRam(0x7C, 0xFC);
+        writeRam(0x7D, 0x00);
+        writeRam(0x7E, 0x00);
+        writeRam(0x7F, 0x0F);
         for (int i = 0; i < 15; ++i) m->clockCpu();
         return std::fabs(m->expansionAudioSample(false));
     };
@@ -1631,11 +1442,6 @@ int runMapperConformanceProbe()
         n163MutedMix ? "PASS" : "FAIL", n163Sm3, n163Sm4, n163Sm5);
     ok &= n163MutedMix && n163MixOrder;
 
-    // FME-7 IRQ phase: mapper clocks precede CPU bus accesses in Bus::clock(),
-    // so a disabled->enabled control write consumes the counter edge belonging
-    // to that CPU period. Starting from 3 therefore reaches IRQ after two more
-    // mapper clocks. Counter-byte writes must not acknowledge a pending IRQ,
-    // while any control-command $D write must acknowledge it.
     auto fme7 = makeMapper(69);
     fme7->cpuWrite(0x8000, 0x0E, 0); fme7->cpuWrite(0xA000, 0x03, 0);
     fme7->cpuWrite(0x8000, 0x0F, 0); fme7->cpuWrite(0xA000, 0x00, 0);
@@ -1655,10 +1461,6 @@ int runMapperConformanceProbe()
         fmeAckWhileEnabled ? "PASS" : "FAIL");
     ok &= fmeRaisedAtPollPhase && fmeLowWriteNoAck && fmeHighWriteNoAck && fmeAckWhileEnabled;
 
-
-    // FME-7 register 8 selects PRG-RAM in 8 KiB banks when bits 7/6 enable
-    // RAM. NES 2.0 images can declare 32 KiB here, and the four banks must
-    // remain distinct rather than aliasing a single $6000-$7FFF window.
     auto fme7Ram = makeMapper(69, 0x40000, 0x20000, 0x8000, 0, 0, true);
     bool fmeRamBanks = true;
     for (uint8_t bank = 0; bank < 4; ++bank) {
@@ -1670,10 +1472,6 @@ int runMapperConformanceProbe()
     std::printf("fme7_wram_banking=%s\n", fmeRamBanks ? "PASS" : "FAIL");
     ok &= fmeRamBanks;
 
-    // VRC6 $B003 controls both pattern-table grouping and the nametable
-    // register/A10 network. In mode 1 R4-R7 directly select four nametables;
-    // mode 3 forces the low CHR/CIRAM address bit into 2 KiB spreads. Mapper
-    // 26 must produce the same behavior after its A0/A1 register swap.
     auto checkVrc6Ppu = [&](uint16_t id) {
         auto v = makeMapper(id, 0x40000, 0x40000, 0x2000, 0, 0, true);
         const uint16_t r4 = id == 26 ? 0xE000 : 0xE000;
@@ -1682,7 +1480,7 @@ int runMapperConformanceProbe()
         const uint16_t r7 = 0xE003;
         v->cpuWrite(r4, 0x10, 0); v->cpuWrite(r5, 0x11, 0);
         v->cpuWrite(r6, 0x12, 0); v->cpuWrite(r7, 0x13, 0);
-        // B003 mode 1 + CHR-ROM nametables + A10 override network enabled.
+
         v->cpuWrite(0xB003, 0x31, 0);
         bool romNt = true;
         for (uint8_t page = 0; page < 4; ++page) {
@@ -1690,7 +1488,7 @@ int runMapperConformanceProbe()
             romNt &= v->mapNametable(uint16_t(0x2000 + page * 0x400), src, mapped) &&
                 src == NametableSource::ChrRom && mapped == uint32_t(0x10 + page) * 0x400;
         }
-        // Mode 3 / $23 forces R6-even,R7-even,R6-odd,R7-odd on the existing PCB.
+
         v->cpuWrite(0xB003, 0x23, 0);
         static constexpr uint32_t expectedCiram[4] = {0x000,0x000,0x400,0x400};
         bool ciramNt = true;
@@ -1699,7 +1497,7 @@ int runMapperConformanceProbe()
             ciramNt &= v->mapNametable(uint16_t(0x2000 + page * 0x400), src, mapped) &&
                 src == NametableSource::Ciram && mapped == expectedCiram[page];
         }
-        // PRG-RAM is gated by B003.7.
+
         uint32_t ram = 0;
         const bool ramOff = !v->mapPrgRam(0x6000, ram, false);
         v->cpuWrite(0xB003, 0xA0, 0);
@@ -1713,11 +1511,6 @@ int runMapperConformanceProbe()
         vrc6Ppu24 ? "PASS" : "FAIL", vrc6Ppu26 ? "PASS" : "FAIL");
     ok &= vrc6Ppu24 && vrc6Ppu26;
 
-    // MMC5 CHR set selection: in 8x8 sprite mode set A ($5120-$5127)
-    // supplies normal rendering regardless of a later set-B write. In 8x16
-    // mode sprites use A, backgrounds use B, and CPU $2007 accesses follow
-    // whichever set was written most recently. Also pin the physical PRG-RAM
-    // decode instead of modulo-wrapping nonexistent banks.
     auto mmc5Chr = makeMapper(5, 0x40000, 0x40000, 0x2000, 0, 0, true);
     mmc5Chr->cpuWrite(0x5101, 3, 0);
     mmc5Chr->cpuWrite(0x5120, 3, 0);
@@ -1752,29 +1545,27 @@ int runMapperConformanceProbe()
         mmc5ChrSets ? "PASS" : "FAIL", mmc5RamDecode ? "PASS" : "FAIL");
     ok &= mmc5ChrSets && mmc5RamDecode;
 
-    // Mapper 215 / UNL-8237: selectable MMC3 address/index scrambling,
-    // NROM override, and two distinct NES 2.0 outer-bank wirings.
     auto m215 = makeMapper(215, 0x100000, 0x100000, 0x2000, 0, 0, true);
     m215->cpuWrite(0x5001, 0x00, 0);
     m215->cpuWrite(0x8000, 0x06, 0);
     m215->cpuWrite(0x8001, 0x02, 0);
     uint32_t m215Base=0; m215->cpuMapRead(0x8000, m215Base);
-    m215->cpuWrite(0x5000, 0x83, 0); // NROM-128 override, 16 KiB bank 3
+    m215->cpuWrite(0x5000, 0x83, 0);
     uint32_t m215N0=0,m215N1=0; m215->cpuMapRead(0x8000,m215N0); m215->cpuMapRead(0xC000,m215N1);
     m215->cpuWrite(0x5000, 0x00, 0);
     m215->cpuWrite(0x5007, 0x01, 0);
-    m215->cpuWrite(0xA000, 0x06, 0); // scramble 1: real $8000, index 6 -> 4
-    m215->cpuWrite(0xC000, 0x12, 0); // scramble 1: real $8001
+    m215->cpuWrite(0xA000, 0x06, 0);
+    m215->cpuWrite(0xC000, 0x12, 0);
     uint32_t m215Chr=0; m215->ppuMapRead(0x1800,m215Chr);
     m215->cpuWrite(0x5001, 0x00, 0);
-    m215->reset(false); // outer register alone returns to power-up $xF
+    m215->reset(false);
     uint32_t m215Reset=0; m215->cpuMapRead(0x8000,m215Reset);
     const bool mapper215s0 = m215Base == 0x04000 && m215N0 == 0x0C000 && m215N1 == 0x0C000 &&
         m215Chr == 0x04800 && m215Reset >= 0xC0000;
 
     auto m215a = makeMapper(215, 0x400000, 0x400000, 0x2000, 0, 1, true);
     m215a->cpuWrite(0x5001, 0x3B, 0);
-    m215a->cpuWrite(0x5000, 0x40, 0); // replace inner A17 from outer register
+    m215a->cpuWrite(0x5000, 0x40, 0);
     m215a->cpuWrite(0x8000, 0x06, 0); m215a->cpuWrite(0x8001, 0x02, 0);
     m215a->cpuWrite(0x8000, 0x02, 0); m215a->cpuWrite(0x8001, 0x04, 0);
     uint32_t m215aPrg=0,m215aChr=0; m215a->cpuMapRead(0x8000,m215aPrg); m215a->ppuMapRead(0x1000,m215aChr);
@@ -1785,8 +1576,6 @@ int runMapperConformanceProbe()
         m215Base,m215N0,m215N1,m215Chr);
     ok &= mapper215s0 && mapper215s1 && mapper215Gate;
 
-    // Phase 25: older FDS-conversion/discrete boards.
-    // Mapper 40 uses fixed banks 6/4/5/?/7 and a 4096-M2 one-shot IRQ.
     auto m40 = makeMapper(40, 0x10000, 0x2000, 0, 0, 0, true);
     uint32_t m40_6=0,m40_4=0,m40_5=0,m40_sw=0,m40_7=0;
     m40->cpuMapRead(0x6000,m40_6); m40->cpuMapRead(0x8000,m40_4);
@@ -1797,22 +1586,19 @@ int runMapperConformanceProbe()
     m40->cpuWrite(0x8000,0,0); const bool m40Ack=!m40->irqActive();
     const bool mapper40base=m40_6==0xC000&&m40_4==0x8000&&m40_5==0xA000&&m40_sw==0x6000&&m40_7==0xE000&&m40Before&&m40Edge&&m40Ack&&mapperImplementationSupported(40,0);
 
-    // NES 2.0 mapper 40 submapper 1 / NTDEC 2752 adds an address-latched
-    // outer register at $C000-$DFFF: ...ppNPCCM. P=0 retains the 2722
-    // SMB2J map. P=1 raises PRG A16 and selects regular NROM-128/256 mode.
     auto m40s1 = makeMapper(40, 0x20000, 0x8000, 0, 0, 1, true);
-    m40s1->cpuWrite(0xC006,0,0); // P=0, CC=3, vertical
+    m40s1->cpuWrite(0xC006,0,0);
     uint32_t m40s1Smb=0,m40s1Chr=0; m40s1->cpuMapRead(0x8000,m40s1Smb); m40s1->ppuMapRead(0,m40s1Chr);
     const bool m40s1SmbOk = m40s1Smb==0x8000 && m40s1Chr==0x6000 && m40s1->mirroring()==Mirror::Vertical;
 
-    m40s1->cpuWrite(0xC049,0,0); // pp=2, N=0, P=1, horizontal: NROM-128
+    m40s1->cpuWrite(0xC049,0,0);
     uint32_t m40n128a=0,m40n128b=0,m40n128c=0,m40n128d=0;
     m40s1->cpuMapRead(0x8000,m40n128a); m40s1->cpuMapRead(0xA000,m40n128b);
     m40s1->cpuMapRead(0xC000,m40n128c); m40s1->cpuMapRead(0xE000,m40n128d);
     const bool m40s1N128 = m40n128a==0x18000 && m40n128b==0x1A000 &&
         m40n128c==0x18000 && m40n128d==0x1A000 && m40s1->mirroring()==Mirror::Horizontal;
 
-    m40s1->cpuWrite(0xC058,0,0); // pp=2, N=1, P=1: NROM-256
+    m40s1->cpuWrite(0xC058,0,0);
     uint32_t m40n256a=0,m40n256b=0,m40n256c=0,m40n256d=0;
     m40s1->cpuMapRead(0x8000,m40n256a); m40s1->cpuMapRead(0xA000,m40n256b);
     m40s1->cpuMapRead(0xC000,m40n256c); m40s1->cpuMapRead(0xE000,m40n256d);
@@ -1829,25 +1615,19 @@ int runMapperConformanceProbe()
         !mapperImplementationSupported(40,2);
     const bool mapper40 = mapper40base && mapper40s1;
 
-    // Mapper 41 / Caltron 6-in-1: address selects PRG, outer CHR and mirroring;
-    // inner CHR writes become active only when address bit 2 enables them.
     auto m41=makeMapper(41,0x40000,0x20000,0,0);
-    m41->cpuWrite(0x602D,0,0); // P=1, E=1, outer CHR=1, horizontal
+    m41->cpuWrite(0x602D,0,0);
     m41->cpuWrite(0x8000,2,0);
     uint32_t m41p=0,m41c=0;m41->cpuMapRead(0x8000,m41p);m41->ppuMapRead(0,m41c);
     m41->reset(false);uint32_t m41r=0;m41->cpuMapRead(0x8000,m41r);
     const bool mapper41=m41p==0x8000&&m41c==0xC000&&m41->hasBusConflicts()&&m41r==0&&mapperImplementationSupported(41,0);
 
-    // Mapper 42: switchable $6000 PRG, fixed last 32 KiB, CHR/mirroring and
-    // a 15-bit free-running IRQ whose output is high for counter $6000-$7FFF.
     auto m42=makeMapper(42,0x20000,0x10000,0,0);
     m42->cpuWrite(0xE000,3,0);m42->cpuWrite(0x8000,5,0);m42->cpuWrite(0xE001,8,0);
     uint32_t m42p=0,m42f=0,m42c=0;m42->cpuMapRead(0x6000,m42p);m42->cpuMapRead(0x8000,m42f);m42->ppuMapRead(0,m42c);
     m42->cpuWrite(0xE002,2,0);for(int i=0;i<0x5FFF;i++)m42->clockCpu();const bool m42Before=!m42->irqActive();m42->clockCpu();const bool m42Irq=m42->irqActive();m42->cpuWrite(0xE002,0,0);
     const bool mapper42=m42p==0x6000&&m42f==0x18000&&m42c==0xA000&&m42->mirroring()==Mirror::Horizontal&&m42Before&&m42Irq&&!m42->irqActive()&&mapperImplementationSupported(42,0);
 
-    // Mapper 43: 80 KiB SMB2J layout, including the 2 KiB ROM visible in
-    // expansion space, LUT-based $C000 banking, and 4096-cycle overflow IRQ.
     auto m43=makeMapper(43,0x14000,0x2000,0,0);
     uint32_t m43x=0,m43_6=0,m43_8=0,m43_a=0,m43_c=0,m43_e=0;
     m43->cpuMapRead(0x5000,m43x);m43->cpuMapRead(0x6000,m43_6);m43->cpuMapRead(0x8000,m43_8);m43->cpuMapRead(0xA000,m43_a);
@@ -1857,10 +1637,8 @@ int runMapperConformanceProbe()
     std::printf("legacy_40_43 m40=%s m40.1=%s m41=%s m42=%s m43=%s\n",mapper40?"PASS":"FAIL",mapper40s1?"PASS":"FAIL",mapper41?"PASS":"FAIL",mapper42?"PASS":"FAIL",mapper43?"PASS":"FAIL");
     ok &= mapper40 && mapper41 && mapper42 && mapper43;
 
-    // Phase 26: Action 53, TXC 01-22000-400, Super Big 7-in-1, and
-    // Rumblestation 15-in-1.
     auto m28=makeMapper(28,0x800000,0x8000,0,0x8000);
-    m28->cpuWrite(0x5000,0x80,0); m28->cpuWrite(0x8000,0x2E,0); // 128K outer, UNROM/fixed $C000, vertical
+    m28->cpuWrite(0x5000,0x80,0); m28->cpuWrite(0x8000,0x2E,0);
     m28->cpuWrite(0x5000,0x81,0); m28->cpuWrite(0x8000,0x12,0);
     m28->cpuWrite(0x5000,0x01,0); m28->cpuWrite(0x8000,0x02,0);
     m28->cpuWrite(0x5000,0x00,0); m28->cpuWrite(0x8000,0x03,0);
@@ -1876,7 +1654,7 @@ int runMapperConformanceProbe()
     auto m44=makeMapper(44,0x100000,0x100000,0x2000,0);
     m44->cpuWrite(0x8000,0x06,0);m44->cpuWrite(0x8001,0x03,0);
     m44->cpuWrite(0x8000,0x02,0);m44->cpuWrite(0x8001,0x05,0);
-    m44->cpuWrite(0xA001,0x82,0); // RAM enabled + block 2
+    m44->cpuWrite(0xA001,0x82,0);
     uint32_t m44p=0,m44c=0;m44->cpuMapRead(0x8000,m44p);m44->ppuMapRead(0x1000,m44c);
     m44->cpuWrite(0xA001,0x87,0);uint32_t m44b7=0;m44->cpuMapRead(0x8000,m44b7);
     const bool mapper44=m44p==0x46000&&m44c==0x41400&&m44b7==0xC6000&&mapperImplementationSupported(44,0);
@@ -1888,8 +1666,6 @@ int runMapperConformanceProbe()
     std::printf("phase26_mappers m28=%s m36=%s m44=%s m46=%s\n",mapper28?"PASS":"FAIL",mapper36?"PASS":"FAIL",mapper44?"PASS":"FAIL",mapper46?"PASS":"FAIL");
     ok &= mapper28&&mapper36&&mapper44&&mapper46;
 
-
-    // Phase 27: legacy discrete/multicart/FDS-conversion gaps.
     auto m38=makeMapper(38,0x20000,0x8000,0,0);
     m38->cpuWrite(0x7000,0x0B,0); uint32_t m38p=0,m38c=0; m38->cpuMapRead(0x8000,m38p); m38->ppuMapRead(0,m38c);
     const bool mapper38=m38p==0x18000&&m38c==0x4000&&mapperImplementationSupported(38,0);
@@ -1917,8 +1693,6 @@ int runMapperConformanceProbe()
     std::printf("phase27_mappers m38=%s m39=%s m50=%s m58=%s m60=%s m62=%s\n",mapper38?"PASS":"FAIL",mapper39?"PASS":"FAIL",mapper50?"PASS":"FAIL",mapper58?"PASS":"FAIL",mapper60?"PASS":"FAIL",mapper62?"PASS":"FAIL");
     ok &= mapper38&&mapper39&&mapper50&&mapper58&&mapper60&&mapper62;
 
-
-    // Phase 28: mapper 51/52/61/63 multicart gap closure.
     auto m51=makeMapper(51,0x200000,0x2000,0,0);
     m51->reset(true);m51->cpuWrite(0x8000,3,0);uint32_t m51p=0,m51x=0;m51->cpuMapRead(0x8000,m51p);m51->cpuMapRead(0x6000,m51x);
     m51->cpuWrite(0x6000,0x12,0);uint32_t m51lo=0,m51hi=0;m51->cpuMapRead(0x8000,m51lo);m51->cpuMapRead(0xC000,m51hi);
@@ -1937,20 +1711,16 @@ int runMapperConformanceProbe()
     m61->cpuWrite(0x8092,0,0);uint32_t m61lo=0,m61hi=0;m61->cpuMapRead(0x8000,m61lo);m61->cpuMapRead(0xC000,m61hi);
     const bool mapper61=m61_32==0x18000&&m61lo==0x10000&&m61hi==0x10000&&m61->mirroring()==Mirror::Horizontal&&mapperImplementationSupported(61,0);
 
-    // Mapper 63: TH2291-3 (submapper 0) and 82AB (submapper 1) latch the
-    // CPU write address. P selects NROM-128 vs NROM-256, b supplies A14 in
-    // NROM-128 mode, C write-protects the unbanked CHR-RAM, and unpopulated
-    // PRG selections must leave the CPU bus undriven rather than wrap.
     auto m63=makeMapper(63,0x400000,0,0,0x2000,0,true);
-    m63->cpuWrite(0x8004,0,0); // NROM-128, b=1 -> 16 KiB bank 1 mirrored
+    m63->cpuWrite(0x8004,0,0);
     uint32_t m63lo=0,m63hi=0;
     const bool m63loOk=m63->cpuMapRead(0x8000,m63lo);
     const bool m63hiOk=m63->cpuMapRead(0xC000,m63hi);
-    m63->cpuWrite(0x8002,0,0); // NROM-256, CPU A14 selects banks 0/1
+    m63->cpuWrite(0x8002,0,0);
     uint32_t m63n0=0,m63n1=0;
     const bool m63n0Ok=m63->cpuMapRead(0x8000,m63n0);
     const bool m63n1Ok=m63->cpuMapRead(0xC000,m63n1);
-    m63->cpuWrite(0x8401,0,0); // submapper 0: A10 protects CHR, A0=H mirror
+    m63->cpuWrite(0x8401,0,0);
     uint32_t m63chr=0;
     const bool m63ChrRead=m63->ppuMapRead(0x1234,m63chr);
     const bool m63ChrProtected=!m63->ppuMapWrite(0x1234,m63chr);
@@ -1959,15 +1729,15 @@ int runMapperConformanceProbe()
         m63ChrProtected&&m63->mirroring()==Mirror::Horizontal;
 
     auto m63s1=makeMapper(63,0x200000,0,0,0x2000,1,true);
-    m63s1->cpuWrite(0x8200,0,0); // submapper 1: A9 is CHR /WE protect
+    m63s1->cpuWrite(0x8200,0,0);
     uint32_t m63s1chr=0;
     const bool m63s1Protected=!m63s1->ppuMapWrite(0x0042,m63s1chr);
-    m63s1->cpuWrite(0x8008,0,0); // outer bank 1, NROM-128, b=0 => bank 2
+    m63s1->cpuWrite(0x8008,0,0);
     uint32_t m63s1p=0;
     const bool m63s1Read=m63s1->cpuMapRead(0x8000,m63s1p);
 
     auto m63open=makeMapper(63,0x8000,0,0,0x2000,0,true);
-    m63open->cpuWrite(0x8010,0,0); // select 16 KiB bank 4 on a 32 KiB ROM
+    m63open->cpuWrite(0x8010,0,0);
     uint32_t m63unused=0;
     const bool m63Undriven=!m63open->cpuMapRead(0x8000,m63unused);
     uint8_t fake=0;
@@ -1982,9 +1752,6 @@ int runMapperConformanceProbe()
         (m63Undriven&&m63NoFakeRegister)?"PASS":"FAIL",m63Gate?"PASS":"FAIL");
     ok &= mapper51&&mapper52&&mapper61&&mapper63;
 
-
-
-    // Phase 29: legacy mapper gaps 54/55/56/57/59.
     auto m54=makeMapper(54,0x20000,0x10000,0,0);
     m54->cpuWrite(0x8005,0,0); uint32_t m54p=0,m54c=0; m54->cpuMapRead(0x8000,m54p); m54->ppuMapRead(0,m54c);
     const bool mapper54=m54p==0x8000&&m54c==0xA000&&mapperImplementationSupported(54,0);
@@ -1996,12 +1763,12 @@ int runMapperConformanceProbe()
     const bool mapper55=m55xok&&m55rok&&m55x0==0x8000&&m55x1==0x8000&&m55p==0&&m55r0==0&&m55r1==0&&mapperImplementationSupported(55,0);
 
     auto m56=makeMapper(56,0x40000,0x20000,0x2000,0);
-    m56->cpuWrite(0xE000,1,0);m56->cpuWrite(0xF000,3,0); // PRG0 low nibble=3
-    m56->cpuWrite(0xE000,0,0); // no generic $Fxxx bank register selected
-    m56->cpuWrite(0xF803,1,0); // vertical mirroring
-    m56->cpuWrite(0xFC03,5,0); // CHR slot 3 = bank 5
+    m56->cpuWrite(0xE000,1,0);m56->cpuWrite(0xF000,3,0);
+    m56->cpuWrite(0xE000,0,0);
+    m56->cpuWrite(0xF803,1,0);
+    m56->cpuWrite(0xFC03,5,0);
     uint32_t m56p=0,m56c=0;m56->cpuMapRead(0x8000,m56p);m56->ppuMapRead(0x0C00,m56c);
-    // IRQ reload FFFD, then two clocks reach FFFF and assert.
+
     m56->cpuWrite(0x8000,0xD,0);m56->cpuWrite(0x9000,0xF,0);m56->cpuWrite(0xA000,0xF,0);m56->cpuWrite(0xB000,0xF,0);m56->cpuWrite(0xC000,2,0);
     m56->clockCpu();const bool m56Before=!m56->irqActive();m56->clockCpu();const bool m56Irq=m56->irqActive();m56->cpuWrite(0xD000,0,0);
     m56->cpuWrite(0xE000,5,0);m56->cpuWrite(0xF000,4,0);uint32_t m56x=0;const bool m56rom=m56->cpuMapRead(0x6000,m56x);
@@ -2018,8 +1785,6 @@ int runMapperConformanceProbe()
     std::printf("phase29_mappers m54=%s m55=%s m56=%s[p=%05X c=%05X mir=%d before=%d irq=%d ack=%d rom=%d x=%05X] m57=%s m59=%s m53_gate=%s\n",mapper54?"PASS":"FAIL",mapper55?"PASS":"FAIL",mapper56?"PASS":"FAIL",m56p,m56c,int(m56->mirroring()),int(m56Before),int(m56Irq),int(!m56->irqActive()),int(m56rom),m56x,mapper57?"PASS":"FAIL",mapper59?"PASS":"FAIL",mapper53Gate?"PASS":"FAIL");
     ok &= mapper54&&mapper55&&mapper56&&mapper57&&mapper59&&mapper53Gate;
 
-    // Phase 30: mapper 53 supports both physical PRG dump orderings. The
-    // hash database resolves boardVariant=1 for the EPROM-first layout.
     auto m53normal=makeMapper(53,0x220000,0x2000,0,0,0,false,Mirror::Vertical,false,0);
     auto m53eprom=makeMapper(53,0x220000,0x2000,0,0,0,false,Mirror::Vertical,false,1);
     uint32_t m53n=0,m53e=0,m53x=0; m53normal->cpuMapRead(0x8000,m53n); m53eprom->cpuMapRead(0x8000,m53e); m53eprom->cpuMapRead(0x6000,m53x);
@@ -2028,7 +1793,6 @@ int runMapperConformanceProbe()
     std::printf("mapper53_supervision=%s normal=%06X eprom=%06X x=%06X switched=%06X\n",mapper53?"PASS":"FAIL",m53n,m53e,m53x,m53sw);
     ok &= mapper53;
 
-    // Phase 32: legacy mapper gaps 81/103/107.
     auto m81=makeMapper(81,0x10000,0x8000,0,0);
     m81->cpuWrite(0x800B,0x00,0);uint32_t m81lo=0,m81hi=0,m81c=0;
     m81->cpuMapRead(0x8000,m81lo);m81->cpuMapRead(0xC000,m81hi);m81->ppuMapRead(0,m81c);
@@ -2049,8 +1813,6 @@ int runMapperConformanceProbe()
     std::printf("phase32_mappers m81=%s m103=%s m107=%s\n",mapper81?"PASS":"FAIL",mapper103?"PASS":"FAIL",mapper107?"PASS":"FAIL");
     ok &= mapper81&&mapper103&&mapper107;
 
-
-    // Phase 33: mapper 106/108/112 gap closure.
     auto m106=makeMapper(106,0x40000,0x20000,0x2000,0);
     m106->cpuWrite(0x8008,0x03,0);m106->cpuWrite(0x8009,0x05,0);m106->cpuWrite(0x800A,0x06,0);m106->cpuWrite(0x800B,0x02,0);
     m106->cpuWrite(0x8000,0x7F,0);m106->cpuWrite(0x8001,0x7E,0);m106->cpuWrite(0x8004,0x85,0);m106->cpuWrite(0x800C,1,0);
@@ -2077,15 +1839,10 @@ int runMapperConformanceProbe()
     std::printf("phase33_mappers m106=%s m108=%s[%05X %05X %05X %05X %05X %05X %05X legacy=%05X] m112=%s\n",mapper106?"PASS":"FAIL",mapper108?"PASS":"FAIL",m108ignore,m108p1,m108tail,m108p2,m108c2,m108p4,m108c4,m108legacyP,mapper112?"PASS":"FAIL");
     ok &= mapper106&&mapper108&&mapper112;
 
-    // Mapper 105 / NES-EVENT: cold boot hard-wires the first 32 KiB.
-    // Starting the event timer through MMC1 CHR0 unlocks event banking.  The
-    // official tournament DIP setting produces an IRQ at $28000000 M2 clocks;
-    // load a near-edge state so the regression can verify the real 30-bit edge
-    // without spending hundreds of millions of host iterations.
     auto m105=makeMapper(105,0x40000,0,0x2000,0x2000);
     uint32_t m105boot=0,m105bank=0;
     m105->cpuMapRead(0x8000,m105boot);
-    mmc1Serial(*m105,0xA000,0x06,100); // event bank 3, bit4=0: run/unlock
+    mmc1Serial(*m105,0xA000,0x06,100);
     m105->cpuMapRead(0x8000,m105bank);
     std::vector<uint8_t> m105state;m105->saveState(m105state);
     const uint64_t nearEdge=0x27FFFFFFull;
@@ -2098,10 +1855,6 @@ int runMapperConformanceProbe()
     std::printf("phase34_mapper105 event=%s boot=%05X bank=%05X irq=%s\n",mapper105?"PASS":"FAIL",m105boot,m105bank,m105irq?"PASS":"FAIL");
     ok &= mapper105;
 
-    // Phase 35: GTROM / mapper 111.  The mapper owns a writable 512 KiB
-    // SST39SF040 image and banks a shared 32 KiB PPU RAM between pattern and
-    // nametable regions.  Verify banking, flash byte-program + sector erase,
-    // and mapper-owned battery persistence.
     auto m111=makeMapper(111,0x80000,0,0,0x8000);
     std::vector<uint8_t> gtromImage(0x80000,0xFF);
     gtromImage[3*0x8000+0x123]=0xA5;
@@ -2110,15 +1863,15 @@ int runMapperConformanceProbe()
     uint8_t m111read=0;const bool m111bank=m111->cpuReadRegister(0x8123,m111read)&&m111read==0xA5;
     uint32_t m111pat=0,m111nt=0;NametableSource m111src=NametableSource::Ciram;
     const bool m111ppu=m111->ppuMapRead(0x0123,m111pat)&&m111->mapNametable(0x2123,m111src,m111nt)&&m111pat==0x4123&&m111src==NametableSource::ChrRam&&m111nt==0x4123;
-    // Byte program: AA/55/A0, select bank 2, then program byte (1->0 only).
+
     m111->cpuWrite(0xD555,0xAA,0);m111->cpuWrite(0xAAAA,0x55,0);m111->cpuWrite(0xD555,0xA0,0);m111->cpuWrite(0x5000,0x02,0);m111->cpuWrite(0x8123,0x5A,0);
     uint8_t m111prog=0;m111->cpuReadRegister(0x8123,m111prog);
     const bool m111program=m111prog==0x5A;
-    // Sector erase the programmed 4 KiB sector.
+
     m111->cpuWrite(0xD555,0xAA,0);m111->cpuWrite(0xAAAA,0x55,0);m111->cpuWrite(0xD555,0x80,0);m111->cpuWrite(0xD555,0xAA,0);m111->cpuWrite(0xAAAA,0x55,0);m111->cpuWrite(0x5000,0x02,0);m111->cpuWrite(0x8123,0x30,0);
     uint8_t m111erase=0;m111->cpuReadRegister(0x8123,m111erase);
     const bool m111sector=m111erase==0xFF;
-    // Program again and confirm mapper-battery roundtrip preserves flash.
+
     m111->cpuWrite(0xD555,0xAA,0);m111->cpuWrite(0xAAAA,0x55,0);m111->cpuWrite(0xD555,0xA0,0);m111->cpuWrite(0x5000,0x02,0);m111->cpuWrite(0x8123,0x3C,0);
     std::vector<uint8_t> m111bat;m111->saveMapperBattery(m111bat);
     auto m111b=makeMapper(111,0x80000,0,0,0x8000);m111b->initializePrgImage(gtromImage.data(),gtromImage.size());
@@ -2127,15 +1880,12 @@ int runMapperConformanceProbe()
     std::printf("phase35_gtrom bank=%s ppu=%s program=%s sector=%s persist=%s\n",m111bank?"PASS":"FAIL",m111ppu?"PASS":"FAIL",m111program?"PASS":"FAIL",m111sector?"PASS":"FAIL",(m111load&&m111persist==0x3C)?"PASS":"FAIL");
     ok &= mapper111;
 
-    // Phase 36: historical mapper-111 collision.  CHR-ROM identifies the
-    // Chinese Ninja Ryukenden board, which is a non-serialized MMC1 variant
-    // with 256 KiB CHR reach. Writes replace registers immediately.
     auto m111old=makeMapper(111,0x20000,0x40000,0,0);
     uint32_t oldPrg0=0,oldPrg1=0,oldChr0=0,oldChr1=0;
-    m111old->cpuWrite(0x8000,0x1F,0); // 4 KiB CHR, PRG mode 3, H mirror
-    m111old->cpuWrite(0xA000,0x21,0); // CHR bank 33 -> above normal MMC1 128 KiB limit
-    m111old->cpuWrite(0xC000,0x3F,0); // CHR bank 63
-    m111old->cpuWrite(0xE000,0x03,0); // PRG bank 3, direct (non-serial) write
+    m111old->cpuWrite(0x8000,0x1F,0);
+    m111old->cpuWrite(0xA000,0x21,0);
+    m111old->cpuWrite(0xC000,0x3F,0);
+    m111old->cpuWrite(0xE000,0x03,0);
     m111old->cpuMapRead(0x8000,oldPrg0); m111old->cpuMapRead(0xC000,oldPrg1);
     m111old->ppuMapRead(0x0000,oldChr0); m111old->ppuMapRead(0x1000,oldChr1);
     const bool m111oldOk=oldPrg0==0x0C000&&oldPrg1==0x1C000&&oldChr0==0x21000&&oldChr1==0x3F000&&
@@ -2144,13 +1894,11 @@ int runMapperConformanceProbe()
         m111oldOk?"PASS":"FAIL",oldPrg0,oldPrg1,oldChr0,oldChr1,mapper111?"PASS":"FAIL");
     ok &= m111oldOk;
 
-
-    // Phase 37: mapper 104/117/120 gap closure.
     auto m104=makeMapper(104,0x140000,0x2000,0,0);
     m104->cpuWrite(0x8000,0x02,0);m104->cpuWrite(0xC000,0x03,0);
     uint32_t m104lo=0,m104hi=0;m104->cpuMapRead(0x8000,m104lo);m104->cpuMapRead(0xC000,m104hi);
-    m104->cpuWrite(0x8000,0x0A,0); // outer 2 + lock
-    m104->cpuWrite(0x8000,0x01,0); // ignored while locked
+    m104->cpuWrite(0x8000,0x0A,0);
+    m104->cpuWrite(0x8000,0x01,0);
     uint32_t m104lock=0;m104->cpuMapRead(0x8000,m104lock);
     m104->reset(false);uint32_t m104soft=0;m104->cpuMapRead(0x8000,m104soft);
     m104->reset(true);uint32_t m104hard=0;m104->cpuMapRead(0x8000,m104hard);
@@ -2171,17 +1919,14 @@ int runMapperConformanceProbe()
     std::printf("phase37_mappers m104=%s m117=%s m120=%s\n",mapper104?"PASS":"FAIL",mapper117?"PASS":"FAIL",mapper120?"PASS":"FAIL");
     ok &= mapper104&&mapper117&&mapper120;
 
-
-    // Phase 38: mapper 123 / Kǎshèng H2288. The bank-index register is
-    // scrambled and $5800 can replace MMC3 PRG banking with NROM-128/256.
     auto m123=makeMapper(123,0x80000,0x40000,0,0);
-    // Written MMC3 index 1 routes to physical register 3.
+
     m123->cpuWrite(0x8000,0x01,0); m123->cpuWrite(0x8001,0x12,0);
     uint32_t m123chr=0; m123->ppuMapRead(0x1400,m123chr);
-    // NROM override: D6 enable; bank bits D5,D2,D4,D0 = 1,1,0,1 -> bank 13.
-    m123->cpuWrite(0x5800,0x65,0); // NROM-128
+
+    m123->cpuWrite(0x5800,0x65,0);
     uint32_t m123n0=0,m123n1=0; m123->cpuMapRead(0x8000,m123n0); m123->cpuMapRead(0xC000,m123n1);
-    m123->cpuWrite(0x5800,0x67,0); // NROM-256: CPU A14 replaces bank bit 0
+    m123->cpuWrite(0x5800,0x67,0);
     uint32_t m123p0=0,m123p1=0; m123->cpuMapRead(0x8000,m123p0); m123->cpuMapRead(0xC000,m123p1);
     const bool mapper123=m123chr==0x4800&&m123n0==0x34000&&m123n1==0x34000&&
         m123p0==0x30000&&m123p1==0x34000&&mapperImplementationSupported(123,0);
@@ -2190,26 +1935,22 @@ int runMapperConformanceProbe()
         mapperImplementationSupported(123,0)?"PASS":"FAIL",m123chr,m123n0,m123n1,m123p0,m123p1);
     ok &= mapper123;
 
-    // Phase 39: mapper 121 / Kǎshèng A9711/A9713.  Verify the protection
-    // array, the bit-reversed protection latch/PRG overrides, A9713 outer
-    // 256 KiB selection, and A9711's PPU-A12-wired CHR A18.
     auto m121=makeMapper(121,0x80000,0x80000,0,0);
     uint8_t m121prot=0; m121->cpuWrite(0x5000,2,0); const bool m121protOk=m121->cpuReadRegister(0x5000,m121prot)&&m121prot==0x42;
-    // A9713 powers up with outer bit set; $5180 can select either 256 KiB half.
+
     uint32_t m121boot=0,m121outer=0,m121chrOuter=0; m121->cpuMapRead(0x8000,m121boot);
     m121->cpuWrite(0x5180,0x00,0); m121->cpuMapRead(0x8000,m121outer); m121->ppuMapRead(0,m121chrOuter);
-    // $8001 value 3 reverses to $30. Selecting protection index $26 applies
-    // it immediately to the E000 8 KiB slot and keeps following $8001 writes live.
+
     m121->cpuWrite(0x8001,0x03,0); m121->cpuWrite(0x8003,0x26,0); uint32_t m121e0=0; m121->cpuMapRead(0xE000,m121e0);
     m121->cpuWrite(0x8001,0x01,0); uint32_t m121e1=0; m121->cpuMapRead(0xE000,m121e1);
     std::vector<uint8_t> m121state; m121->saveState(m121state);
     m121->cpuWrite(0x8003,0x00,0);
     const uint8_t* m121sp=m121state.data(); const uint8_t* m121se=m121sp+m121state.size();
     const bool m121stateOk=m121->loadState(m121sp,m121se); uint32_t m121restored=0; m121->cpuMapRead(0xE000,m121restored);
-    // Invalid protection index expires overrides and restores normal MMC3 PRG.
+
     m121->cpuWrite(0x8003,0x00,0); uint32_t m121normal=0; m121->cpuMapRead(0xE000,m121normal);
     auto m121a=makeMapper(121,0x40000,0x80000,0,0);
-    m121a->cpuWrite(0x8000,0x80,0); // flip MMC3 CHR inversion; A18 must still follow PPU A12
+    m121a->cpuWrite(0x8000,0x80,0);
     uint32_t m121left=0,m121right=0; m121a->ppuMapRead(0x0000,m121left); m121a->ppuMapRead(0x1000,m121right);
     const bool mapper121=m121protOk&&m121boot==0x40000&&m121outer==0&&m121chrOuter==0&&
         m121e0==0x60000&&m121e1==0x40000&&m121stateOk&&m121restored==0x40000&&m121normal==0x3E000&&
@@ -2220,27 +1961,23 @@ int runMapperConformanceProbe()
         (m121left<0x40000&&m121right>=0x40000)?"PASS":"FAIL",m121boot,m121e0,m121e1,m121normal,m121left,m121right);
     ok &= mapper121;
 
-
-    // Phase 22: Mapper 136 / Sachen JV001. Verify the copy-protection
-    // register's staged-load, inversion and increment modes, D6-D7 open-bus
-    // preservation, and the separately latched PRG/CHR output.
     auto m136 = makeMapper(136, 0x10000, 0x10000, 0, 0);
     uint32_t m136p0=0,m136c0=0,m136p1=0,m136c1=0,m136restoredP=0,m136restoredC=0;
     m136->cpuMapRead(0x8000,m136p0); m136->ppuMapRead(0x0123,m136c0);
-    m136->cpuWrite(0x4122,0x15,0); // $4102 alias: staged input
-    m136->cpuWrite(0x4100,0x00,0); // mode 0: register := input
+    m136->cpuWrite(0x4122,0x15,0);
+    m136->cpuWrite(0x4100,0x00,0);
     uint8_t m136read0=0xC0; const bool m136r0=m136->cpuReadRegister(0x41A0,m136read0);
-    m136->cpuWrite(0x8000,0xFF,0); // written value ignored; latch register to output
+    m136->cpuWrite(0x8000,0xFF,0);
     m136->cpuMapRead(0x8000,m136p1); m136->ppuMapRead(0x0123,m136c1);
 
-    m136->cpuWrite(0x4101,0x01,0); // inversion on
+    m136->cpuWrite(0x4101,0x01,0);
     m136->cpuWrite(0x4102,0x2A,0);
-    m136->cpuWrite(0x4100,0x00,0); // register = $25 (low nibble inverted)
-    uint8_t m136readInv=0x80; const bool m136ri=m136->cpuReadRegister(0x4103,m136readInv); // readback D4-D5 invert => $15
-    m136->cpuWrite(0x4103,0x01,0); // increment mode
-    m136->cpuWrite(0x4100,0x00,0); // low nibble $5 -> $6
+    m136->cpuWrite(0x4100,0x00,0);
+    uint8_t m136readInv=0x80; const bool m136ri=m136->cpuReadRegister(0x4103,m136readInv);
+    m136->cpuWrite(0x4103,0x01,0);
+    m136->cpuWrite(0x4100,0x00,0);
     uint8_t m136readInc=0xC0; const bool m136rc=m136->cpuReadRegister(0x4101,m136readInc);
-    m136->cpuWrite(0xFFFF,0x00,0); // latch $26 to output
+    m136->cpuWrite(0xFFFF,0x00,0);
     std::vector<uint8_t> m136state; m136->saveState(m136state);
     m136->cpuWrite(0x4103,0x00,0); m136->cpuWrite(0x4101,0x00,0);
     m136->cpuWrite(0x4102,0x00,0); m136->cpuWrite(0x4100,0x00,0); m136->cpuWrite(0x8000,0,0);
@@ -2258,14 +1995,11 @@ int runMapperConformanceProbe()
         (m136load&&m136restoredP==0&&m136restoredC==0xC123)?"PASS":"FAIL",m136gate?"PASS":"FAIL");
     ok &= mapper136;
 
-    // Phase 21: Mapper 133 / Sachen SA-72008.  The 72-pin Jovial Race
-    // board decodes $4100 under mask $E100; D2 selects one of two 32 KiB PRG
-    // banks and D1-D0 select one of four 8 KiB CHR banks.
     auto m133 = makeMapper(133, 0x10000, 0x8000, 0, 0);
     uint32_t m133p0=0,m133p1=0,m133c0=0,m133c1=0,m133alias=0;
     m133->cpuMapRead(0x8000,m133p0); m133->ppuMapRead(0x0123,m133c0);
     const bool m133Ignored=!m133->cpuWrite(0x4000,0x07,0);
-    m133->cpuWrite(0x4120,0x07,0); // alias of $4100 under mask $E100
+    m133->cpuWrite(0x4120,0x07,0);
     m133->cpuMapRead(0x8000,m133p1); m133->ppuMapRead(0x0123,m133c1);
     m133->cpuWrite(0x41FF,0x00,0); m133->ppuMapRead(0x0123,m133alias);
     std::vector<uint8_t> m133state; m133->cpuWrite(0x4100,0x06,0); m133->saveState(m133state);
@@ -2282,16 +2016,14 @@ int runMapperConformanceProbe()
         (m133load&&m133restoredP==0x8000&&m133restoredC==0x4123)?"PASS":"FAIL",m133gate?"PASS":"FAIL");
     ok &= mapper133;
 
-    // Phase 20: Mapper 145 / Sachen SA-72007.  Fixed PRG and a single
-    // $4100-decoded latch (mask $E100) whose D7 selects the 8 KiB CHR bank.
     auto m145 = makeMapper(145, 0x8000, 0x4000, 0, 0);
     uint32_t m145p0=0,m145p1=0,m145c0=0,m145c1=0,m145alias=0;
     m145->cpuMapRead(0x8000,m145p0); m145->cpuMapRead(0xFFFF,m145p1);
     m145->ppuMapRead(0x0123,m145c0);
     const bool m145Ignored = !m145->cpuWrite(0x4000,0x80,0);
-    m145->cpuWrite(0x4120,0x80,0); // $4120 matches $4100 under mask $E100
+    m145->cpuWrite(0x4120,0x80,0);
     m145->ppuMapRead(0x0123,m145c1);
-    m145->cpuWrite(0x41FF,0x00,0); // same decode, return to bank 0
+    m145->cpuWrite(0x41FF,0x00,0);
     m145->ppuMapRead(0x0123,m145alias);
     std::vector<uint8_t> m145state; m145->cpuWrite(0x4100,0x80,0); m145->saveState(m145state);
     m145->cpuWrite(0x4100,0x00,0);
@@ -2305,15 +2037,10 @@ int runMapperConformanceProbe()
         (m145Ignored&&m145alias==0x0123)?"PASS":"FAIL",(m145load&&m145restored==0x2123)?"PASS":"FAIL",m145gate?"PASS":"FAIL");
     ok &= mapper145;
 
-    // Phase 19: Mapper 91. Submapper 0 (JY830623C) uses four 2 KiB
-    // CHR banks, two 8 KiB PRG banks, an address-latched 128 KiB PRG /
-    // 512 KiB CHR outer bank, and an IRQ after 64 unfiltered PPU-A12 rises.
-    // Submapper 1 (EJ-006-1) removes the outer latch, adds H/V mirroring,
-    // and clocks its programmable IRQ counter by 5 every fourth M2 cycle.
     auto m91s0 = makeMapper(91, 0x80000, 0x100000, 0, 0, 0, true, Mirror::Horizontal);
     m91s0->cpuWrite(0x7000, 2, 0); m91s0->cpuWrite(0x7001, 3, 0);
     m91s0->cpuWrite(0x6000, 5, 0);
-    m91s0->cpuWrite(0x8007, 0, 0); // address bits: outer PRG=3, outer CHR=1
+    m91s0->cpuWrite(0x8007, 0, 0);
     uint32_t m91s0p0=0,m91s0p1=0,m91s0pf=0,m91s0chr=0;
     m91s0->cpuMapRead(0x8000,m91s0p0); m91s0->cpuMapRead(0xA000,m91s0p1);
     m91s0->cpuMapRead(0xC000,m91s0pf); m91s0->ppuMapRead(0x0000,m91s0chr);
@@ -2353,11 +2080,6 @@ int runMapperConformanceProbe()
         (m91s1Before&&m91s1Irq&&m91s1Ack)?"PASS":"FAIL",(m91s1V&&m91s1H)?"PASS":"FAIL",m91gate?"PASS":"FAIL");
     ok &= mapper91;
 
-    // Phase 18: Mapper 206 / Namco 118 (DxROM). NES 2.0 submapper 1
-    // identifies 3407/3417/3451 PCBs with 32 KiB PRG-ROM wired directly to
-    // CPU A13/A14. Their nominal PRG bank-register writes must therefore be
-    // ignored, while the ordinary submapper-0 board remains bankable and CHR
-    // banking continues to operate on both variants.
     auto m206s0 = makeMapper(206, 0x10000, 0x10000, 0, 0, 0, true);
     auto m206s1 = makeMapper(206, 0x08000, 0x10000, 0, 0, 1, true);
     m206s0->cpuWrite(0x8000, 6, 0); m206s0->cpuWrite(0x8001, 5, 0);
@@ -2382,18 +2104,15 @@ int runMapperConformanceProbe()
         m206unbank0,m206unbank1,m206unbank2,m206unbank3,m206banked0,m206chr);
     ok &= mapper206;
 
-    // Phase 23: Mapper 213 / BMC 9999999-in-1.  The board latches
-    // CPU address lines rather than CPU data: A2-A1 choose the 32 KiB PRG
-    // bank and A5-A3 choose the 8 KiB CHR bank.  Header mirroring is fixed.
     auto m213 = makeMapper(213, 0x20000, 0x10000, 0, 0, 0, false, Mirror::Vertical);
     uint32_t m213p0=0,m213c0=0,m213p1=0,m213c1=0,m213restoredP=0,m213restoredC=0;
     m213->cpuMapRead(0x8000,m213p0); m213->ppuMapRead(0x0123,m213c0);
     const bool m213IgnoredLow = !m213->cpuWrite(0x7FFF,0xFF,0);
-    m213->cpuWrite(0x801A,0x00,0); // PRG=(A2-A1)=1, CHR=(A5-A3)=3
+    m213->cpuWrite(0x801A,0x00,0);
     m213->cpuMapRead(0x8000,m213p1); m213->ppuMapRead(0x0123,m213c1);
     const bool m213Mirror = m213->mirroring() == Mirror::Vertical;
     std::vector<uint8_t> m213state; m213->saveState(m213state);
-    m213->cpuWrite(0x8006,0xFF,0); // PRG=3, CHR=0; data must be ignored
+    m213->cpuWrite(0x8006,0xFF,0);
     const uint8_t* m213sp=m213state.data(); const uint8_t* m213se=m213sp+m213state.size();
     const bool m213load=m213->loadState(m213sp,m213se);
     m213->cpuMapRead(0x8000,m213restoredP); m213->ppuMapRead(0x0123,m213restoredC);
@@ -2406,12 +2125,9 @@ int runMapperConformanceProbe()
         m213Mirror?"PASS":"FAIL",m213gate?"PASS":"FAIL");
     ok &= mapper213;
 
-    // Phase 24: Sachen 8259 A/B/C family (mappers 141/138/139).
-    // All variants share the $4100/$4101 register interface and 32 KiB PRG
-    // banking. Their CHR wiring differs by 0/1/2 shifted mapper address bits.
     auto write8259 = [](Mapper& m, uint8_t reg, uint8_t value) {
-        m.cpuWrite(0x4120, reg, 0); // alias of $4100 under mask $C101
-        m.cpuWrite(0x4121, value, 0); // alias of $4101
+        m.cpuWrite(0x4120, reg, 0);
+        m.cpuWrite(0x4121, value, 0);
     };
     auto m138 = makeMapper(138, 0x20000, 0x20000, 0, 0, 0, false, Mirror::Horizontal);
     write8259(*m138,5,3); write8259(*m138,4,1);
@@ -2426,18 +2142,16 @@ int runMapperConformanceProbe()
     write8259(*m139,4,1); for (uint8_t r=0;r<4;++r) write8259(*m139,r,2);
     uint32_t m139c[4]={}; for (unsigned i=0;i<4;++i) m139->ppuMapRead(uint16_t(i*0x800),m139c[i]);
 
-    // Normal mirroring modes plus the asymmetric (0,1,1,1) mode.
     NametableSource m8259NtSrc=NametableSource::ChrRom; uint32_t nt[4]={};
-    write8259(*m138,7,4); // mm=2, simple=0 => (0,1,1,1)
+    write8259(*m138,7,4);
     for(unsigned i=0;i<4;++i)m138->mapNametable(uint16_t(0x2000+i*0x400),m8259NtSrc,nt[i]);
     const bool m8259Asym = nt[0]==0x000 && nt[1]==0x400 && nt[2]==0x400 && nt[3]==0x400;
-    write8259(*m138,7,1); // simple mode => vertical and all CHR slots use reg 0
+    write8259(*m138,7,1);
     write8259(*m138,0,5); write8259(*m138,1,1);
     uint32_t simple0=0,simple1=0; m138->ppuMapRead(0x0000,simple0); m138->ppuMapRead(0x0800,simple1);
     NametableSource simpleSrc=NametableSource::ChrRom; uint32_t simpleNt0=0,simpleNt1=0;
     m138->mapNametable(0x2000,simpleSrc,simpleNt0); m138->mapNametable(0x2400,simpleSrc,simpleNt1);
 
-    // Mapper 141 also has a known Q-Boy variant with unbanked 8 KiB CHR-RAM.
     auto m141ram = makeMapper(141, 0x8000, 0, 0, 0x2000, 0, false);
     write8259(*m141ram,4,7); write8259(*m141ram,0,7);
     uint32_t ramRead=0,ramWrite=0; const bool ramR=m141ram->ppuMapRead(0x1234,ramRead); const bool ramW=m141ram->ppuMapWrite(0x1234,ramWrite);
@@ -2460,11 +2174,6 @@ int runMapperConformanceProbe()
         (m8259load&&m139restored==0x14000)?"PASS":"FAIL",m8259gate?"PASS":"FAIL");
     ok &= mapper8259;
 
-    // Phase 34: Mapper 135 is the older iNES assignment for the Sachen
-    // 8259A CHR-ROM board.  Modern documentation folds that hardware into
-    // mapper 141, but legacy Super Pang-style dumps still use mapper 135.
-    // It must therefore behave exactly like the banked-CHR 8259A variant,
-    // while mapper 141 continues to retain its separate Q-Boy CHR-RAM path.
     auto m135 = makeMapper(135, 0x20000, 0x40000, 0, 0, 0, false, Mirror::Horizontal);
     write8259(*m135,5,3);
     write8259(*m135,4,1);
@@ -2473,7 +2182,7 @@ int runMapperConformanceProbe()
     m135->cpuMapRead(0x8000,m135p);
     m135->ppuMapRead(0x0000,m135c0);
     m135->ppuMapRead(0x0800,m135c1);
-    write8259(*m135,7,4); // asymmetric (0,1,1,1) mode like mapper 141 8259A
+    write8259(*m135,7,4);
     NametableSource m135src=NametableSource::ChrRom; uint32_t m135nt[4]={};
     for(unsigned i=0;i<4;++i) m135->mapNametable(uint16_t(0x2000+i*0x400),m135src,m135nt[i]);
     std::vector<uint8_t> m135state; m135->saveState(m135state);
@@ -2492,14 +2201,11 @@ int runMapperConformanceProbe()
         (m135load&&m135restored==0xA000)?"PASS":"FAIL",m135gate?"PASS":"FAIL");
     ok &= mapper135;
 
-    // Phase 25: Mapper 148 moves the NINA-06/GNROM latch into $8000-$FFFF.
-    // D3 selects the 32 KiB PRG bank, D2-D0 select the 8 KiB CHR bank, and
-    // the overlapping PRG-ROM output means the board has wired-AND conflicts.
     auto m148 = makeMapper(148, 0x10000, 0x10000, 0, 0, 0, false, Mirror::Vertical);
     uint32_t m148p0=0,m148c0=0,m148p1=0,m148c1=0,m148restoredP=0,m148restoredC=0;
     m148->cpuMapRead(0x8000,m148p0); m148->ppuMapRead(0x0123,m148c0);
     const bool m148IgnoredLow = !m148->cpuWrite(0x7FFF,0x0F,0);
-    m148->cpuWrite(0x9000,0x0D,0); // PRG 1, CHR 5
+    m148->cpuWrite(0x9000,0x0D,0);
     m148->cpuMapRead(0x8000,m148p1); m148->ppuMapRead(0x0123,m148c1);
     const bool m148Mirror = m148->mirroring() == Mirror::Vertical;
     std::vector<uint8_t> m148state; m148->saveState(m148state);
@@ -2516,20 +2222,16 @@ int runMapperConformanceProbe()
         m148Mirror?"PASS":"FAIL",m148gate?"PASS":"FAIL");
     ok &= mapper148;
 
-    // Phase 26: Mapper 150 / Sachen SA-015 (74LS374N).  $4100 selects one
-    // of eight 3-bit registers and $4101 accesses it. R5 selects 32 KiB PRG,
-    // R4/R6 compose 8 KiB CHR, and R7 controls H/V/one-screen/custom mirroring.
     auto m150 = makeMapper(150, 0x20000, 0x10000, 0, 0, 0, false);
     auto write150 = [](Mapper& m, uint8_t reg, uint8_t value) {
-        m.cpuWrite(0x4120, reg, 0);  // $4100 alias under mask $C101
-        m.cpuWrite(0x4121, value, 0); // $4101 alias
+        m.cpuWrite(0x4120, reg, 0);
+        m.cpuWrite(0x4121, value, 0);
     };
     write150(*m150,5,3);
     write150(*m150,4,1);
-    write150(*m150,6,2); // CHR bank = 4 | 2 = 6
+    write150(*m150,6,2);
     uint32_t m150p=0,m150c=0; m150->cpuMapRead(0x8000,m150p); m150->ppuMapRead(0x0123,m150c);
 
-    // Register data reads drive only D0-D2; upper bits stay open bus.
     m150->cpuWrite(0x4100,6,0);
     uint8_t m150read=0xA8; const bool m150readOk=m150->cpuReadRegister(0x4101,m150read);
     uint8_t m150ignored=0x5A; const bool m150readIgnored=!m150->cpuReadRegister(0x4100,m150ignored);
@@ -2559,15 +2261,10 @@ int runMapperConformanceProbe()
         m150gate?"PASS":"FAIL");
     ok &= mapper150;
 
-    // Phase 27: Mapper 137 / Sachen 8259D. Unlike the A/B/C variants,
-    // this board switches four 1 KiB banks in $0000-$0FFF and fixes the upper
-    // pattern table to the last 4 KiB of CHR-ROM. Its glue logic provides
-    // independent high bits to slots 1-3 and uses H/V/custom/one-screen-A
-    // mirroring; simple mode fixes horizontal mirroring.
     auto m137 = makeMapper(137, 0x20000, 0x8000, 0, 0, 0, true);
     auto write137 = [](Mapper& m, uint8_t reg, uint8_t value) {
-        m.cpuWrite(0x4120, reg, 0);   // $4100 alias under mask $C101
-        m.cpuWrite(0x4121, value, 0); // $4101 alias
+        m.cpuWrite(0x4120, reg, 0);
+        m.cpuWrite(0x4121, value, 0);
     };
     write137(*m137,0,1); write137(*m137,1,2); write137(*m137,2,3); write137(*m137,3,4);
     write137(*m137,4,7); write137(*m137,5,3); write137(*m137,6,1); write137(*m137,7,2);
@@ -2581,10 +2278,10 @@ int runMapperConformanceProbe()
     const bool m137V = m137->mirroring()==Mirror::Vertical;
 
     NametableSource m137src=NametableSource::ChrRom; uint32_t m137nt[4]={};
-    write137(*m137,7,4); // custom (0,1,1,1)
+    write137(*m137,7,4);
     for(unsigned i=0;i<4;++i)m137->mapNametable(uint16_t(0x2000+i*0x400),m137src,m137nt[i]);
     const bool m137Asym=m137nt[0]==0&&m137nt[1]==0x400&&m137nt[2]==0x400&&m137nt[3]==0x400;
-    write137(*m137,7,1); // simple mode: horizontal, all ccc bits from R0
+    write137(*m137,7,1);
     uint32_t m137simple1=0,m137simple3=0;
     m137->ppuMapRead(0x0523,m137simple1); m137->ppuMapRead(0x0D23,m137simple3);
     const bool m137Simple = m137->mirroring()==Mirror::Horizontal &&
@@ -2604,9 +2301,6 @@ int runMapperConformanceProbe()
         m137Simple?"PASS":"FAIL",(m137load&&m137rp==0x18000)?"PASS":"FAIL",m137gate?"PASS":"FAIL");
     ok &= mapper137;
 
-    // Phase 28: Mapper 149 / Sachen SA-0036.  PRG is fixed, while D7 of
-    // writes in $8000-$FFFF selects one of two 8 KiB CHR-ROM banks.  The
-    // register overlaps PRG-ROM and therefore uses wired-AND bus conflicts.
     auto m149 = makeMapper(149, 0x8000, 0x4000, 0, 0, 0, false, Mirror::Horizontal);
     uint32_t m149p0=0,m149p1=0,m149c0=0,m149c1=0,m149cr=0;
     const bool m149pr0=m149->cpuMapRead(0x8000,m149p0);
@@ -2631,21 +2325,16 @@ int runMapperConformanceProbe()
         (m149load&&m149cr==0x2123)?"PASS":"FAIL",m149Mirror?"PASS":"FAIL",m149gate?"PASS":"FAIL");
     ok &= mapper149;
 
-
-    // Phase 29: Mapper 143 / Sachen TCA-01.  The board is NROM-like but
-    // exposes a read-only protection device in $4100-$5FFF.  On the decoded
-    // $4100 + k*$200 aliases it returns (~address & $3F) | $40; intervening
-    // addresses return zero. PRG/CHR remain fixed.
     auto m143 = makeMapper(143, 0x8000, 0x2000, 0, 0, 0, false, Mirror::Vertical);
     uint32_t m143p0=0,m143p1=0,m143c=0;
     const bool m143Pr0=m143->cpuMapRead(0x8000,m143p0);
     const bool m143Pr1=m143->cpuMapRead(0xFFFF,m143p1);
     m143->ppuMapRead(0x1234,m143c);
     uint8_t m143r0=0xAA,m143r1=0xAA,m143r2=0xAA,m143r3=0xAA,m143out=0xAA;
-    const bool m143Read0=m143->cpuReadRegister(0x4100,m143r0); // $7F
-    const bool m143Read1=m143->cpuReadRegister(0x413F,m143r1); // $40
-    const bool m143Read2=m143->cpuReadRegister(0x4301,m143r2); // $7E alias
-    const bool m143Read3=m143->cpuReadRegister(0x4200,m143r3); // undecoded -> 0
+    const bool m143Read0=m143->cpuReadRegister(0x4100,m143r0);
+    const bool m143Read1=m143->cpuReadRegister(0x413F,m143r1);
+    const bool m143Read2=m143->cpuReadRegister(0x4301,m143r2);
+    const bool m143Read3=m143->cpuReadRegister(0x4200,m143r3);
     const bool m143Outside=!m143->cpuReadRegister(0x4000,m143out) && !m143->cpuReadRegister(0x6000,m143out);
     const bool m143gate=mapperImplementationSupported(143,0)&&!mapperImplementationSupported(143,1);
     const bool mapper143=m143Pr0&&m143Pr1&&m143p0==0&&m143p1==0x7FFF&&m143c==0x1234&&
@@ -2658,14 +2347,11 @@ int runMapperConformanceProbe()
         m143->mirroring()==Mirror::Vertical?"PASS":"FAIL",m143gate?"PASS":"FAIL");
     ok &= mapper143;
 
-    // Phase 30: Mapper 156 / DAOU DIS23C01.  Eight 1 KiB CHR slots use
-    // split low/high register writes, the lower 16 KiB PRG window is
-    // switchable, and the upper 16 KiB is fixed to the last bank.
     auto m156 = makeMapper(156, 0x40000, 0x80000, 0x2000, 0, 0, true);
     uint32_t m156pLo=0,m156pHi=0,m156c0=0,m156c7=0,m156ram=0;
     m156->cpuWrite(0xC010, 9, 0);
     m156->cpuMapRead(0x8123,m156pLo); m156->cpuMapRead(0xC123,m156pHi);
-    // CHR slot 0 = $123, slot 7 = $1AB.
+
     m156->cpuWrite(0xC000,0x23,0); m156->cpuWrite(0xC004,0x01,0);
     m156->cpuWrite(0xC00B,0xAB,0); m156->cpuWrite(0xC00F,0x01,0);
     m156->ppuMapRead(0x0056,m156c0); m156->ppuMapRead(0x1C56,m156c7);
@@ -2691,11 +2377,6 @@ int runMapperConformanceProbe()
         (m156load&&m156rp==0x24123&&m156rc==0x48C56)?"PASS":"FAIL",m156gate?"PASS":"FAIL");
     ok &= mapper156;
 
-
-    // Phase 31: Mapper 142 / Kaiser KS7032.  Four switchable 8 KiB PRG
-    // windows live at $6000-$DFFF, $E000-$FFFF is fixed to the final bank,
-    // CHR is unbanked RAM, and the KS202 ASIC supplies a one-shot 16-bit
-    // incrementing IRQ whose reload value is written in four nibbles.
     auto m142 = makeMapper(142, 0x40000, 0, 0, 0x2000, 0, true, Mirror::Vertical);
     auto write142Bank = [](Mapper& m, uint8_t select, uint8_t bank) {
         m.cpuWrite(0xE000, select, 0);
@@ -2714,8 +2395,6 @@ int runMapperConformanceProbe()
     uint32_t m142ram=0;
     const bool m142NoWram=!m142->mapPrgRam(0x6000,m142ram,false);
 
-    // Reload $FFFE, enable with bit 1, then require overflow on the second
-    // CPU clock.  The IRQ is one-shot and $D000 acknowledges it.
     m142->cpuWrite(0x8000,0x0E,0); m142->cpuWrite(0x9000,0x0F,0);
     m142->cpuWrite(0xA000,0x0F,0); m142->cpuWrite(0xB000,0x0F,0);
     m142->cpuWrite(0xC000,0x02,0);
@@ -2743,21 +2422,16 @@ int runMapperConformanceProbe()
         (m142load&&m142rp6==0x0C123&&m142rp8==0x06123)?"PASS":"FAIL",m142gate?"PASS":"FAIL");
     ok &= mapper142;
 
-
-    // Phase 32: Mapper 147 / Sachen TCU-01.  Writes at $4102 mirrored by
-    // mask $E103 latch D7,D2 as the 32 KiB PRG bank and D7-D3 as the
-    // 8 KiB CHR bank.  The data latch ignores all nonmatching addresses.
     auto m147 = makeMapper(147, 0x20000, 0x20000, 0, 0, 0, true, Mirror::Vertical);
     uint32_t m147p0=0,m147c0=0;
     const bool m147Default = m147->cpuMapRead(0x8123,m147p0) && m147p0==0x0123 &&
         m147->ppuMapRead(0x0456,m147c0) && m147c0==0x0456 && m147->mirroring()==Mirror::Vertical;
-    // D7=1,D2=1 => PRG bank 3. D7-D3=10101b => bank 21, wrapping to bank 5
-    // on the 128 KiB CHR image used by this probe.
+
     const bool m147Write = m147->cpuWrite(0x4102,0xAC,0);
     uint32_t m147p=0,m147c=0;
     m147->cpuMapRead(0x9234,m147p); m147->ppuMapRead(0x0567,m147c);
     const bool m147Banks = m147p==0x19234 && m147c==0x0A567;
-    // $4302 is the documented mirror; $4100/$4103 and $4202 must not latch.
+
     const bool m147Alias = m147->cpuWrite(0x4302,0x20,0);
     uint32_t m147pa=0,m147ca=0; m147->cpuMapRead(0x8000,m147pa); m147->ppuMapRead(0x0000,m147ca);
     const bool m147AliasBanks = m147pa==0x00000 && m147ca==0x08000;
@@ -2781,10 +2455,6 @@ int runMapperConformanceProbe()
         m147->mirroring()==Mirror::Vertical?"PASS":"FAIL",m147gate?"PASS":"FAIL");
     ok &= mapper147;
 
-    // Phase 33: Mapper 144 / AGCI 50282.  Banking uses the Color Dreams
-    // bit layout, but a board resistor forces CPU D0 high before the
-    // wired-AND bus conflict with PRG-ROM.  This makes the electrical
-    // result observably different from Mapper 11 when CPU D0 is low.
     auto m144 = makeMapper(144, 0x20000, 0x20000, 0, 0, 0, true, Mirror::Horizontal);
     auto m11cmp = makeMapper(11, 0x20000, 0x20000, 0, 0, 0, true, Mirror::Horizontal);
     const bool m144ConflictFlag = m144->hasBusConflicts();
@@ -2812,23 +2482,18 @@ int runMapperConformanceProbe()
         (m144ChrRead&&m144c==0x14456)?"PASS":"FAIL",m144State?"PASS":"FAIL",m144Gate?"PASS":"FAIL");
     ok &= mapper144;
 
-
-    // Phase 35: Mapper 243 / Sachen SA-020A (74LS374NA).  The board uses
-    // the same $4100/$4101 8-register ASIC interface as Mapper 150, but its
-    // CHR wiring is R2->A13, R4->A14 and R6.1-0->A16-A15.
     auto m243 = makeMapper(243, 0x20000, 0x20000, 0, 0, 0, false);
     auto write243 = [](Mapper& m, uint8_t reg, uint8_t value) {
-        m.cpuWrite(0x4120, reg, 0);   // $4100 alias under mask $C101
-        m.cpuWrite(0x4121, value, 0); // $4101 alias
+        m.cpuWrite(0x4120, reg, 0);
+        m.cpuWrite(0x4121, value, 0);
     };
-    write243(*m243,5,3); // PRG bank 3
-    write243(*m243,2,1); // CHR bit 0
-    write243(*m243,4,1); // CHR bit 1
-    write243(*m243,6,2); // CHR bits 3-2 = 10 -> bank 11
+    write243(*m243,5,3);
+    write243(*m243,2,1);
+    write243(*m243,4,1);
+    write243(*m243,6,2);
     uint32_t m243p=0,m243c=0;
     m243->cpuMapRead(0x8123,m243p); m243->ppuMapRead(0x0456,m243c);
 
-    // All three data bits are readable; upper CPU-bus bits remain open bus.
     m243->cpuWrite(0x4100,6,0);
     uint8_t m243read=0xA8; const bool m243readOk=m243->cpuReadRegister(0x4101,m243read);
     const bool m243Ignored=!m243->cpuWrite(0x4200,0x07,0)&&!m243->cpuWrite(0x4201,0x07,0);
@@ -2858,10 +2523,6 @@ int runMapperConformanceProbe()
         m243gate?"PASS":"FAIL");
     ok &= mapper243;
 
-
-    // Phase 44: Mapper 201 / BMC 21-in-1 is the standardized mapper number
-    // for the same hardware historically assigned to Mapper 54.  Keep one
-    // implementation and verify the two IDs remain behaviorally identical.
     auto m201 = makeMapper(201, 0x20000, 0x10000, 0, 0, 0, false, Mirror::Horizontal);
     auto m54alias = makeMapper(54, 0x20000, 0x10000, 0, 0, 0, false, Mirror::Horizontal);
     const bool m201Boot = m201 && m54alias;
@@ -2871,8 +2532,6 @@ int runMapperConformanceProbe()
         m201->ppuMapRead(0x0456,m201c0) && m54alias->ppuMapRead(0x0456,m54c0) &&
         m201p0==m54p0 && m201c0==m54c0;
 
-    // Address bits, not data, select both banks.  $8006 selects PRG bank 2
-    // (A1:A0) and CHR bank 6 (A2:A0); the two mapper numbers must agree.
     const bool m201Write = m201Boot && m201->cpuWrite(0x8006,0x00,0) && m54alias->cpuWrite(0x8006,0xFF,0);
     uint32_t m201p=0,m201c=0,m54aliasp=0,m54aliasc=0;
     const bool m201Banks = m201Write &&
@@ -2880,8 +2539,6 @@ int runMapperConformanceProbe()
         m201->ppuMapRead(0x0567,m201c) && m54alias->ppuMapRead(0x0567,m54aliasc) &&
         m201p==0x11234 && m54aliasp==m201p && m201c==0x0C567 && m54aliasc==m201c;
 
-    // Data is disconnected, so changing only the data byte at the same CPU
-    // address cannot alter either bank selection.
     m201->cpuWrite(0x8003,0x00,0); m54alias->cpuWrite(0x8003,0xFF,0);
     uint32_t m201pd=0,m201cd=0,m54pd=0,m54cd=0;
     m201->cpuMapRead(0x8000,m201pd); m54alias->cpuMapRead(0x8000,m54pd);
@@ -2901,17 +2558,14 @@ int runMapperConformanceProbe()
         m201State?"PASS":"FAIL",m201Gate?"PASS":"FAIL");
     ok &= mapper201;
 
-    // Phase 45: Mapper 171 / Kaiser KS-7058.  PRG is fixed at 32 KiB;
-    // $F000/$F080 aliases select the two 4 KiB CHR halves independently.
     auto m171 = makeMapper(171, 0x8000, 0x10000, 0, 0, 0, true, Mirror::Vertical);
     uint32_t m171p0=0,m171p1=0,m171c0=0,m171c1=0;
     const bool m171Fixed = m171->cpuMapRead(0x8000,m171p0) && m171->cpuMapRead(0xFFFF,m171p1) &&
         m171p0==0x0000 && m171p1==0x7FFF && m171->mirroring()==Mirror::Vertical;
     const bool m171NoRam = !m171->mapPrgRam(0x6000,m171p0,false);
 
-    // Mask $F080: A7 chooses the CHR half; all other low address bits alias.
     const bool m171Write0 = m171->cpuWrite(0xF037,0x03,0);
-    const bool m171Write1 = m171->cpuWrite(0xF1FF,0x05,0); // -> $F080 alias
+    const bool m171Write1 = m171->cpuWrite(0xF1FF,0x05,0);
     const bool m171Ignore = !m171->cpuWrite(0xE080,0x07,0);
     const bool m171Chr = m171Write0 && m171Write1 && m171Ignore &&
         m171->ppuMapRead(0x0123,m171c0) && m171->ppuMapRead(0x1456,m171c1) &&
@@ -2933,11 +2587,6 @@ int runMapperConformanceProbe()
         m171State?"PASS":"FAIL",m171Reset?"PASS":"FAIL",m171Gate?"PASS":"FAIL");
     ok &= mapper171;
 
-
-    // Phase 46: Mapper 193 / NTDEC TC-112 (Fighting Hero). Four registers
-    // mirrored through $6000-$7FFF select one 8 KiB PRG bank and a
-    // 4 KiB + 2 KiB + 2 KiB CHR layout. The final 24 KiB of PRG is fixed
-    // and the physical board is hardwired to vertical mirroring.
     auto m193 = makeMapper(193, 0x20000, 0x20000, 0, 0, 0, true, Mirror::Horizontal);
     uint32_t m193p0=0,m193p1=0,m193p2=0,m193p3=0;
     const bool m193Boot = m193->cpuMapRead(0x8000,m193p0) && m193->cpuMapRead(0xA000,m193p1) &&
@@ -2945,9 +2594,9 @@ int runMapperConformanceProbe()
         m193p0==0x00000 && m193p1==0x1A000 && m193p2==0x1C000 && m193p3==0x1E000 &&
         m193->mirroring()==Mirror::Vertical;
     const bool m193Writes = m193->cpuWrite(0x6003,0x03,0) &&
-        m193->cpuWrite(0x7FFC,0x14,0) && // register 0 alias: 4 KiB CHR bank 5
-        m193->cpuWrite(0x7FFD,0x0C,0) && // register 1 alias: 2 KiB CHR bank 6
-        m193->cpuWrite(0x7FFE,0x12,0) && // register 2 alias: 2 KiB CHR bank 9
+        m193->cpuWrite(0x7FFC,0x14,0) &&
+        m193->cpuWrite(0x7FFD,0x0C,0) &&
+        m193->cpuWrite(0x7FFE,0x12,0) &&
         !m193->cpuWrite(0x5FFF,0xFF,0) && !m193->cpuWrite(0x8000,0xFF,0);
     uint32_t m193pb=0,m193c0=0,m193c1=0,m193c2=0;
     const bool m193Banks = m193Writes && m193->cpuMapRead(0x8123,m193pb) &&
@@ -2974,14 +2623,11 @@ int runMapperConformanceProbe()
         m193State?"PASS":"FAIL",m193Reset?"PASS":"FAIL",m193Gate?"PASS":"FAIL");
     ok &= mapper193;
 
-
-    // Phase 48: larger multicart bundle -- mappers 225, 226, 230, 235 and 236.
-    // These cover five distinct discrete-latch families in one regression pass.
     bool phase48_225=false, phase48_226=false, phase48_227=false, phase48_230=false, phase48_235=false, phase48_236=false, phase48_237=false;
     {
-        // Mapper 225 / BMC 72/110-in-1: address latch plus four 4-bit RAM cells.
+
         auto m = makeMapper(225, 0x200000, 0x100000, 0, 0, 0, false, Mirror::Horizontal);
-        const bool wr = m->cpuWrite(0xE045,0x00,0); // o=$6045 -> banks $40/$41, CHR $45, H
+        const bool wr = m->cpuWrite(0xE045,0x00,0);
         uint32_t p0=0,p1=0,c=0; uint8_t r=0xA0;
         const bool maps = wr && m->cpuMapRead(0x8123,p0) && m->cpuMapRead(0xC123,p1) &&
             m->ppuMapRead(0x0456,c) && p0==0x100123 && p1==0x104123 && c==0x8A456 &&
@@ -2994,13 +2640,13 @@ int runMapperConformanceProbe()
         phase48_225=maps&&ram&&state&&mapperImplementationSupported(225,0)&&!mapperImplementationSupported(225,1);
     }
     {
-        // Mapper 226 / 76-in-1: two data registers, CHR-RAM fixed.
+
         auto m = makeMapper(226, 0x200000, 0, 0, 0x2000);
-        m->cpuWrite(0x8001,0x01,0); m->cpuWrite(0x8000,0x65,0); // bank 69, mirrored, vertical
+        m->cpuWrite(0x8001,0x01,0); m->cpuWrite(0x8000,0x65,0);
         uint32_t p0=0,p1=0,c=0,w=0;
         const bool mirrored=m->cpuMapRead(0x8000,p0)&&m->cpuMapRead(0xC000,p1)&&p0==0x114000&&p1==0x114000&&
             m->mirroring()==Mirror::Vertical;
-        m->cpuWrite(0x8000,0x05,0); // bank 69 in 32K mode -> 68/69, horizontal
+        m->cpuWrite(0x8000,0x05,0);
         const bool split=m->cpuMapRead(0x8000,p0)&&m->cpuMapRead(0xC000,p1)&&p0==0x110000&&p1==0x114000&&
             m->mirroring()==Mirror::Horizontal;
         const bool chr=m->ppuMapRead(0x1234,c)&&m->ppuMapWrite(0x1234,w)&&c==0x1234&&w==0x1234;
@@ -3009,14 +2655,14 @@ int runMapperConformanceProbe()
         phase48_226=mirrored&&split&&chr&&soft&&mapperImplementationSupported(226,0)&&!mapperImplementationSupported(226,1);
     }
     {
-        // Mapper 227 / BMC 1200-in-1 legacy path: address-latched UNROM/NROM modes, CHR-RAM.
+
         auto m = makeMapper(227, 0x100000, 0, 0, 0x2000);
-        // $8382 => o=$0382: bank=((o>>2)&1F)|((o&100)>>3)=0x20, NROM-256, H.
-        m->cpuWrite(0x8383,0,0); // bit0=1 -> adjacent 16K banks (NROM-256)
+
+        m->cpuWrite(0x8383,0,0);
         uint32_t p0=0,p1=0,c=0,w=0;
         const bool nrom=m->cpuMapRead(0x8000,p0)&&m->cpuMapRead(0xC000,p1)&&
             p0==0x80000&&p1==0x84000&&m->mirroring()==Mirror::Horizontal;
-        // UNROM mode with L=1 fixes the upper half to inner bank 7.
+
         m->cpuWrite(0x8200,0,0); uint32_t u0=0,u1=0;
         const bool unrom=m->cpuMapRead(0x8000,u0)&&m->cpuMapRead(0xC000,u1)&&u1==0x1C000;
         const bool chr=m->ppuMapRead(0x1234,c)&&m->ppuMapWrite(0x1234,w)&&c==0x1234&&w==0x1234;
@@ -3025,7 +2671,7 @@ int runMapperConformanceProbe()
         phase48_227=nrom&&unrom&&chr&&reset&&mapperImplementationSupported(227,0)&&!mapperImplementationSupported(227,1);
     }
     {
-        // Mapper 230 / Contra + 22-in-1: reset toggles between ROM chips/modes.
+
         auto m = makeMapper(230, 0xA0000, 0, 0, 0x2000);
         uint32_t a=0,b=0;
         const bool contraBoot=m->cpuMapRead(0x8000,a)&&m->cpuMapRead(0xC000,b)&&a==0&&b==0x1C000&&m->mirroring()==Mirror::Vertical;
@@ -3041,13 +2687,13 @@ int runMapperConformanceProbe()
             mapperImplementationSupported(230,0)&&!mapperImplementationSupported(230,1);
     }
     {
-        // Mapper 235 / Golden Game: address bits form PRG bank/mode/mirroring.
+
         auto m = makeMapper(235, 0x400000, 0, 0, 0x2000);
-        m->cpuWrite(0xA003,0,0); // o=$2003 -> bank 6/7, horizontal
+        m->cpuWrite(0xA003,0,0);
         uint32_t p0=0,p1=0,c=0,w=0;
         const bool bank=m->cpuMapRead(0x8000,p0)&&m->cpuMapRead(0xC000,p1)&&p0==0x18000&&p1==0x1C000&&
             m->mirroring()==Mirror::Horizontal;
-        m->cpuWrite(0x8400,0,0); // o=$0400 -> one-screen low
+        m->cpuWrite(0x8400,0,0);
         const bool one=m->mirroring()==Mirror::OnescreenLo;
         const bool chr=m->ppuMapRead(0x0456,c)&&m->ppuMapWrite(0x0456,w)&&c==0x0456&&w==0x0456;
         std::vector<uint8_t> st; m->saveState(st); m->cpuWrite(0x8000,0,0);
@@ -3056,16 +2702,16 @@ int runMapperConformanceProbe()
         phase48_235=bank&&one&&chr&&state&&mapperImplementationSupported(235,0)&&!mapperImplementationSupported(235,1);
     }
     {
-        // Mapper 236 / Realtec: exercise both documented CHR-ROM and CHR-RAM wiring variants.
+
         auto rom = makeMapper(236, 0x20000, 0x10000, 0, 0);
-        rom->cpuWrite(0x8025,0,0); // lower latch: CHR=5, horizontal
-        rom->cpuWrite(0xE012,0,0); // upper latch: UNROM bank 2 / fixed 7
+        rom->cpuWrite(0x8025,0,0);
+        rom->cpuWrite(0xE012,0,0);
         uint32_t p0=0,p1=0,c=0;
         const bool romPath=rom->cpuMapRead(0x8000,p0)&&rom->cpuMapRead(0xC000,p1)&&rom->ppuMapRead(0,c)&&
             p0==0x08000&&p1==0x1C000&&c==0x0A000&&rom->mirroring()==Mirror::Horizontal;
         auto ram = makeMapper(236, 0x100000, 0, 0, 0x2000);
-        ram->cpuWrite(0x8023,0,0); // outer PRG bits=3, H
-        ram->cpuWrite(0xE035,0,0); // bank 29, NROM-128 mirrored
+        ram->cpuWrite(0x8023,0,0);
+        ram->cpuWrite(0xE035,0,0);
         uint32_t q0=0,q1=0,cr=0,cw=0;
         const bool ramPath=ram->cpuMapRead(0x8000,q0)&&ram->cpuMapRead(0xC000,q1)&&q0==0x74000&&q1==0x74000&&
             ram->ppuMapRead(0x1234,cr)&&ram->ppuMapWrite(0x1234,cw)&&cr==0x1234&&cw==0x1234&&
@@ -3073,17 +2719,17 @@ int runMapperConformanceProbe()
         phase48_236=romPath&&ramPath&&mapperImplementationSupported(236,0)&&!mapperImplementationSupported(236,1);
     }
     {
-        // Mapper 237 / Teletubbies 420-in-1: address outer bits, data inner/mode/lock.
+
         auto m = makeMapper(237, 0x100000, 0, 0, 0x2000);
-        // Unlocked write: latch A2 supplies outer bank bit; data selects inner=3, H mirroring.
+
         m->cpuWrite(0x8004,0x23,0);
         uint32_t p0=0,p1=0,c=0,w=0;
         const bool unrom=m->cpuMapRead(0x8000,p0)&&m->cpuMapRead(0xC000,p1)&&
             p0==0x8C000&&p1==0x9C000&&m->mirroring()==Mirror::Horizontal;
-        // Lock via address A1. Subsequent writes may change only bbb (D2-D0).
-        m->cpuWrite(0x8006,0xE5,0); // lock, NROM mode, bank outer|5
+
+        m->cpuWrite(0x8006,0xE5,0);
         uint32_t l0=0,l1=0; m->cpuMapRead(0x8000,l0); m->cpuMapRead(0xC000,l1);
-        m->cpuWrite(0x8000,0x00,0); // locked: only low 3 bits change
+        m->cpuWrite(0x8000,0x00,0);
         uint32_t q0=0,q1=0; m->cpuMapRead(0x8000,q0); m->cpuMapRead(0xC000,q1);
         const bool lock=(l0!=q0||l1!=q1)&&m->mirroring()==Mirror::Horizontal;
         const bool chr=m->ppuMapRead(0x0456,c)&&m->ppuMapWrite(0x0456,w)&&c==0x0456&&w==0x0456;
@@ -3097,18 +2743,16 @@ int runMapperConformanceProbe()
         phase48_230?"PASS":"FAIL",phase48_235?"PASS":"FAIL",phase48_236?"PASS":"FAIL",phase48_237?"PASS":"FAIL");
     ok &= phase48;
 
-    // Phase 49 bundled compatibility pass: one new discrete mapper plus
-    // three documented mapper-number aliases of existing hardware.
     bool p49_212=false,p49_179=false,p49_182=false,p49_255=false;
     {
         auto m=makeMapper(212,0x40000,0x20000,0,0,0,false,Mirror::Vertical);
-        m->cpuWrite(0x800D,0x00,0); // A14=0: mirrored 16K bank 5, CHR 5, H mirror.
+        m->cpuWrite(0x800D,0x00,0);
         uint32_t p0=0,p1=0,c=0;
         uint8_t ob=0x35, miss=0x66;
         const bool mode16=m->cpuMapRead(0x8123,p0)&&m->cpuMapRead(0xC456,p1)&&m->ppuMapRead(0x0456,c)&&
             p0==0x14123&&p1==0x14456&&c==0x0A456&&m->mirroring()==Mirror::Horizontal;
         const bool readback=m->cpuReadRegister(0x6000,ob)&&ob==0xB5&&!m->cpuReadRegister(0x6010,miss)&&miss==0x66;
-        m->cpuWrite(0xC00B,0xFF,0); // A14=1: 32K bank 1, CHR 3, H mirror; data ignored.
+        m->cpuWrite(0xC00B,0xFF,0);
         const bool mode32=m->cpuMapRead(0x8000,p0)&&m->cpuMapRead(0xC000,p1)&&m->ppuMapRead(0,c)&&
             p0==0x08000&&p1==0x0C000&&c==0x06000;
         std::vector<uint8_t> st;m->saveState(st);m->cpuWrite(0x8000,0,0);
@@ -3151,11 +2795,6 @@ int runMapperConformanceProbe()
     std::printf("phase49_mapper_bundle 212=%s 179=%s 182=%s 255=%s\n",p49_212?"PASS":"FAIL",p49_179?"PASS":"FAIL",p49_182?"PASS":"FAIL",p49_255?"PASS":"FAIL");
     ok &= phase49;
 
-
-    // Action 53 / mapper 28 PRG decoder: exhaustively compare the mapper
-    // implementation against the published reference formula for all 64
-    // mode values, 256 outer-bank values, 16 inner-bank values, and both
-    // CPU A14 states. Use an 8 MiB PRG size so no decoded address aliases.
     auto m28ref = makeMapper(28, 0x800000, 0, 0, 0);
     auto calcM28Ref = [](uint16_t address, uint8_t bankMode, uint8_t outerBank, uint8_t currentBank) -> uint16_t {
         static constexpr uint8_t masks[4] = {0x01, 0x03, 0x07, 0x0F};
@@ -3194,9 +2833,6 @@ int runMapperConformanceProbe()
         m28Exact?"PASS":"FAIL", 64u*256u*16u*2u);
     ok &= m28Exact;
 
-    // Namco 163 external WRAM write-enable decode.  The four high bits of
-    // $F800 must equal %0100 exactly; merely having bit 6 set is insufficient.
-    // Low bits A-D independently protect the four 2 KiB WRAM windows.
     auto n163wp = makeMapper(19, 0x80000, 0x40000, 0x2000, 0);
     uint32_t n163Ram = 0;
     n163wp->cpuWrite(0xF800, 0x40, 0);

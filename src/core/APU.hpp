@@ -1,7 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <vector>
-#include <mutex>
+#include <atomic>
 #include <array>
 #include "Timing.hpp"
 
@@ -40,9 +40,6 @@ public:
     void completeDmcDma(uint8_t data);
     void abortDmcDma();
 
-
-
-
     void saveState(std::vector<uint8_t>& out) const;
     bool loadState(const uint8_t*& p, const uint8_t* end);
 
@@ -54,11 +51,22 @@ public:
     void setMasterVolume(float volume);
     float masterVolume() const { return m_masterVolume; }
 
+    size_t queuedAudioSamples();
+    size_t audioBufferCapacity() const { return kRingSize - 1; }
+    uint64_t audioUnderrunCount() const;
+    uint64_t audioOverrunCount() const;
+    int outputSampleRate() const { return m_outputSampleRate; }
+    bool audioOpen() const { return m_audioOpen; }
+    void setHostAudioEnabled(bool enabled);
+    void setAudioPlaybackPaused(bool paused);
+    bool audioPlaybackPaused() const { return m_audioPlaybackPaused; }
+    bool hostAudioEnabled() const { return m_hostAudioEnabled; }
+
     void setDmcCpuRevision(DmcCpuRevision revision) { m_dmcCpuRevision = revision; }
     DmcCpuRevision dmcCpuRevision() const { return m_dmcCpuRevision; }
 
 #ifdef NES_HEADLESS
-    // Read-only/test-control hooks used by deterministic DMA regression probes.
+
     bool testFrameIrqFlag() const { return m_frameIrqFlag; }
     void testSetFrameIrqFlag(bool set) { m_frameIrqFlag = set; }
     bool testFrameMode5() const { return m_frameMode5; }
@@ -192,38 +200,20 @@ private:
         uint16_t currentAddr = 0xC000;
         uint16_t bytesRemaining = 0;
         bool dmaPending = false;
-        // Enabling an idle DMC through $4015 creates a *load* DMA. On common
-        // NTSC 2A03s it becomes eligible during the 2nd APU cycle after the
-        // write and is scheduled on a CPU get slot. Reload DMAs created when
-        // the sample buffer empties are instead scheduled on a put slot.
+
         uint8_t dmaStartDelay = 0;
         bool dmaLoadPending = false;
-        // A reload request that arose while the delayed $4015 enable signal
-        // had not yet reached the DMC memory reader. Unlike an ordinary
-        // reload, this request remains live until enable propagation and then
-        // acquires RDY on the next GET slot.
+
         bool dmaReloadWaitingForEnable = false;
-        // DMC stop-DMA bug state. A stop just before the output unit empties
-        // the sample buffer leaves a one-cycle reload HALT pulse behind. The
-        // pulse is one-shot: if its halt attempt lands on a CPU write, it is
-        // suppressed instead of retried. The same window produces the
-        // shared one-cycle implicit-stop anomaly after a one-byte load.
+
         uint8_t stopBugWindow = 0;
         uint8_t implicitStopWindow = 0;
         bool dmaAbortPending = false;
-        // True only for the pre-mid-1990 implicit one-cycle pulse. Unlike an
-        // explicit $4015 stop bug, this pulse must attempt RDY on the very
-        // next CPU clock after the output unit empties, regardless of GET/PUT
-        // phase. This lets a following CPU write suppress it at the correct
-        // matrix position instead of quantizing the attempt to a later PUT.
+
         bool dmaImplicitAbortPending = false;
-        // Legacy save-state field retained for compatibility with Phase 88.
-        // Implicit aborts no longer add an extra scheduler delay; same-clock
-        // submission is blocked by deferImplicitAbortSchedule instead.
+
         uint8_t dmaImplicitAbortDelay = 0;
-        // A reload already committed inside the reader survives a $4015 stop
-        // as a normal four-cycle DMA. This is distinct from the one-cycle
-        // stop-bug pulse represented by dmaAbortPending.
+
         bool dmaForcedReloadPending = false;
 
         void clockTimer();
@@ -235,30 +225,20 @@ private:
     Triangle m_triangle;
     Noise m_noise;
     Dmc m_dmc;
-    // AccuracyCoin accepts both observed RP2A03G implicit-stop behaviors.
-    // Late RP2A03G/RP2A03H additionally perform an unexpected full reload
-    // when a one-byte implicit stop lands on the reload-scheduling APU cycle.
-    // Default to the later reference behavior; tests/frontends may select the
-    // earlier revision explicitly.
+
     DmcCpuRevision m_dmcCpuRevision = DmcCpuRevision::Mid1990OrLater;
-    // Transient output-unit event for the current Bus::clock only. Save states
-    // are taken between clocks, so this does not need serialization.
 
     bool m_frameMode5 = false;
-    // Set only within one Bus::clock when a delayed $4017 reset/5-step
-    // immediate clock is applied before the CPU bus access. This preserves
-    // the hardware-visible ordering when the reset lands on a $4015 read.
+
     bool m_frameResetAppliedPreCpu = false;
     bool m_irqInhibit = false;
     mutable bool m_frameIrqFlag = false;
     mutable bool m_frameIrqClearPending = false;
     uint32_t m_frameCycles = 0;
     bool m_apuPhase = false;
-    // $4017's mode/reset effect is delayed by the CPU/APU phase.  The IRQ
-    // inhibit bit itself is immediate, but the sequencer switches mode and
-    // resets 3 or 4 CPU clocks after the write.
+
     uint8_t m_frameResetDelay = 0;
-    // Write-relative frame count to install when the delayed divider reset lands.
+
     uint8_t m_pendingFrameStartCycles = 0;
     bool m_pendingFrameMode5 = false;
 
@@ -270,19 +250,28 @@ private:
     bool m_audioOpen = false;
     float m_masterVolume = 1.50f;
     uint32_t m_audioDeviceId = 0;
+    bool m_hostAudioEnabled = true;
+    std::atomic<uint64_t> m_audioUnderruns{0};
+    std::atomic<uint64_t> m_audioOverruns{0};
     double m_sampleTimer = 0;
     double m_samplePeriod = (double)consoleCpuClockHz(ConsoleTiming::NTSC) / kSampleRate;
     double m_mixAccumulator = 0.0;
     double m_mixAccumulatorWeight = 0.0;
-    double m_hpPrevInput = 0.0;
-    double m_hpPrevOutput = 0.0;
-    double m_hpCoefficient = 0.0;
+
+    double m_hp90PrevInput = 0.0;
+    double m_hp90PrevOutput = 0.0;
+    double m_hp440PrevInput = 0.0;
+    double m_hp440PrevOutput = 0.0;
+    double m_lp14kPrevOutput = 0.0;
+    double m_hp90Coefficient = 0.0;
+    double m_hp440Coefficient = 0.0;
+    double m_lp14kCoefficient = 0.0;
     std::array<float, 2048> m_triangleGain{};
 
-    std::mutex m_mutex;
     std::vector<float> m_ring;
-    size_t m_ringWrite = 0;
-    size_t m_ringRead = 0;
+    std::atomic<size_t> m_ringWrite{0};
+    std::atomic<size_t> m_ringRead{0};
+    bool m_audioPlaybackPaused = true;
     static constexpr size_t kRingSize = 8192;
 
     void clockFrameCounter();

@@ -11,8 +11,17 @@
 #include <fstream>
 #include <iomanip>
 
-
 namespace {
+void updateOutputFilterCoefficients(int sampleRate,
+                                    double& hp90, double& hp440, double& lp14k)
+{
+    const double rate = double(std::max(sampleRate, 1));
+    constexpr double twoPi = 6.28318530717958647692;
+    hp90 = std::exp(-twoPi * 90.0 / rate);
+    hp440 = std::exp(-twoPi * 440.0 / rate);
+    lp14k = std::exp(-twoPi * 14000.0 / rate);
+}
+
 void traceImplicitDmc(const Bus* bus, const char* event,
                       uint16_t bytesRemaining, uint16_t sampleLength,
                       bool enabled, bool loop, bool bufferFull,
@@ -74,7 +83,7 @@ APU::APU()
 {
     m_ring.assign(kRingSize, 0.0f);
     rebuildTriangleLoudnessTable();
-    m_hpCoefficient = std::exp(-2.0 * 3.14159265358979323846 * 20.0 / double(m_outputSampleRate));
+    updateOutputFilterCoefficients(m_outputSampleRate, m_hp90Coefficient, m_hp440Coefficient, m_lp14kCoefficient);
     powerOn();
 }
 APU::~APU() { shutdownAudio(); }
@@ -88,12 +97,9 @@ void APU::setTiming(ConsoleTiming timing)
     resetOutputPipeline();
 }
 
-
 void APU::powerOn()
 {
-    // Power-on initializes the APU register/control state. The reset tests
-    // observe this as an effective $4015=$00 and $4017=$00 before the CPU
-    // begins executing from the reset vector.
+
     m_pulse1 = Pulse{};
     m_pulse2 = Pulse{};
     m_triangle = Triangle{};
@@ -106,9 +112,6 @@ void APU::powerOn()
     m_frameIrqFlag = false;
     m_frameIrqClearPending = false;
 
-    // CPU::powerOn() contributes seven reset clocks. Starting the frame
-    // sequencer at two makes the effective $4017=$00 write nine clocks before
-    // the first instruction, inside the 9-12 clock hardware window.
     m_frameCycles = 2;
     m_apuPhase = false;
     m_frameResetDelay = 0;
@@ -120,11 +123,7 @@ void APU::powerOn()
 
 void APU::reset()
 {
-    // RESET is not an APU power cycle. Hardware behaves as though $4015 is
-    // cleared, but the channel register/control latches survive. In
-    // particular, the triangle control/length-halt bit must survive reset.
-    // Clearing the channel-enable latch immediately clears each length
-    // counter, just like a CPU write of $00 to $4015.
+
     auto clearLengthChannel = [](auto& channel) {
         channel.enabled = false;
         channel.length = 0;
@@ -137,8 +136,6 @@ void APU::reset()
     clearLengthChannel(m_triangle);
     clearLengthChannel(m_noise);
 
-    // $4015 also stops DMC playback and clears the DMC IRQ. Preserve the DMC
-    // programming registers/DAC value, but cancel any in-flight sample/DMA.
     m_dmc.enabled = false;
     m_dmc.bytesRemaining = 0;
     m_dmc.dmaPending = false;
@@ -156,10 +153,6 @@ void APU::reset()
     m_dmc.silence = true;
     m_dmc.irqFlag = false;
 
-    // The frame IRQ flag is cleared by reset. The frame-counter *mode* is not
-    // reset to zero: hardware effectively rewrites the last value written to
-    // $4017. Preserve mode/inhibit and restart that sequence at the same
-    // reset-relative phase used at power-on.
     m_frameIrqFlag = false;
     m_frameIrqClearPending = false;
     m_frameCycles = 2;
@@ -174,9 +167,7 @@ void APU::reset()
 bool APU::initAudio()
 {
 #ifdef NES_HEADLESS
-    // Regression runners clock the APU exactly like the normal emulator but
-    // never open a host audio device. Keeping host I/O out of the test target
-    // makes timing tests deterministic and removes the SDL dependency.
+
     m_audioOpen = false;
     return true;
 #else
@@ -191,18 +182,11 @@ bool APU::initAudio()
     want.callback = sdlAudioCallback;
     want.userdata = this;
 
-    // Keep the callback contract fixed at float32 mono and let SDL convert
-    // to the physical device's channel count/PCM format. Only sample rate is
-    // allowed to change because the resampler below follows the obtained rate.
-    // The old legacy SDL_OpenAudio(..., &have) path allowed *any* change, then
-    // rejected common stereo devices and left the emulator completely silent.
     const SDL_AudioDeviceID device = SDL_OpenAudioDevice(
         nullptr, 0, &want, &have, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
     if (device == 0)
         return false;
 
-    // Format and channels were not allowed to change, so SDL should preserve
-    // the callback layout and convert internally if hardware needs otherwise.
     if (have.format != AUDIO_F32SYS || have.channels != 1 || have.freq <= 0) {
         SDL_CloseAudioDevice(device);
         return false;
@@ -211,10 +195,11 @@ bool APU::initAudio()
     m_audioDeviceId = uint32_t(device);
     m_outputSampleRate = have.freq;
     m_samplePeriod = double(consoleCpuClockHz(m_timing)) / double(m_outputSampleRate);
-    m_hpCoefficient = std::exp(-2.0 * 3.14159265358979323846 * 20.0 / double(m_outputSampleRate));
+    updateOutputFilterCoefficients(m_outputSampleRate, m_hp90Coefficient, m_hp440Coefficient, m_lp14kCoefficient);
     resetOutputPipeline();
     m_audioOpen = true;
-    SDL_PauseAudioDevice(device, 0);
+    m_audioPlaybackPaused = true;
+    SDL_PauseAudioDevice(device, 1);
     return true;
 #endif
 }
@@ -238,18 +223,56 @@ void APU::setMasterVolume(float volume)
     m_masterVolume = std::clamp(volume, 0.0f, 2.5f);
 }
 
+size_t APU::queuedAudioSamples()
+{
+    const size_t write = m_ringWrite.load(std::memory_order_acquire);
+    const size_t read = m_ringRead.load(std::memory_order_acquire);
+    return (write + kRingSize - read) % kRingSize;
+}
+
+uint64_t APU::audioUnderrunCount() const
+{
+    return m_audioUnderruns.load(std::memory_order_relaxed);
+}
+
+uint64_t APU::audioOverrunCount() const
+{
+    return m_audioOverruns.load(std::memory_order_relaxed);
+}
+
+void APU::setHostAudioEnabled(bool enabled)
+{
+    if (m_hostAudioEnabled == enabled)
+        return;
+#ifndef NES_HEADLESS
+    if (m_audioOpen)
+        SDL_PauseAudioDevice(SDL_AudioDeviceID(m_audioDeviceId), 1);
+#endif
+    m_audioPlaybackPaused = true;
+    m_hostAudioEnabled = enabled;
+
+    resetOutputPipeline();
+}
+
+void APU::setAudioPlaybackPaused(bool paused)
+{
+    if (!m_audioOpen || m_audioPlaybackPaused == paused)
+        return;
+#ifndef NES_HEADLESS
+    SDL_PauseAudioDevice(SDL_AudioDeviceID(m_audioDeviceId), paused ? 1 : 0);
+#endif
+    m_audioPlaybackPaused = paused;
+}
+
 void APU::setChipMod(bool enabled)
 {
     if (m_chipMod == enabled)
         return;
     m_chipMod = enabled;
 
-    // Waveform state remains untouched so the mode switch does not restart
-    // music. Only discard queued/output-filter history from the old mixer.
     resetOutputPipeline();
 }
 
-// ---- Pulse ----
 void APU::Pulse::clockTimer()
 {
     if (timer == 0) { timer = timerPeriod; dutyBit = (dutyBit + 1) & 7; }
@@ -293,9 +316,6 @@ bool APU::Pulse::muted(bool isPulse1) const
     if (!enabled || length == 0 || timerPeriod < 8 || timerPeriod > 0x7FF)
         return true;
 
-    // The sweep unit's target calculation mutes the pulse immediately when a
-    // positive target would exceed 11 bits; it does not wait for the next
-    // half-frame sweep clock to attempt the write.
     if (sweepTarget(isPulse1) > 0x7FF)
         return true;
     return false;
@@ -308,14 +328,13 @@ float APU::Pulse::sample(bool isPulse1) const
     return constant ? (volume / 15.0f) : (envelope / 15.0f);
 }
 
-// ---- Triangle ----
 void APU::Triangle::clockTimer()
 {
     if (timer == 0) {
         timer = timerPeriod;
         if (length > 0 && linear > 0) {
             sequencer = (sequencer + 1) & 31;
-            // Kept in the legacy save-state payload for compatibility.
+
             phase = float(sequencer) / 32.0f;
         }
     }
@@ -332,13 +351,9 @@ float APU::Triangle::sample(bool chipMod) const
 {
     const float current = triangleSequence[sequencer] / 15.0f;
 
-    // The triangle DAC is not gated to zero when the length/linear counter
-    // stops it; the sequencer simply freezes at its current DAC level.
     if (!chipMod || length == 0 || linear == 0)
         return current;
 
-    // KYLXBN's smooth-triangle idea is represented as a continuous ramp
-    // between adjacent hardware DAC steps, phase-locked to the real timer.
     const float next = triangleSequence[(sequencer + 1) & 31] / 15.0f;
     const float denom = float(timerPeriod) + 1.0f;
     const float elapsed = float(timerPeriod - std::min<uint16_t>(timer, timerPeriod));
@@ -348,7 +363,7 @@ float APU::Triangle::sample(bool chipMod) const
 
 void APU::rebuildTriangleLoudnessTable()
 {
-    // Equal-loudness contour points used by KYLXBN's NSFPlay fork.
+
     static constexpr double hz[] = {
         20,25,31.5,40,50,63,80,100,125,160,200,250,315,400,500,630,800,1000,
         1250,1600,2000,2500,3150,4000,5000,6300,8000,10000,12500,16000,20000
@@ -388,15 +403,13 @@ float APU::triangleLoudnessGain(uint16_t period) const
     return m_triangleGain[std::min<size_t>(period, m_triangleGain.size() - 1)];
 }
 
-// ---- Noise ----
 void APU::Noise::clockTimer()
 {
     if (timer == 0) {
         timer = timerPeriod > 0 ? static_cast<uint16_t>(timerPeriod - 1) : 0;
         const uint16_t feedback = mode ? ((shift >> 6) ^ shift) & 1 : ((shift >> 1) ^ shift) & 1;
         shift = (shift >> 1) | (feedback << 14);
-        // Preserve the legacy field in save states, but the actual anti-alias
-        // path now comes from CPU-clock integration rather than a one-pole blur.
+
         smooth = (shift & 1) ? 0.0f : 1.0f;
     }
     else timer--;
@@ -418,7 +431,6 @@ float APU::Noise::sample() const
     return constant ? (volume / 15.0f) : (envelope / 15.0f);
 }
 
-// ---- DMC ----
 void APU::Dmc::start()
 {
     currentAddr = sampleAddr;
@@ -428,13 +440,9 @@ void APU::Dmc::start()
 void APU::Dmc::clockTimer()
 {
     if (timer == 0) {
-        // dmcRates[] is expressed in CPU cycles per output bit. Reloading
-        // rate-1 gives an exact interval of `rate` APU::clock() calls.
+
         timer = rate > 0 ? static_cast<uint16_t>(rate - 1) : 0;
 
-        // When the output unit has exhausted a byte, transfer the sample
-        // buffer into the shift register. The memory reader runs separately
-        // via Bus DMC DMA and may or may not have produced a byte yet.
         if (bitsRemaining == 0) {
             bitsRemaining = 8;
             if (sampleBufferFull) {
@@ -475,10 +483,6 @@ void APU::scheduleDmcDma()
     if (!m_bus || m_dmc.dmaPending)
         return;
 
-    // If the memory reader had already committed the reload internally when
-    // $4015 disabled the DMC, the transfer still runs as an ordinary reload.
-    // AccuracyCoin's explicit-abort X=7 case distinguishes this from the
-    // one-cycle stop-bug pulse on the following two positions.
     if (m_dmc.dmaForcedReloadPending) {
         const bool getCycle = m_bus->dmaGetCycle();
         if (!getCycle && m_bus->requestDmcDma(m_dmc.currentAddr, false)) {
@@ -488,14 +492,7 @@ void APU::scheduleDmcDma()
         return;
     }
 
-    // Explicit-stop bug. The reload request survives the stop only as a
-    // one-cycle halt attempt, scheduled on the normal reload PUT phase.
-    // Bus suppresses it completely when that halt attempt hits a CPU write.
     if (m_dmc.dmaAbortPending) {
-        // The output unit arms an implicit one-cycle pulse during APU::clock().
-        // The caller already prevents same-clock submission with
-        // deferImplicitAbortSchedule.  Therefore the next scheduler pass is
-        // exactly the next CPU bus cycle; do not insert another delay here.
 
         const bool getCycle = m_bus->dmaGetCycle();
         const bool mayAttemptNow = m_dmc.dmaImplicitAbortPending || !getCycle;
@@ -515,22 +512,6 @@ void APU::scheduleDmcDma()
     if (!m_dmc.enabled || m_dmc.bytesRemaining == 0)
         return;
 
-    // Load and reload DMC DMAs are scheduled on different DMA phases. A load
-    // DMA is created by enabling an idle DMC through $4015. Hardware does not
-    // assert RDY immediately: the load request becomes eligible three CPU
-    // clocks after the write, then waits for the next GET slot. Depending on
-    // the write/APU phase this makes the halt begin 3 or 4 clocks after $4015.
-    // Starting on GET also makes the load transfer itself the 3-cycle
-    // halt/dummy/get form. A reload DMA is created when the sample buffer
-    // empties and targets a PUT slot, where the normal alignment cycle yields
-    // the 4-cycle halt/dummy/alignment/get form. If the CPU is
-    // writing when RDY is attempted, Bus keeps phase 0 pending and retries on
-    // the next CPU slot, so write-delay behavior remains emergent.
-    // The three-cycle post-$4015 enable delay gates the memory reader
-    // independently of whether the eventual transfer is a load or reload.
-    // This distinction matters when $4015 is written while the one-byte
-    // sample buffer is already full: the later fetch is reload-timed, but it
-    // still cannot execute until the enable latch has propagated.
     if (m_dmc.dmaStartDelay != 0) {
         --m_dmc.dmaStartDelay;
         if (m_dmc.dmaStartDelay != 0)
@@ -541,11 +522,7 @@ void APU::scheduleDmcDma()
         return;
 
     const bool getCycle = m_bus->dmaGetCycle();
-    // Normal load DMAs are GET-aligned and normal reloads are PUT-aligned.
-    // A reload that became necessary before the delayed $4015 enable reached
-    // the memory reader is different: its request is already waiting, so the
-    // first CPU cycle on which the reader becomes enabled may acquire RDY on
-    // either phase. AccuracyCoin DMC tests L/M/N exercise this exact race.
+
     const bool scheduledPhase = m_dmc.dmaReloadWaitingForEnable ? getCycle :
         (m_dmc.dmaLoadPending ? getCycle : !getCycle);
     if (!scheduledPhase)
@@ -579,14 +556,6 @@ void APU::completeDmcDma(uint8_t data)
     if (m_dmc.bytesRemaining == 0) {
         const bool oneByteImplicitStop = !m_dmc.loop && m_dmc.sampleLength == 1;
 
-        // A one-byte load that completes with the output unit already at the
-        // byte-reload boundary is the revision-dependent race.  APU::clock()
-        // runs before the DMA GET in the same Bus::clock(), so at GET
-        // completion the observable signature for "reload on the next CPU
-        // clock" is bitsRemaining==0 && timer==0.  The previous
-        // The previous pre-GET phase test described the APU state before the
-        // DMA transfer completed and therefore selected the race two CPU
-        // clocks too early.
         const bool outputReloadNextClock =
             m_dmc.bitsRemaining == 0 && m_dmc.timer == 0;
         const bool lateUnexpectedReload = oneByteImplicitStop &&
@@ -594,25 +563,14 @@ void APU::completeDmcDma(uint8_t data)
             outputReloadNextClock;
 
         if (lateUnexpectedReload) {
-            // Late RP2A03G and RP2A03H contain an additional memory-reader
-            // race: if the one-byte load completes on the same APU cycle on
-            // which the output unit asks for a reload, the reader performs a
-            // full reload DMA from the *same* address on the following PUT
-            // slot. Rewind the otherwise-dead reader address so the existing
-            // forced-reload path naturally issues that duplicate fetch.
+
             m_dmc.currentAddr = fetchedAddress;
             m_dmc.dmaForcedReloadPending = true;
             m_dmc.implicitStopWindow = 0;
             traceImplicitDmc(m_bus, "LOAD_COMPLETE_ARM_LATE_RELOAD", m_dmc.bytesRemaining, m_dmc.sampleLength, m_dmc.enabled, m_dmc.loop, m_dmc.sampleBufferFull, m_dmc.bitsRemaining, m_dmc.timer, m_dmc.implicitStopWindow, m_dmc.dmaAbortPending, m_dmc.dmaForcedReloadPending, m_dmc.dmaPending);
         }
         else if (oneByteImplicitStop && !outputReloadNextClock) {
-            // Both early and late 2A03 revisions exhibit the one-cycle
-            // aborted-reload bug when the load completes two CPU clocks
-            // before the output unit reaches its byte-reload boundary.  The
-            // buffer is consumed on the third following APU::clock() call, so
-            // keep the opportunity alive for three clocks.  Completion at
-            // timer==0 is deliberately excluded: early CPUs perform no extra
-            // DMA there, while late CPUs take the full-reload path above.
+
             m_dmc.implicitStopWindow = 3;
             traceImplicitDmc(m_bus, "LOAD_COMPLETE_ARM_WINDOW", m_dmc.bytesRemaining, m_dmc.sampleLength, m_dmc.enabled, m_dmc.loop, m_dmc.sampleBufferFull, m_dmc.bitsRemaining, m_dmc.timer, m_dmc.implicitStopWindow, m_dmc.dmaAbortPending, m_dmc.dmaForcedReloadPending, m_dmc.dmaPending);
         }
@@ -624,22 +582,16 @@ void APU::completeDmcDma(uint8_t data)
             if (m_dmc.irqEnabled)
                 m_dmc.irqFlag = true;
 
-            // The normal implicit one-cycle abort is committed later by the
-            // output-unit buffer-empty edge. The late-revision same-cycle
-            // unexpected reload above is the sole exception because hardware
-            // immediately carries that reader request into the next PUT slot.
         }
     }
 }
 
 void APU::abortDmcDma()
 {
-    // No sample byte is transferred. This callback only releases the APU-side
-    // in-flight marker after Bus has consumed the single halt cycle.
+
     m_dmc.dmaPending = false;
 }
 
-// ---- Frame ----
 void APU::quarterFrame()
 {
     m_pulse1.clockEnvelope();
@@ -650,10 +602,7 @@ void APU::quarterFrame()
 void APU::halfFrame()
 {
     auto clockLength = [](auto& channel) {
-        // If a length reload is written on the exact half-frame clock, it is
-        // ignored when the counter was nonzero. If the counter was zero, the
-        // reload is allowed after the clock and the zero counter is not
-        // decremented.
+
         if (channel.pendingLengthReload) {
             if (channel.length > 0)
                 channel.pendingLengthReload = false;
@@ -675,8 +624,7 @@ void APU::halfFrame()
 void APU::applyPendingLengthWrites()
 {
     auto apply = [](auto& channel) {
-        // Length-control writes take effect after the frame counter's clock
-        // for this CPU cycle, giving the documented one-clock halt delay.
+
         if (channel.pendingLengthHaltValid) {
             channel.lengthHalt = channel.pendingLengthHalt;
             channel.pendingLengthHaltValid = false;
@@ -695,14 +643,9 @@ void APU::applyPendingLengthWrites()
     apply(m_noise);
 }
 
-
 void APU::clockFrameCounterPreCpuPhase()
 {
-    // A delayed $4017 divider reset whose countdown expires on this CPU
-    // period becomes visible before the CPU's M2-high bus access. This
-    // ordering is observable when a 5-step immediate half-frame clock makes
-    // a length counter reach zero on the same CPU period as a $4015 read.
-    // Ordinary frame-sequencer events remain post-CPU, as before.
+
     if (m_frameResetDelay != 1)
         return;
 
@@ -721,46 +664,24 @@ void APU::clockFrameCounter()
     const bool resetAppliedPreCpu = m_frameResetAppliedPreCpu;
     m_frameResetAppliedPreCpu = false;
 
-    // If the pre-CPU phase consumed the pending reset and the CPU did not
-    // write a new $4017 value during this period, do not also advance the new
-    // frame sequence here. A new $4017 write installs a fresh countdown and
-    // is handled by the normal block below.
     if (resetAppliedPreCpu && m_frameResetDelay == 0) {
         applyPendingLengthWrites();
         return;
     }
 
-    // A $4015 status read requests a frame-IRQ acknowledge, but the latch is
-    // actually cleared on the next APU GET phase. Bus::clock invokes this
-    // after the CPU access for the same cycle, preserving the observed
-    // PUT->GET / GET->PUT double-read asymmetry.
-    // AccuracyCoin measures the acknowledge on the PUT->GET transition.
-    // Bus::clock() calls this after the CPU bus cycle, so a read performed on
-    // the current PUT slot must be cleared now, before a following GET-slot
-    // read can observe the latch again. dmaGetCycle() names the *current*
-    // bus slot; therefore the transition condition is its inverse.
     const bool enteringGetPhase = m_bus ? !m_bus->dmaGetCycle() : !m_apuPhase;
     if (m_frameIrqClearPending && enteringGetPhase) {
         m_frameIrqFlag = false;
         m_frameIrqClearPending = false;
     }
 
-    // Writes to $4017 do not reset/switch the sequencer on the CPU write
-    // cycle. The divider alignment delays that effect by 3 or 4 CPU clocks.
-    // Bit 6 (IRQ inhibit) is handled immediately in cpuWrite(); only the mode
-    // and sequencer restart wait for this countdown.
     if (m_frameResetDelay != 0) {
         --m_frameResetDelay;
         if (m_frameResetDelay == 0) {
             m_frameMode5 = m_pendingFrameMode5;
-            // The externally observed frame sequence is referenced to the
-            // $4017 write, while the divider reset itself is delayed by its
-            // CPU/APU phase. Seed the elapsed portion without compensating
-            // away the real one-clock jitter between the two write phases.
+
             m_frameCycles = m_pendingFrameStartCycles;
 
-            // Entering 5-step mode generates the initial quarter+half clock
-            // at the same delayed instant as the sequencer reset.
             if (m_frameMode5) {
                 quarterFrame();
                 halfFrame();
@@ -780,10 +701,7 @@ void APU::clockFrameCounter()
         const uint32_t irq0 = (m_timing == ConsoleTiming::PAL) ? 33252u : 29828u;
         const uint32_t qh4 = (m_timing == ConsoleTiming::PAL) ? 33253u : 29829u;
         const uint32_t reset = (m_timing == ConsoleTiming::PAL) ? 33254u : 29830u;
-        // Region-specific 4-step sequence, counted from the delayed $4017 divider reset.
-        // The frame IRQ flag rises one clock before the final quarter/half
-        // clock, remains asserted across the following clocks, and is cleared
-        // only by $4015 read or IRQ-inhibit control.
+
         if (m_frameCycles == q1) {
             quarterFrame();
         }
@@ -795,9 +713,7 @@ void APU::clockFrameCounter()
             quarterFrame();
         }
         else if (m_frameCycles == irq0) {
-            // The internal frame-IRQ flag pulses on the first two terminal
-            // clocks even when IRQ output is inhibited.  Bit 6 of $4017
-            // gates the IRQ pin, not these two internal latch-set events.
+
             m_frameIrqFlag = true;
         }
         else if (m_frameCycles == qh4) {
@@ -806,8 +722,7 @@ void APU::clockFrameCounter()
             m_frameIrqFlag = true;
         }
         else if (m_frameCycles == reset) {
-            // On the third terminal clock inhibition finally determines the
-            // stored flag state.
+
             m_frameIrqFlag = !m_irqInhibit;
             m_frameCycles = 0;
         }
@@ -817,9 +732,7 @@ void APU::clockFrameCounter()
         const uint32_t qh2 = (m_timing == ConsoleTiming::PAL) ? 16627u : 14913u;
         const uint32_t q3 = (m_timing == ConsoleTiming::PAL) ? 24939u : 22371u;
         const uint32_t qh5 = (m_timing == ConsoleTiming::PAL) ? 41561u : 37281u;
-        // Region-specific 5-step sequence. The initial quarter+half clock is generated
-        // by the delayed $4017 reset above; the ordinary sequence then has a
-        // blank fourth step and never generates a frame IRQ.
+
         if (m_frameCycles == q1) {
             quarterFrame();
         }
@@ -833,11 +746,7 @@ void APU::clockFrameCounter()
         else if (m_frameCycles == qh5) {
             quarterFrame();
             halfFrame();
-            // The 5-step sequence has a one-CPU-clock-longer wrap interval
-            // than a simple zero restart would produce.  Starting at -1
-            // (UINT32_MAX) makes the next q1/qh2 events occur 7458/14914
-            // clocks after this step-0 event, matching blargg's hardware
-            // measurements (including the 52197/52198 third-length edge).
+
             m_frameCycles = UINT32_MAX;
         }
     }
@@ -850,14 +759,22 @@ void APU::clockFrameCounterPhase()
     clockFrameCounter();
 }
 
-
 void APU::pushSample(float s)
 {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_ring[m_ringWrite] = s;
-    m_ringWrite = (m_ringWrite + 1) % kRingSize;
-    if (m_ringWrite == m_ringRead)
-        m_ringRead = (m_ringRead + 1) % kRingSize;
+    if (!m_hostAudioEnabled)
+        return;
+
+    const size_t write = m_ringWrite.load(std::memory_order_relaxed);
+    const size_t next = (write + 1) % kRingSize;
+    const size_t read = m_ringRead.load(std::memory_order_acquire);
+    if (next == read) {
+
+        m_audioOverruns.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    m_ring[write] = s;
+    m_ringWrite.store(next, std::memory_order_release);
 }
 
 float APU::mixInstantSample() const
@@ -870,19 +787,12 @@ float APU::mixInstantSample() const
 
     float base = 0.0f;
     if (m_chipMod) {
-        // KYLXBN-style forced linear 2A03 mixing. Pulse gain is the full-scale
-        // value of the standard pulse DAC curve; TND gains follow the fork's
-        // linearized mixer ratios.
+
         constexpr float pulseGain = 95.88f / ((8128.0f / 15.0f) + 100.0f);
         constexpr float triangleGain = 0.95f * 45.0f / 208.0f;
         constexpr float noiseGain = 0.95f * 15.0f * 1.95f / 208.0f;
         constexpr float dmcGain = 0.95f * 127.0f / 208.0f;
 
-        // The fork applies loudness compensation around the triangle DAC's
-        // midpoint, rather than multiplying a unipolar 0..1 signal directly.
-        // KYLXBN's fork leaves periods 0-2 uncompensated. These are already
-        // ultrasonic edge cases and applying the equal-loudness table there
-        // produces a very large artificial gain.
         const float gain = (m_triangle.timerPeriod > 2)
             ? triangleLoudnessGain(m_triangle.timerPeriod)
             : 1.0f;
@@ -902,30 +812,28 @@ float APU::mixInstantSample() const
         base = pulseOut + tnd;
     }
 
-    // Mapper audio is already expressed in the same normalized output domain.
-    // Passing the mod flag lets VRC6/VRC7/N163 choose their KYLXBN waveform
-    // path while leaving FDS/MMC5/5B behavior unchanged.
     const float expansion = m_cart ? m_cart->expansionAudioSample(m_chipMod) : 0.0f;
     return base + expansion;
 }
 
 float APU::filterOutput(float s)
 {
-    // Remove the cartridge/APU DAC's DC component at the final output stage.
-    // 20 Hz is intentionally below musical bass; this is output conditioning,
-    // while channel timing/mixing remains in the CPU-clock domain above.
-    const double x = s;
-    const double y = x - m_hpPrevInput + m_hpCoefficient * m_hpPrevOutput;
-    m_hpPrevInput = x;
-    m_hpPrevOutput = y;
-    // Reserve digital headroom because cartridge expansion audio is summed
-    // after the 2A03 DAC model. This is output gain only, not a hardware-level
-    // calibration constant; relative channel/chip levels are determined above.
-    // Keep enough headroom for loud expansion-audio combinations while avoiding
-    // the unnecessarily quiet 0.60 gain used by the previous phase. 0.85 keeps
-    // normal 2A03 output materially louder without changing channel balance.
+
+    const double x0 = s;
+    const double hp90 = x0 - m_hp90PrevInput + m_hp90Coefficient * m_hp90PrevOutput;
+    m_hp90PrevInput = x0;
+    m_hp90PrevOutput = hp90;
+
+    const double hp440 = hp90 - m_hp440PrevInput + m_hp440Coefficient * m_hp440PrevOutput;
+    m_hp440PrevInput = hp90;
+    m_hp440PrevOutput = hp440;
+
+    const double lp14k = (1.0 - m_lp14kCoefficient) * hp440 +
+                         m_lp14kCoefficient * m_lp14kPrevOutput;
+    m_lp14kPrevOutput = lp14k;
+
     constexpr double outputHeadroom = 0.85;
-    return std::clamp(float(y * outputHeadroom * double(m_masterVolume)), -1.0f, 1.0f);
+    return std::clamp(float(lp14k * outputHeadroom * double(m_masterVolume)), -1.0f, 1.0f);
 }
 
 void APU::resetOutputPipeline()
@@ -933,19 +841,21 @@ void APU::resetOutputPipeline()
     m_sampleTimer = 0.0;
     m_mixAccumulator = 0.0;
     m_mixAccumulatorWeight = 0.0;
-    m_hpPrevInput = 0.0;
-    m_hpPrevOutput = 0.0;
+    m_hp90PrevInput = 0.0;
+    m_hp90PrevOutput = 0.0;
+    m_hp440PrevInput = 0.0;
+    m_hp440PrevOutput = 0.0;
+    m_lp14kPrevOutput = 0.0;
 
-    std::lock_guard<std::mutex> lock(m_mutex);
-    std::fill(m_ring.begin(), m_ring.end(), 0.0f);
-    m_ringRead = 0;
-    m_ringWrite = 0;
+    m_ringRead.store(0, std::memory_order_release);
+    m_ringWrite.store(0, std::memory_order_release);
+    m_audioUnderruns.store(0, std::memory_order_relaxed);
+    m_audioOverruns.store(0, std::memory_order_relaxed);
 }
 
 void APU::clock()
 {
-    // Pulse timers run on one half of the APU phase; triangle runs each CPU
-    // cycle. Noise/DMC tables here are expressed directly in CPU-cycle periods.
+
     m_apuPhase = !m_apuPhase;
     if (m_apuPhase) {
         m_pulse1.clockTimer();
@@ -959,11 +869,6 @@ void APU::clock()
     m_dmc.clockTimer();
     const bool dmcBufferEmptied = dmcBufferWasFull && !m_dmc.sampleBufferFull;
 
-    // The DMC stop-DMA bug is tied to the output unit emptying the sample
-    // buffer shortly after playback has stopped. A DMA already in flight is
-    // not cancelled by $4015; it finishes normally. If the stop occurred in
-    // the APU cycle immediately before a reload would have been scheduled,
-    // however, the reload survives only as a one-cycle HALT attempt.
     if (dmcBufferEmptied) {
         if (m_dmc.enabled && m_dmc.bytesRemaining != 0 &&
             !m_dmc.dmaLoadPending && m_dmc.dmaStartDelay != 0) {
@@ -971,34 +876,17 @@ void APU::clock()
         }
         if (m_dmc.sampleLength == 1)
             traceImplicitDmc(m_bus, "BUFFER_EMPTIED", m_dmc.bytesRemaining, m_dmc.sampleLength, m_dmc.enabled, m_dmc.loop, m_dmc.sampleBufferFull, m_dmc.bitsRemaining, m_dmc.timer, m_dmc.implicitStopWindow, m_dmc.dmaAbortPending, m_dmc.dmaForcedReloadPending, m_dmc.dmaPending);
-        // The first explicit-stop position is not an aborted one-cycle DMA:
-        // the reload has already committed inside the memory reader and still
-        // completes as a normal four-cycle transfer. One and two clocks later
-        // the surviving request is only the single HALT pulse.
+
         if (m_dmc.stopBugWindow == 3)
             m_dmc.dmaForcedReloadPending = true;
         else if (m_dmc.stopBugWindow != 0 || m_dmc.implicitStopWindow != 0) {
-            // A one-byte implicit abort is latched by the output unit on this
-            // clock, but its RDY/HALT attempt is not visible until the next
-            // DMA arbitration opportunity.  Do not let the request created
-            // here run later in this same Bus::clock() call.  This distinction
-            // matters when the following CPU cycle is a JSR stack write: the
-            // one-cycle DMA must then be suppressed rather than having already
-            // consumed its halt one clock too early.  Explicit $4015-stop
-            // aborts keep their established timing.
+
             const bool implicitAbort = (m_dmc.stopBugWindow == 0 && m_dmc.implicitStopWindow != 0);
             m_dmc.dmaAbortPending = true;
             m_dmc.dmaImplicitAbortPending = implicitAbort;
-            // APU::clock() runs before the CPU slot in Bus::clock().  Deferring
-            // scheduling for the remainder of this clock is sufficient: the
-            // next APU scheduler pass corresponds to the immediately following
-            // CPU bus cycle.  No additional delay is required.
+
             m_dmc.dmaImplicitAbortDelay = 0;
-            // The output-unit edge occurs before the CPU bus slot in this
-            // Bus::clock(), so the one-cycle RDY pulse is visible immediately
-            // on that same CPU cycle. Deferring it would shift the pulse onto
-            // the following instruction cycle and break the write-suppression
-            // boundary measured by AccuracyCoin.
+
             if (m_dmc.sampleLength == 1)
                 traceImplicitDmc(m_bus, "BUFFER_EMPTY_ARM_ABORT", m_dmc.bytesRemaining, m_dmc.sampleLength, m_dmc.enabled, m_dmc.loop, m_dmc.sampleBufferFull, m_dmc.bitsRemaining, m_dmc.timer, m_dmc.implicitStopWindow, m_dmc.dmaAbortPending, m_dmc.dmaForcedReloadPending, m_dmc.dmaPending);
         }
@@ -1014,12 +902,6 @@ void APU::clock()
 
     scheduleDmcDma();
 
-    // Integrate the CPU-clock DAC across the exact host-sample window. A
-    // sample boundary usually lands between CPU clocks (~40.58 clocks at
-    // 44.1 kHz), so split the current clock fractionally instead of grouping
-    // whole clocks into alternating 40/41-clock buckets. This is especially
-    // important to the KYLXBN-style averaged-noise path and ultrasonic
-    // triangle behavior.
     const double instant = double(mixInstantSample());
     double remaining = 1.0;
     constexpr double epsilon = 1.0e-12;
@@ -1027,8 +909,7 @@ void APU::clock()
         const double room = std::max(0.0, m_samplePeriod - m_sampleTimer);
         const double weight = std::min(remaining, room);
         if (weight <= epsilon) {
-            // Guard against accumulated floating-point error exactly on a
-            // boundary. The normal path below immediately resets the window.
+
             m_sampleTimer = m_samplePeriod;
         }
         else {
@@ -1052,14 +933,23 @@ void APU::clock()
 
 void APU::fillBuffer(float* stream, int len)
 {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    for (int i = 0; i < len; i++) {
-        if (m_ringRead != m_ringWrite) {
-            stream[i] = m_ring[m_ringRead];
-            m_ringRead = (m_ringRead + 1) % kRingSize;
+    size_t read = m_ringRead.load(std::memory_order_relaxed);
+    const size_t write = m_ringWrite.load(std::memory_order_acquire);
+    bool underrun = false;
+
+    for (int i = 0; i < len; ++i) {
+        if (read != write) {
+            stream[i] = m_ring[read];
+            read = (read + 1) % kRingSize;
         }
-        else stream[i] = 0.0f;
+        else {
+            stream[i] = 0.0f;
+            underrun = true;
+        }
     }
+    m_ringRead.store(read, std::memory_order_release);
+    if (underrun)
+        m_audioUnderruns.fetch_add(1, std::memory_order_relaxed);
 }
 
 uint8_t APU::cpuRead(uint16_t addr) const
@@ -1073,11 +963,7 @@ uint8_t APU::cpuRead(uint16_t addr) const
         if (m_dmc.bytesRemaining > 0) v |= 0x10;
         if (m_frameIrqFlag) v |= 0x40;
         if (m_dmc.irqFlag) v |= 0x80;
-        // $4015 does not clear the frame IRQ latch combinationally.  The
-        // clear is sampled by the APU on its next GET phase.  This matters
-        // for back-to-back reads: a read on PUT followed by one on GET sees
-        // the flag set twice, and the GET phase clears it only after the
-        // second read has completed (AccuracyCoin Frame Counter IRQ test 7).
+
         m_frameIrqClearPending = true;
         return v;
     }
@@ -1198,11 +1084,7 @@ void APU::cpuWrite(uint16_t addr, uint8_t data)
         if (!m_triangle.enabled) { m_triangle.length = 0; m_triangle.pendingLengthReload = false; }
         if (!m_noise.enabled) { m_noise.length = 0; m_noise.pendingLengthReload = false; }
         if (!dmcEnableWrite) {
-            // Stopping playback sets bytes_remaining to zero immediately, but
-            // does not cancel a DMA that has already been scheduled/acquired.
-            // The only post-stop DMA is the documented one-cycle reload pulse
-            // when the output unit empties the buffer in the immediately
-            // following APU timing window.
+
             m_dmc.enabled = false;
             m_dmc.bytesRemaining = 0;
             m_dmc.dmaStartDelay = 0;
@@ -1222,24 +1104,17 @@ void APU::cpuWrite(uint16_t addr, uint8_t data)
                 m_dmc.dmaReloadWaitingForEnable = false;
                 m_dmc.start();
                 m_dmc.dmaStartDelay = 3;
-                // If the sample buffer is already occupied, no load DMA can
-                // occur. When the output unit later consumes that byte, the
-                // memory reader performs an ordinary reload DMA. Keep the
-                // enable delay above, but do not misclassify the future fetch
-                // as a GET-aligned load.
+
                 m_dmc.dmaLoadPending = !m_dmc.sampleBufferFull;
             }
         }
-        // Writing $4015 clears the DMC IRQ flag
+
         m_dmc.irqFlag = false;
         break;
     }
 
     case 0x4017:
-        // If an earlier $4017 write's delayed reset is due later in this same
-        // CPU clock, do not let this new write overwrite it. Consecutive
-        // STA $4017 instructions are four clocks apart and hardware can
-        // therefore produce two distinct 5-step immediate half-frame clocks.
+
         if (m_frameResetDelay == 1) {
             m_frameResetDelay = 0;
             m_frameMode5 = m_pendingFrameMode5;
@@ -1247,38 +1122,19 @@ void APU::cpuWrite(uint16_t addr, uint8_t data)
             if (m_frameMode5) { quarterFrame(); halfFrame(); }
         }
 
-        // IRQ inhibit is immediate: setting bit 6 also acknowledges an
-        // already-pending frame IRQ. The sequencer mode/reset, however, is
-        // delayed by divider phase. clockFrameCounterPhase() still runs later
-        // in this same CPU clock, so seed the countdown one higher to obtain
-        // an externally observable 3/4-clock delay after the write.
         m_irqInhibit = (data & 0x40) != 0;
         if (m_irqInhibit)
             m_frameIrqFlag = false;
 
         m_pendingFrameMode5 = (data & 0x80) != 0;
 
-        // The divider reset/mode switch is visible 3 or 4 CPU clocks after
-        // the write. Restore the divider polarity used before Phase 50: that
-        // polarity is required by blargg's basic $80 immediate-clock test.
-        // clockFrameCounterPhase() decrements the countdown later in this same
-        // CPU clock, hence seeds of 4 and 5 produce external delays of 3/4.
-        //
-        // The actual frame-event epoch is write-relative, however. At the
-        // delayed reset, seed m_frameCycles with delay-2 (1 or 2). Combined
-        // with the decoded 7457/14913/... counts this yields the hardware-tested
-        // write-relative events at 7459/14915/... instead of starting them 3/4
-        // clocks late from the divider-reset instant.
         if (m_apuPhase) {
             m_frameResetDelay = 4;
             m_pendingFrameStartCycles = 1;
         }
         else {
             m_frameResetDelay = 5;
-            // Do not compensate away the divider's one-clock jitter.  The
-            // slower reset phase must leave the subsequent frame events one
-            // CPU clock later; blargg's clock_jitter test observes exactly
-            // this difference after shifting a $4017 write by one clock.
+
             m_pendingFrameStartCycles = 1;
         }
         break;
@@ -1513,10 +1369,6 @@ bool APU::loadState(const uint8_t*& p, const uint8_t* end)
         !getDouble(m_sampleTimer)) return false;
     if (m_frameResetDelay > 5 || m_pendingFrameStartCycles > 2) return false;
 
-    // Pending length-control/reload flags exist only between a CPU register
-    // access and the frame-counter phase of the same Bus clock. Save states
-    // are taken between Bus clocks, so never let stale transient flags from
-    // the pre-load timeline survive a restore.
     auto clearPendingLength = [](auto& channel) {
         channel.pendingLengthHaltValid = false;
         channel.pendingLengthHalt = false;
@@ -1528,13 +1380,9 @@ bool APU::loadState(const uint8_t*& p, const uint8_t* end)
     clearPendingLength(m_triangle);
     clearPendingLength(m_noise);
 
-    // Audio already queued before the load belongs to the old timeline. The
-    // mixer integration/filter are host-output state, not emulated hardware,
-    // so restart them cleanly while retaining the serialized sample cadence.
     const double restoredSampleTimer = m_sampleTimer;
     resetOutputPipeline();
     m_sampleTimer = restoredSampleTimer;
 
     return true;
 }
-

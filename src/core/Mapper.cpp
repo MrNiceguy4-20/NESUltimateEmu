@@ -1,4 +1,5 @@
 #include "Mapper.hpp"
+#include "MapperFamilies.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -53,1077 +54,6 @@ public:
     }
 
     bool implementationSupported() const override { return false; }
-};
-
-class Mapper0 final : public Mapper {
-public:
-    explicit Mapper0(const MapperConfig& config) : Mapper(config) {}
-
-    bool cpuMapRead(uint16_t addr, uint32_t& mapped) const override
-    {
-        if (addr < 0x8000 || m_config.prgRomSize == 0) return false;
-        mapped = static_cast<uint32_t>(m_config.prgRomSize == 0x4000
-            ? (addr & 0x3FFF)
-            : ((addr - 0x8000) % m_config.prgRomSize));
-        return true;
-    }
-};
-
-class Mapper1 final : public Mapper {
-public:
-    explicit Mapper1(const MapperConfig& config) : Mapper(config) {}
-
-    bool implementationSupported() const override
-    {
-        // NES 2.0 submapper 5 is SEROM/SHROM/SH1ROM: 32 KiB PRG-ROM is
-        // physically unbanked. Submappers 6 (2ME EEPROM) and 7 (KS-7058)
-        // require additional board-specific hardware not modeled here.
-        return !m_config.nes20 || m_config.submapper == 0 || m_config.submapper == 5;
-    }
-
-    bool cpuMapRead(uint16_t addr, uint32_t& mapped) const override
-    {
-        if (addr < 0x8000 || m_config.prgRomSize == 0) return false;
-
-        // SEROM/SHROM/SH1ROM (NES 2.0 submapper 5) wires 32 KiB PRG-ROM
-        // directly into $8000-$FFFF. MMC1 PRG mode/bank writes therefore do
-        // not alter the CPU mapping on these boards.
-        if (m_config.nes20 && m_config.submapper == 5) {
-            mapped = static_cast<uint32_t>((addr - 0x8000) % m_config.prgRomSize);
-            return true;
-        }
-
-        // SxROM boards with 512 KiB PRG-ROM (SUROM/SXROM) reuse CHR A16
-        // as PRG A18.  This selects one 256 KiB PRG region; the normal
-        // MMC1 PRG register then banks within that region.  The fixed bank
-        // in modes 2/3 is fixed inside the selected region, not globally.
-        constexpr std::size_t bank16 = 0x4000;
-        constexpr std::size_t bank32 = 0x8000;
-        constexpr std::size_t region256 = 0x40000;
-
-        std::size_t regionBase = 0;
-        if (m_config.prgRomSize > region256 && (m_chr0 & 0x10))
-            regionBase = region256;
-        if (regionBase >= m_config.prgRomSize)
-            regionBase = 0;
-
-        const std::size_t regionSize = std::min(region256, m_config.prgRomSize - regionBase);
-        const auto mapRegionBank = [&](std::size_t bank, std::size_t bankSize, uint32_t inBank) {
-            return static_cast<uint32_t>(regionBase + mapBank(bank, bankSize, regionSize, inBank));
-        };
-
-        const uint8_t mode = (m_ctrl >> 2) & 3;
-        const uint8_t prgReg = (m_config.id == 116 && m_config.nes20 && m_config.submapper == 2)
-            ? uint8_t((m_prg << 1) & 0x1F) : m_prg;
-
-        // Mapper 155 identifies the MMC1A revision. Unlike MMC1B/C, PRG
-        // register bit 4 is not a WRAM-disable bit. When it is set, PRG bit 3
-        // bypasses the fixed-bank logic and drives PRG A17 across the entire
-        // CPU ROM window. In 16 KiB modes this means the fixed bank is the
-        // first/last bank of the selected 128 KiB half rather than the
-        // first/last bank of the whole 256 KiB MMC1 region.
-        const bool mmc1aHalfSelect = m_config.id == 155 && (m_prg & 0x10) != 0 && regionSize > 0x20000;
-        const std::size_t mmc1aHalfBase = mmc1aHalfSelect ? ((m_prg & 0x08) ? 0x20000 : 0) : 0;
-        const std::size_t mmc1aHalfSize = mmc1aHalfSelect ? std::min<std::size_t>(0x20000, regionSize - mmc1aHalfBase) : regionSize;
-
-        if (mode == 0 || mode == 1) {
-            // 32 KiB mode ignores PRG register bit 0.
-            mapped = mapRegionBank((prgReg & 0x0E) >> 1, bank32, addr - 0x8000);
-        }
-        else if (mode == 2) {
-            if (addr < 0xC000) {
-                mapped = static_cast<uint32_t>(regionBase + mmc1aHalfBase + (addr - 0x8000));
-            }
-            else if (mmc1aHalfSelect) {
-                mapped = static_cast<uint32_t>(regionBase + mmc1aHalfBase +
-                    mapBank(prgReg & 0x07, bank16, mmc1aHalfSize, addr - 0xC000));
-            }
-            else {
-                mapped = mapRegionBank(prgReg & 0x0F, bank16, addr - 0xC000);
-            }
-        }
-        else {
-            if (addr < 0xC000) {
-                if (mmc1aHalfSelect)
-                    mapped = static_cast<uint32_t>(regionBase + mmc1aHalfBase +
-                        mapBank(prgReg & 0x07, bank16, mmc1aHalfSize, addr - 0x8000));
-                else
-                    mapped = mapRegionBank(prgReg & 0x0F, bank16, addr - 0x8000);
-            }
-            else {
-                mapped = static_cast<uint32_t>(regionBase + mmc1aHalfBase + mmc1aHalfSize - bank16 + (addr - 0xC000));
-            }
-        }
-
-        mapped %= static_cast<uint32_t>(m_config.prgRomSize);
-        return true;
-    }
-
-    bool cpuWrite(uint16_t addr, uint8_t data, uint64_t cpuCycle) override
-    {
-        if (addr < 0x8000) return false;
-
-        // MMC1 ignores the data-bit write on the second cycle of an RMW, but
-        // D7 reset is asynchronous to that serial-write lockout and must never
-        // be suppressed. A reset still occupies this CPU write cycle, so a
-        // normal serial write on the immediately following cycle is ignored.
-        if (data & 0x80) {
-            if (cpuCycle != kNoCpuCycle)
-                m_lastWriteCycle = cpuCycle;
-            m_shift = 0x10;
-            m_ctrl |= 0x0C;
-            updateMirror();
-            return true;
-        }
-
-        if (cpuCycle != kNoCpuCycle) {
-            if (m_lastWriteCycle != kNoCpuCycle && cpuCycle <= m_lastWriteCycle + 1)
-                return true;
-            m_lastWriteCycle = cpuCycle;
-        }
-
-        const bool complete = (m_shift & 1) != 0;
-        m_shift = (m_shift >> 1) | ((data & 1) << 4);
-        if (!complete) return true;
-
-        const uint8_t value = m_shift & 0x1F;
-        m_shift = 0x10;
-        switch ((addr >> 13) & 3) {
-        case 0: m_ctrl = value; updateMirror(); break;
-        case 1: m_chr0 = value; break;
-        case 2: m_chr1 = value; break;
-        case 3: m_prg = value; break;
-        }
-        return true;
-    }
-
-    bool ppuMapRead(uint16_t addr, uint32_t& mapped) override
-    {
-        if (addr >= 0x2000) return false;
-        const std::size_t chrSize = m_config.chrRomSize ? m_config.chrRomSize : m_config.chrRamSize;
-        if (chrSize == 0) return false;
-
-        if ((m_ctrl & 0x10) == 0) {
-            const uint8_t bank = m_chr0 & 0x1E;
-            mapped = mapBank(bank, 0x1000, chrSize, addr);
-        }
-        else if (addr < 0x1000) {
-            mapped = mapBank(m_chr0, 0x1000, chrSize, addr);
-        }
-        else {
-            mapped = mapBank(m_chr1, 0x1000, chrSize, addr - 0x1000);
-        }
-        mapped %= static_cast<uint32_t>(chrSize);
-        return true;
-    }
-
-    bool ppuMapWrite(uint16_t addr, uint32_t& mapped) override
-    {
-        if (m_config.chrRamSize == 0) return false;
-        return ppuMapRead(addr, mapped);
-    }
-
-    bool mapPrgRam(uint16_t addr, uint32_t& mapped, bool /*write*/) const override
-    {
-        if (addr < 0x6000 || addr > 0x7FFF || m_config.prgRamSize == 0)
-            return false;
-
-        // MMC1B/C use PRG-register bit 4 as PRG-RAM disable. MMC1A
-        // (iNES Mapper 155) predates that function and leaves WRAM enabled.
-        if (m_config.id != 155 && (m_prg & 0x10))
-            return false;
-
-        // SOROM uses CHR A15 (CHR0 bit 3) to select one of two 8 KiB
-        // WRAM banks. SXROM additionally uses CHR A14 (CHR0 bit 2), giving
-        // four 8 KiB WRAM banks. Boards with only 8 KiB simply ignore them.
-        std::size_t ramBank = 0;
-        if (m_config.prgRamSize >= 0x8000)
-            ramBank = (m_chr0 >> 2) & 0x03;
-        else if (m_config.prgRamSize >= 0x4000)
-            ramBank = (m_chr0 >> 3) & 0x01;
-
-        mapped = mapBank(ramBank, 0x2000, m_config.prgRamSize, addr - 0x6000);
-        return true;
-    }
-
-    void saveState(std::vector<uint8_t>& out) const override
-    {
-        put8(out, m_shift); put8(out, m_ctrl); put8(out, m_chr0); put8(out, m_chr1); put8(out, m_prg);
-        put64(out, m_lastWriteCycle);
-    }
-
-    bool loadState(const uint8_t*& p, const uint8_t* end) override
-    {
-        if (!get8(p, end, m_shift) || !get8(p, end, m_ctrl) || !get8(p, end, m_chr0) ||
-            !get8(p, end, m_chr1) || !get8(p, end, m_prg) || !get64(p, end, m_lastWriteCycle))
-            return false;
-        updateMirror();
-        return true;
-    }
-
-private:
-    uint8_t m_shift = 0x10;
-    uint8_t m_ctrl = 0x0C;
-    uint8_t m_chr0 = 0;
-    uint8_t m_chr1 = 0;
-    uint8_t m_prg = 0;
-    uint64_t m_lastWriteCycle = kNoCpuCycle;
-
-    void updateMirror()
-    {
-        switch (m_ctrl & 3) {
-        case 0: m_mirror = Mirror::OnescreenLo; break;
-        case 1: m_mirror = Mirror::OnescreenHi; break;
-        case 2: m_mirror = Mirror::Vertical; break;
-        case 3: m_mirror = Mirror::Horizontal; break;
-        }
-    }
-};
-
-class Mapper2 final : public Mapper {
-public:
-    explicit Mapper2(const MapperConfig& config) : Mapper(config) {}
-
-    bool cpuMapRead(uint16_t addr, uint32_t& mapped) const override
-    {
-        if (addr < 0x8000 || m_config.prgRomSize < 0x4000) return false;
-        if (addr < 0xC000)
-            mapped = mapBank(m_bank, 0x4000, m_config.prgRomSize, addr - 0x8000);
-        else
-            mapped = static_cast<uint32_t>(m_config.prgRomSize - 0x4000 + (addr - 0xC000));
-        return true;
-    }
-
-    bool cpuWrite(uint16_t addr, uint8_t data, uint64_t) override
-    {
-        if (addr < 0x8000) return false;
-        m_bank = data & 0x0F;
-        return true;
-    }
-
-    bool hasBusConflicts() const override
-    {
-        // UxROM normally exposes PRG ROM during mapper-register writes, so the
-        // effective latch value is CPU data AND ROM data. NES 2.0 submapper 1
-        // explicitly disables conflicts and submapper 2 explicitly enables
-        // them. Submapper 0/legacy keeps the strict hardware-compatible default.
-        return !(m_config.nes20 && m_config.submapper == 1);
-    }
-
-    void saveState(std::vector<uint8_t>& out) const override { put8(out, m_bank); }
-    bool loadState(const uint8_t*& p, const uint8_t* end) override { return get8(p, end, m_bank); }
-
-private:
-    uint8_t m_bank = 0;
-};
-
-class Mapper3 final : public Mapper {
-public:
-    explicit Mapper3(const MapperConfig& config) : Mapper(config) {}
-
-    bool cpuMapRead(uint16_t addr, uint32_t& mapped) const override
-    {
-        if (addr < 0x8000 || m_config.prgRomSize == 0) return false;
-        mapped = static_cast<uint32_t>(m_config.prgRomSize == 0x4000
-            ? (addr & 0x3FFF)
-            : ((addr - 0x8000) % m_config.prgRomSize));
-        return true;
-    }
-
-    bool cpuWrite(uint16_t addr, uint8_t data, uint64_t) override
-    {
-        if (addr < 0x8000) return false;
-        m_bank = data & 0x03;
-        return true;
-    }
-
-    bool hasBusConflicts() const override
-    {
-        // CNROM uses the same discrete bus-conflict convention as UxROM:
-        // legacy/submapper 0 and explicit submapper 2 use wired-AND conflicts,
-        // while NES 2.0 submapper 1 identifies conflict-free hardware.
-        return !(m_config.nes20 && m_config.submapper == 1);
-    }
-
-    bool ppuMapRead(uint16_t addr, uint32_t& mapped) override
-    {
-        if (addr >= 0x2000) return false;
-        const std::size_t chrSize = m_config.chrRomSize ? m_config.chrRomSize : m_config.chrRamSize;
-        if (chrSize == 0) return false;
-        mapped = mapBank(m_bank, 0x2000, chrSize, addr);
-        return true;
-    }
-
-    bool ppuMapWrite(uint16_t addr, uint32_t& mapped) override
-    {
-        if (m_config.chrRamSize == 0) return false;
-        return ppuMapRead(addr, mapped);
-    }
-
-    void saveState(std::vector<uint8_t>& out) const override { put8(out, m_bank); }
-    bool loadState(const uint8_t*& p, const uint8_t* end) override { return get8(p, end, m_bank); }
-
-private:
-    uint8_t m_bank = 0;
-};
-
-class Mapper4 final : public Mapper {
-public:
-    explicit Mapper4(const MapperConfig& config) : Mapper(config), m_mmc6(config.nes20 && config.submapper == 1)
-    {
-        if (m_config.id == 121) {
-            reset121();
-        }
-        if (m_config.id == 45) {
-            m_m45Outer[2] = 0x0F;
-            // GA23C multicarts are observed powering up with a useful linear
-            // CHR arrangement; Famicom Yarou Vol. 1 writes CHR RAM before it
-            // initializes MMC3 bank registers and depends on this mapping.
-            m_regs[0] = 0; m_regs[1] = 2; m_regs[2] = 4;
-            m_regs[3] = 5; m_regs[4] = 6; m_regs[5] = 7;
-        }
-    }
-
-    bool cpuMapRead(uint16_t addr, uint32_t& mapped) const override
-    {
-        if (addr < 0x8000 || m_config.prgRomSize == 0) return false;
-        const std::size_t count = std::max<std::size_t>(1, m_config.prgRomSize / 0x2000);
-        const uint8_t r6 = m_regs[6] & 0x3F;
-        const uint8_t r7 = m_regs[7] & 0x3F;
-        const std::size_t last = count - 1;
-        const std::size_t lastM1 = count > 1 ? count - 2 : 0;
-        std::size_t bank = 0;
-        uint32_t inBank = addr & 0x1FFF;
-
-        // Mapper 123 / H2288 NROM override. $5800 bits are physically
-        // scrambled: output bank bits 3,2,1,0 come from D5,D2,D4,D0.
-        // D6 enables the override; D1 selects NROM-256 (CPU A14 supplies
-        // bank bit 0) versus NROM-128 (the selected 16 KiB bank mirrored).
-        if (m_config.id == 123 && (m_m123Mode & 0x40)) {
-            std::size_t bank16 = std::size_t(m_m123Mode & 0x01) |
-                std::size_t(m_m123Mode & 0x04) |
-                (std::size_t(m_m123Mode & 0x10) >> 3) |
-                (std::size_t(m_m123Mode & 0x20) >> 2);
-            if (m_m123Mode & 0x02)
-                bank16 = (bank16 & ~std::size_t(1)) | ((addr >> 14) & 1);
-            const std::size_t bank8 = bank16 * 2 + ((addr >> 13) & 1);
-            mapped = mapBank(bank8, 0x2000, m_config.prgRomSize, inBank);
-            return true;
-        }
-
-        // Mapper 114/115 can override MMC3 PRG banking with an NROM-like
-        // 16/32 KiB window selected by their $6000 mode register.
-        if ((m_config.id == 114 || m_config.id == 115) && (m_extMode & 0x80)) {
-            uint8_t bank16 = m_extMode & 0x0F;
-            if (m_extMode & 0x20) bank16 = uint8_t((bank16 & 0x0E) | ((addr >> 14) & 1));
-            const std::size_t bank8 = std::size_t(bank16) * 2 + ((addr >> 13) & 1);
-            mapped = mapBank(bank8, 0x2000, m_config.prgRomSize, inBank);
-            return true;
-        }
-
-        if (!m_prgMode) {
-            if (addr < 0xA000) bank = r6;
-            else if (addr < 0xC000) bank = r7;
-            else if (addr < 0xE000) bank = lastM1;
-            else bank = last;
-        }
-        else {
-            if (addr < 0xA000) bank = lastM1;
-            else if (addr < 0xC000) bank = r7;
-            else if (addr < 0xE000) bank = r6;
-            else bank = last;
-        }
-        // Mapper 121 / Kǎshèng A9711/A9713 adds a protection-controlled
-        // PRG override layer around the already-decoded MMC3 bank.
-        if (m_config.id == 121) {
-            const std::size_t outer = std::size_t((m_m121Ex[3] & 0x80) >> 2);
-            if (m_m121Ex[5] & 0x3F) {
-                if (addr >= 0xE000) bank = std::size_t(m_m121Ex[0]) | outer;
-                else if (addr >= 0xC000) bank = std::size_t(m_m121Ex[1]) | outer;
-                else if (addr >= 0xA000) bank = std::size_t(m_m121Ex[2]) | outer;
-                else bank = (bank & 0x1F) | outer;
-            } else {
-                bank = (bank & 0x1F) | outer;
-            }
-            mapped = mapBank(bank, 0x2000, m_config.prgRomSize, inBank);
-            return true;
-        }
-        if (m_config.id == 37) {
-            const uint8_t q = m_outerReg & 0x07;
-            const uint8_t inner = static_cast<uint8_t>(bank);
-            const uint8_t bit4 = (q >> 2) & 1;
-            const uint8_t bit3 = ((q & 0x03) == 0x03) ? 1 : (bit4 ? ((inner >> 3) & 1) : 0);
-            bank = (std::size_t(bit4) << 4) | (std::size_t(bit3) << 3) | (inner & 0x07);
-        } else if (m_config.id == 47) {
-            bank = (std::size_t(m_outerReg & 1) << 4) | (bank & 0x0F);
-        } else if (m_config.id == 44) {
-            const uint8_t block = std::min<uint8_t>(m_outerReg & 7, 6);
-            if (block == 6) bank = (bank & 0x1F) | 0x60;
-            else bank = (bank & 0x0F) | (std::size_t(block) << 4);
-        } else if (m_config.id == 49) {
-            if (m_outerReg & 0x01) {
-                bank = (std::size_t((m_outerReg >> 6) & 0x03) << 4) | (bank & 0x0F);
-            } else {
-                const std::size_t bank32 = (m_outerReg >> 4) & 0x0F;
-                bank = bank32 * 4 + ((addr - 0x8000) >> 13);
-                inBank = addr & 0x1FFF;
-            }
-        } else if (m_config.id == 52) {
-            // Realtec 8213 outer banking. D2 supplies PRG A19, D1 supplies
-            // A18, and D3 selects whether A17 comes from MMC3 or D0.
-            const std::size_t lowMask = (m_outerReg & 0x08) ? 0x0F : 0x1F;
-            const std::size_t a17 = (m_outerReg & 0x08) ? std::size_t(m_outerReg & 1) : ((bank >> 4) & 1);
-            bank = (bank & lowMask) | (a17 << 4) | (std::size_t((m_outerReg >> 1) & 1) << 5) |
-                (std::size_t((m_outerReg >> 2) & 1) << 6);
-        } else if (m_config.id == 115) {
-            // $6000 bit 6 supplies PRG A18 in normal MMC3 mode.
-            bank = (std::size_t((m_extMode >> 6) & 1) << 5) | (bank & 0x1F);
-        } else if (m_config.id == 197 && m_config.nes20 && m_config.submapper == 3 && (m_outerReg & 0x08)) {
-            // Submapper 3 can force PRG A17 from bit 0, creating a 128 KiB window.
-            bank = (std::size_t(m_outerReg & 1) << 4) | (bank & 0x0F);
-        } else if (m_config.id == 45) {
-            // GA23C outer PRG banking. Register #3 contains an inverted
-            // six-bit AND mask for the MMC3 bank number. Register #1 ORs
-            // PRG A13-A20, while register #2 bits 6-7 extend this to A21-A22.
-            const std::size_t andMask = std::size_t(0x3F ^ (m_m45Outer[3] & 0x3F));
-            const std::size_t outer = std::size_t(m_m45Outer[1]) |
-                (std::size_t(m_m45Outer[2] & 0xC0) << 2);
-            bank = (bank & andMask) | outer;
-        } else if (m_config.id == 215) {
-            if (m_m215Mode & 0x80) {
-                // NROM override. $5000 bits 0-3 form a 16 KiB bank. Bit 5
-                // replaces its low bit with CPU A14 for an NROM-256 pair.
-                std::size_t bank16 = m_m215Mode & 0x0F;
-                if (m_m215Mode & 0x40)
-                    bank16 = (bank16 & ~std::size_t(0x08)) | (std::size_t((m_m215Outer >> 4) & 1) << 3);
-                if (m_m215Mode & 0x20)
-                    bank16 = (bank16 & ~std::size_t(1)) | ((addr >> 14) & 1);
-                bank = (bank16 << 1) | ((addr >> 13) & 1);
-            }
-            // UNL-8237A overlaps three PRG outer-bank bits across $5001
-            // bits 0,1,3; UNL-8237 uses the two independent low bits.
-            const std::size_t outerPrg = m_config.submapper == 1
-                ? std::size_t((m_m215Outer & 0x03) | ((m_m215Outer >> 1) & 0x04))
-                : std::size_t(m_m215Outer & 0x03);
-            const std::size_t lowMask = (m_m215Mode & 0x40) ? 0x0F : 0x1F;
-            bank = (bank & lowMask) | (outerPrg << 5);
-            if (m_m215Mode & 0x40) bank = (bank & ~std::size_t(0x10)) | (std::size_t((m_m215Outer >> 4) & 1) << 4);
-        }
-        mapped = mapBank(bank, 0x2000, m_config.prgRomSize, inBank);
-        return true;
-    }
-
-    bool cpuReadRegister(uint16_t addr, uint8_t& data) override
-    {
-        // SL-5020B (mapper 12.0): reading the GAL register returns the
-        // language-select input on D0. No known PCB exposes a configurable
-        // jumper, so use the observed/default low state while still driving
-        // the register read instead of open bus.
-        if (m_config.id == 12 && addr == 0x4132) { data = 0; return true; }
-        if (m_config.id == 121 && addr >= 0x5000 && addr <= 0x5FFF) { data = m_m121Ex[4]; return true; }
-        if (!m_mmc6 || addr < 0x7000 || addr > 0x7FFF) return false;
-        if (!m_mmc6RamGlobalEnable) return false;
-        if (!m_mmc6LowRead && !m_mmc6HighRead) return false;
-        const bool highHalf = (addr & 0x0200) != 0;
-        const bool readable = highHalf ? m_mmc6HighRead : m_mmc6LowRead;
-        if (!readable) { data = 0; return true; }
-        data = m_mmc6Ram[addr & 0x03FF];
-        return true;
-    }
-
-    bool cpuWrite(uint16_t addr, uint8_t data, uint64_t) override
-    {
-        // SL-5020B GAL: independent CHR A18 selection for the two PPU
-        // pattern-table halves. This logic sits outside the Huang-1/MMC3A
-        // ASIC, so it takes effect immediately and is not affected by $8000.7.
-        if (m_config.id == 12 && addr == 0x4132) { m_m12ChrOuter = data; return true; }
-        if (m_config.id == 121 && addr >= 0x5000 && addr <= 0x5FFF) {
-            static constexpr uint8_t lookup[4] = {0x83, 0x83, 0x42, 0x00};
-            m_m121Ex[4] = lookup[data & 0x03];
-            if ((addr & 0x5180) == 0x5180) m_m121Ex[3] = data;
-            return true;
-        }
-        if (m_config.id == 215 && (addr & 0xF007) == 0x5000) { m_m215Mode = data; return true; }
-        if (m_config.id == 215 && (addr & 0xF007) == 0x5001) { m_m215Outer = data; return true; }
-        if (m_config.id == 215 && (addr & 0xF007) == 0x5007) { m_m215Scramble = data & 7; return true; }
-        if (m_config.id == 123 && addr >= 0x5800 && addr <= 0x5FFF) { m_m123Mode = data; return true; }
-        if (m_config.id == 45 && (addr & 0xF001) == 0x6000) {
-            if ((m_m45Outer[3] & 0x40) == 0) {
-                m_m45Outer[m_m45Index] = data;
-                m_m45Index = uint8_t((m_m45Index + 1) & 3);
-            }
-            return true;
-        }
-        if (m_config.id == 45 && (addr & 0xF001) == 0x6001) {
-            reset45Outer();
-            return true;
-        }
-        if ((m_config.id == 114 || m_config.id == 115) && (addr & 0xE001) == 0x6000) {
-            m_extMode = data;
-            return true;
-        }
-        if ((m_config.id == 114 || m_config.id == 115) && (addr & 0xE001) == 0x6001) {
-            m_extChr = data & 1;
-            return true;
-        }
-        if (m_config.id == 197 && m_config.nes20 && m_config.submapper == 3 && addr >= 0x6000 && addr <= 0x7FFF) {
-            if (m_prgRamEnable && !m_prgRamWriteProtect) m_outerReg = data;
-            return true;
-        }
-        if (m_config.id == 52 && addr >= 0x6000 && addr <= 0x7FFF) {
-            // The Realtec outer register overlaps WRAM and is writable only
-            // while MMC3 WRAM is enabled/writeable. D7 locks it until reset;
-            // after locking, writes pass through to actual WRAM.
-            if (m_prgRamEnable && !m_prgRamWriteProtect && (m_outerReg & 0x80) == 0)
-                m_outerReg = data;
-            return true;
-        }
-        if ((m_config.id == 37 || m_config.id == 47 || m_config.id == 49) && addr >= 0x6000 && addr <= 0x7FFF) {
-            // These multicart registers replace PRG RAM.  Mapper 37/47 and 49
-            // route the write through the MMC3 WRAM enable/protect outputs.
-            if (m_prgRamEnable && !m_prgRamWriteProtect) m_outerReg = data;
-            return true;
-        }
-        if (m_mmc6 && addr >= 0x7000 && addr <= 0x7FFF) {
-            if (!m_mmc6RamGlobalEnable) return true;
-            const bool highHalf = (addr & 0x0200) != 0;
-            const bool readable = highHalf ? m_mmc6HighRead : m_mmc6LowRead;
-            const bool writable = highHalf ? m_mmc6HighWrite : m_mmc6LowWrite;
-            if (readable && writable) m_mmc6Ram[addr & 0x03FF] = data;
-            return true;
-        }
-        if (addr < 0x8000) return false;
-        uint16_t regAddr = addr & 0xE001;
-        if (m_config.id == 121 && addr < 0xA000) {
-            if ((addr & 0x03) == 0x03) {
-                m_m121Ex[5] = data;
-                update121ExRegs();
-                regAddr = 0x8000;
-            } else if (addr & 1) {
-                m_m121Ex[6] = reverse121Low6(data);
-                if (!m_m121Ex[7]) update121ExRegs();
-                regAddr = 0x8001;
-            } else {
-                regAddr = 0x8000;
-            }
-        }
-        if (m_config.id == 114) regAddr = unscramble114Address(regAddr);
-        else if (m_config.id == 215) regAddr = unscramble215Address(regAddr);
-        switch (regAddr) {
-        case 0x8000:
-            if (m_config.id == 114) data = uint8_t((data & 0xC0) | unscramble114Index(data & 7));
-            else if (m_config.id == 215) data = uint8_t((data & 0xC0) | unscramble215Index(data & 7));
-            else if (m_config.id == 123) {
-                static constexpr uint8_t kIndex[8] = {0,3,1,5,6,7,2,4};
-                data = uint8_t((data & 0xC0) | kIndex[data & 7]);
-            }
-            m_bankSelect = data;
-            m_prgMode = (data >> 6) & 1;
-            m_chrMode = (data >> 7) & 1;
-            if (m_mmc6) {
-                m_mmc6RamGlobalEnable = (data & 0x20) != 0;
-                if (!m_mmc6RamGlobalEnable) {
-                    m_mmc6LowRead = m_mmc6LowWrite = false;
-                    m_mmc6HighRead = m_mmc6HighWrite = false;
-                }
-            }
-            break;
-        case 0x8001:
-            m_regs[m_bankSelect & 7] = data;
-            break;
-        case 0xA000:
-            if (m_config.id != 118 && !m_config.fourScreen)
-                m_mirror = (data & 1) ? Mirror::Horizontal : Mirror::Vertical;
-            break;
-        case 0xA001:
-            if (m_config.id == 44) m_outerReg = data & 7;
-            if (m_mmc6) {
-                if (m_mmc6RamGlobalEnable) {
-                    m_mmc6LowWrite = (data & 0x10) != 0;
-                    m_mmc6LowRead = (data & 0x20) != 0;
-                    m_mmc6HighWrite = (data & 0x40) != 0;
-                    m_mmc6HighRead = (data & 0x80) != 0;
-                }
-            } else {
-                m_prgRamWriteProtect = (data & 0x40) != 0;
-                m_prgRamEnable = (data & 0x80) != 0;
-            }
-            break;
-        case 0xC000: m_irqLatch = data; break;
-        case 0xC001: m_irqReload = true; break;
-        case 0xE000: m_irqEnabled = false; m_irqPending = false; break;
-        case 0xE001: m_irqEnabled = true; break;
-        }
-        return true;
-    }
-
-    bool ppuMapRead(uint16_t addr, uint32_t& mapped) override
-    {
-        if (addr >= 0x2000) return false;
-        const std::size_t bank = chrBankForAddress(addr);
-        const bool useRam = chrBankUsesRam(bank);
-        const std::size_t chrSize = useRam ? m_config.chrRamSize : m_config.chrRomSize;
-        if (chrSize == 0) return false;
-        std::size_t physicalBank = bank;
-        if (useRam) physicalBank -= chrRamBankBase();
-        mapped = mapBank(physicalBank, 0x400, chrSize, addr & 0x03FF);
-        return true;
-    }
-
-    bool ppuMapWrite(uint16_t addr, uint32_t& mapped) override
-    {
-        if (!ppuUsesChrRam(addr)) return false;
-        return ppuMapRead(addr, mapped);
-    }
-
-    bool ppuUsesChrRam(uint16_t addr) const override
-    {
-        if (addr >= 0x2000 || m_config.chrRamSize == 0) return false;
-        return chrBankUsesRam(chrBankForAddress(addr));
-    }
-
-    bool mapNametable(uint16_t addr, NametableSource& source, uint32_t& mapped) const override
-    {
-        if (m_config.id != 118 || addr < 0x2000 || addr > 0x3EFF) return false;
-        const uint8_t page = static_cast<uint8_t>((addr & 0x0FFF) >> 10);
-        const uint8_t nt = !m_chrMode
-            ? static_cast<uint8_t>((page < 2 ? m_regs[0] : m_regs[1]) >> 7)
-            : static_cast<uint8_t>(m_regs[2 + page] >> 7);
-        source = NametableSource::Ciram;
-        mapped = uint32_t(nt) * 0x400 + (addr & 0x03FF);
-        return true;
-    }
-
-    bool mapPrgRam(uint16_t addr, uint32_t& mapped, bool write) const override
-    {
-        if (m_mmc6 || m_config.id == 37 || m_config.id == 47 || m_config.id == 49 ||
-            m_config.id == 114 || m_config.id == 115 || (m_config.id == 197 && m_config.submapper == 3)) return false;
-        if (addr < 0x6000 || addr > 0x7FFF || m_config.prgRamSize == 0)
-            return false;
-        if (!m_prgRamEnable || (write && m_prgRamWriteProtect))
-            return false;
-        if (m_config.id == 52 && write && (m_outerReg & 0x80) == 0)
-            return false;
-        mapped = static_cast<uint32_t>((addr - 0x6000) % m_config.prgRamSize);
-        return true;
-    }
-
-    std::size_t mapperBatterySize() const override
-    {
-        return (m_mmc6 && m_config.headerPrgNvRamSize != 0) ? sizeof(m_mmc6Ram) : 0;
-    }
-
-    void saveMapperBattery(std::vector<uint8_t>& out) const override
-    {
-        if (mapperBatterySize()) out.insert(out.end(), std::begin(m_mmc6Ram), std::end(m_mmc6Ram));
-    }
-
-    bool loadMapperBattery(const uint8_t* data, std::size_t size) override
-    {
-        if (!mapperBatterySize()) return size == 0;
-        if (size != sizeof(m_mmc6Ram)) return false;
-        std::copy(data, data + size, std::begin(m_mmc6Ram));
-        return true;
-    }
-
-    void notifyPpuAddress(uint16_t addr, uint64_t ppuCycle) override
-    {
-        const bool a12High = (addr & 0x1000) != 0;
-        if (!a12High) {
-            if (m_lastA12 || !m_a12LowValid) {
-                m_a12LowStart = ppuCycle;
-                m_a12LowValid = true;
-            }
-        }
-        else {
-            if (!m_lastA12 && m_a12LowValid && ppuCycle - m_a12LowStart >= 8)
-                clockIrq();
-            m_a12LowValid = false;
-        }
-        m_lastA12 = a12High;
-    }
-
-    void scanlineTick() override { clockIrq(); }
-    bool irqActive() const override { return m_irqPending; }
-
-    void reset(bool hard) override
-    {
-        if (m_config.id == 121) reset121();
-        if (m_config.id == 45) reset45Outer();
-        if (m_config.id == 52) m_outerReg = 0;
-        if (m_config.id == 215) {
-            m_m215Outer = 0x0F;
-            if (hard) { m_m215Mode = 0; m_m215Scramble = 0; }
-        }
-    }
-
-    void saveState(std::vector<uint8_t>& out) const override
-    {
-        put8(out, static_cast<uint8_t>(m_mirror));
-        put8(out, m_bankSelect);
-        for (uint8_t value : m_regs) put8(out, value);
-        put8(out, m_prgMode); put8(out, m_chrMode);
-        put8(out, m_irqLatch); put8(out, m_irqCounter);
-        put8(out, m_irqEnabled ? 1 : 0); put8(out, m_irqReload ? 1 : 0); put8(out, m_irqPending ? 1 : 0);
-        put8(out, m_lastA12 ? 1 : 0); put8(out, m_a12LowValid ? 1 : 0); put64(out, m_a12LowStart);
-        put8(out, m_prgRamEnable ? 1 : 0); put8(out, m_prgRamWriteProtect ? 1 : 0);
-        put8(out, m_outerReg);
-        put8(out, m_extMode); put8(out, m_extChr);
-        if (m_config.id == 12) put8(out, m_m12ChrOuter);
-        if (m_config.id == 45) {
-            put8(out, m_m45Index);
-            for (uint8_t value : m_m45Outer) put8(out, value);
-        }
-        if (m_config.id == 215) { put8(out, m_m215Mode); put8(out, m_m215Outer); put8(out, m_m215Scramble); }
-        if (m_config.id == 123) put8(out, m_m123Mode);
-        if (m_config.id == 121) for (uint8_t value : m_m121Ex) put8(out, value);
-        put8(out, m_mmc6 ? 1 : 0);
-        if (m_mmc6) {
-            put8(out, m_mmc6RamGlobalEnable ? 1 : 0);
-            put8(out, m_mmc6LowRead ? 1 : 0); put8(out, m_mmc6LowWrite ? 1 : 0);
-            put8(out, m_mmc6HighRead ? 1 : 0); put8(out, m_mmc6HighWrite ? 1 : 0);
-            out.insert(out.end(), std::begin(m_mmc6Ram), std::end(m_mmc6Ram));
-        }
-    }
-
-    bool loadState(const uint8_t*& p, const uint8_t* end) override
-    {
-        uint8_t tmp = 0;
-        if (!get8(p, end, tmp)) return false;
-        m_mirror = static_cast<Mirror>(tmp);
-        if (!get8(p, end, m_bankSelect)) return false;
-        for (uint8_t& value : m_regs) if (!get8(p, end, value)) return false;
-        if (!get8(p, end, m_prgMode) || !get8(p, end, m_chrMode) || !get8(p, end, m_irqLatch) || !get8(p, end, m_irqCounter)) return false;
-        if (!get8(p, end, tmp)) return false;
-        m_irqEnabled = tmp != 0;
-        if (!get8(p, end, tmp)) return false;
-        m_irqReload = tmp != 0;
-        if (!get8(p, end, tmp)) return false;
-        m_irqPending = tmp != 0;
-        if (!get8(p, end, tmp)) return false;
-        m_lastA12 = tmp != 0;
-        if (!get8(p, end, tmp)) return false;
-        m_a12LowValid = tmp != 0;
-        if (!get64(p, end, m_a12LowStart)) return false;
-        if (!get8(p, end, tmp)) return false;
-        m_prgRamEnable = tmp != 0;
-        if (!get8(p, end, tmp)) return false;
-        m_prgRamWriteProtect = tmp != 0;
-        if (!get8(p, end, m_outerReg)) return false;
-        if (!get8(p, end, m_extMode) || !get8(p, end, m_extChr)) return false;
-        if (m_config.id == 12 && !get8(p, end, m_m12ChrOuter)) return false;
-        if (m_config.id == 45) {
-            if (!get8(p, end, m_m45Index)) return false;
-            if (m_m45Index > 3) return false;
-            for (uint8_t& value : m_m45Outer) if (!get8(p, end, value)) return false;
-        }
-        if (m_config.id == 215) {
-            if (!get8(p, end, m_m215Mode) || !get8(p, end, m_m215Outer) || !get8(p, end, m_m215Scramble)) return false;
-            m_m215Scramble &= 7;
-        }
-        if (m_config.id == 123 && !get8(p, end, m_m123Mode)) return false;
-        if (m_config.id == 121) for (uint8_t& value : m_m121Ex) if (!get8(p, end, value)) return false;
-        if (!get8(p, end, tmp)) return false;
-        if ((tmp != 0) != m_mmc6) return false;
-        if (m_mmc6) {
-            if (!get8(p, end, tmp)) return false;
-            m_mmc6RamGlobalEnable = tmp != 0;
-            if (!get8(p, end, tmp)) return false;
-            m_mmc6LowRead = tmp != 0;
-            if (!get8(p, end, tmp)) return false;
-            m_mmc6LowWrite = tmp != 0;
-            if (!get8(p, end, tmp)) return false;
-            m_mmc6HighRead = tmp != 0;
-            if (!get8(p, end, tmp)) return false;
-            m_mmc6HighWrite = tmp != 0;
-            if (end - p < static_cast<std::ptrdiff_t>(sizeof(m_mmc6Ram))) return false;
-            std::copy(p, p + sizeof(m_mmc6Ram), std::begin(m_mmc6Ram));
-            p += sizeof(m_mmc6Ram);
-        }
-        return true;
-    }
-
-private:
-    uint8_t m_bankSelect = 0;
-    uint8_t m_regs[8] = {};
-    uint8_t m_prgMode = 0;
-    uint8_t m_chrMode = 0;
-    uint8_t m_irqLatch = 0;
-    uint8_t m_irqCounter = 0;
-    bool m_irqEnabled = false;
-    bool m_irqReload = false;
-    bool m_irqPending = false;
-    bool m_lastA12 = false;
-    bool m_a12LowValid = false;
-    uint64_t m_a12LowStart = 0;
-    bool m_prgRamEnable = true;
-    bool m_prgRamWriteProtect = false;
-    uint8_t m_outerReg = 0;
-    uint8_t m_extMode = 0;
-    uint8_t m_extChr = 0;
-    uint8_t m_m12ChrOuter = 0;
-    uint8_t m_m45Outer[4] = {};
-    uint8_t m_m45Index = 0;
-    uint8_t m_m215Mode = 0;
-    uint8_t m_m215Outer = 0x0F;
-    uint8_t m_m215Scramble = 0;
-    uint8_t m_m123Mode = 0;
-    uint8_t m_m121Ex[8] = {};
-    bool m_mmc6 = false;
-    bool m_mmc6RamGlobalEnable = false;
-    bool m_mmc6LowRead = false, m_mmc6LowWrite = false;
-    bool m_mmc6HighRead = false, m_mmc6HighWrite = false;
-    uint8_t m_mmc6Ram[0x400] = {};
-
-    std::size_t chrBankForAddress(uint16_t addr) const
-    {
-        if (m_config.id == 197) {
-            std::size_t b = 0;
-            const uint8_t sub = m_config.nes20 ? m_config.submapper : 0;
-            if (sub == 1) {
-                if (addr < 0x0800) b = std::size_t(m_regs[0] & 0xFE) + ((addr >> 10) & 1);
-                else if (addr < 0x1000) b = std::size_t(m_regs[1] | 1) - 1 + ((addr >> 10) & 1);
-                else if (addr < 0x1800) b = std::size_t(m_regs[2]) * 2 + ((addr >> 10) & 1);
-                else b = std::size_t(m_regs[5]) * 2 + ((addr >> 10) & 1);
-            } else {
-                if (addr < 0x1000) b = std::size_t(m_regs[0] & 0xFE) * 2 + ((addr >> 10) & 3);
-                else if (addr < 0x1800) b = std::size_t(m_regs[2]) * 2 + ((addr >> 10) & 1);
-                else b = std::size_t(m_regs[3]) * 2 + ((addr >> 10) & 1);
-            }
-            return b;
-        }
-        const uint8_t r0 = m_regs[0] & 0xFE;
-        const uint8_t r1 = m_regs[1] & 0xFE;
-        std::size_t bank = 0;
-        if (!m_chrMode) {
-            if (addr < 0x0800) bank = r0 + ((addr >> 10) & 1);
-            else if (addr < 0x1000) bank = r1 + ((addr >> 10) & 1);
-            else if (addr < 0x1400) bank = m_regs[2];
-            else if (addr < 0x1800) bank = m_regs[3];
-            else if (addr < 0x1C00) bank = m_regs[4];
-            else bank = m_regs[5];
-        } else {
-            if (addr < 0x0400) bank = m_regs[2];
-            else if (addr < 0x0800) bank = m_regs[3];
-            else if (addr < 0x0C00) bank = m_regs[4];
-            else if (addr < 0x1000) bank = m_regs[5];
-            else if (addr < 0x1800) bank = r0 + ((addr >> 10) & 1);
-            else bank = r1 + ((addr >> 10) & 1);
-        }
-        if (m_config.id == 37) bank = (std::size_t((m_outerReg >> 2) & 1) << 7) | (bank & 0x7F);
-        else if (m_config.id == 44) { const uint8_t block=std::min<uint8_t>(m_outerReg&7,6); bank = block==6 ? ((bank&0xFF)|0x300) : ((bank&0x7F)|(std::size_t(block)<<7)); }
-        else if (m_config.id == 47) bank = (std::size_t(m_outerReg & 1) << 7) | (bank & 0x7F);
-        else if (m_config.id == 49) bank = (std::size_t((m_outerReg >> 6) & 0x03) << 7) | (bank & 0x7F);
-        else if (m_config.id == 52) {
-            // D2 supplies CHR A19, D5 A18; D6 chooses CHR A17 from
-            // the MMC3 bank or from outer bit D4.
-            const std::size_t lowMask = (m_outerReg & 0x40) ? 0x7F : 0xFF;
-            const std::size_t a17 = (m_outerReg & 0x40) ? std::size_t((m_outerReg >> 4) & 1) : ((bank >> 7) & 1);
-            bank = (bank & lowMask) | (a17 << 7) | (std::size_t((m_outerReg >> 5) & 1) << 8) |
-                (std::size_t((m_outerReg >> 2) & 1) << 9);
-        }
-        else if (m_config.id == 121) {
-            if (m_config.prgRomSize == m_config.chrRomSize) {
-                // Super 3-in-1 A9713 wiring: the same outer selector feeds
-                // CHR A18 (1 KiB bank bit 8).
-                bank |= std::size_t(m_m121Ex[3] & 0x80) << 1;
-            } else if (m_config.chrRomSize > 0x40000) {
-                // A9711 with 512 KiB CHR wires CHR A18 directly to PPU A12,
-                // independent of MMC3 CHR inversion: left table = first half,
-                // right table = second half.
-                bank = (bank & 0xFF) | ((addr & 0x1000) ? 0x100 : 0);
-            }
-        }
-        else if (m_config.id == 12) {
-            const uint8_t a18 = (addr & 0x1000) ? ((m_m12ChrOuter >> 4) & 1) : (m_m12ChrOuter & 1);
-            bank = (std::size_t(a18) << 8) | (bank & 0xFF);
-        }
-        else if (m_config.id == 114 || m_config.id == 115) bank = (std::size_t(m_extChr & 1) << 8) | (bank & 0xFF);
-        else if (m_config.id == 215) {
-            const std::size_t outerChr = m_config.submapper == 1
-                ? std::size_t((m_m215Outer >> 1) & 0x07)
-                : std::size_t((m_m215Outer >> 2) & 0x03);
-            const std::size_t lowMask = (m_m215Mode & 0x40) ? 0x7F : 0xFF;
-            bank = (bank & lowMask) | (outerChr << 8);
-            if (m_m215Mode & 0x40) bank = (bank & ~std::size_t(0x80)) | (std::size_t((m_m215Outer >> 5) & 1) << 7);
-        }
-        else if (m_config.id == 45 && m_config.chrRomSize != 0) {
-            // Register #2 low nibble selects how many low MMC3 CHR-bank bits
-            // survive (0-$7 = none, $8 = one ... $F = all eight).
-            const uint8_t width = m_m45Outer[2] & 0x0F;
-            const std::size_t andMask = width <= 7 ? 0 : ((std::size_t(1) << (width - 7)) - 1);
-            const std::size_t outer = std::size_t(m_m45Outer[0]) |
-                (std::size_t(m_m45Outer[2] & 0xF0) << 4);
-            bank = (bank & andMask) | outer;
-        }
-        return bank;
-    }
-
-    bool chrBankUsesRam(std::size_t bank) const
-    {
-        if (!m_config.chrRamSize) return false;
-        if (!m_config.chrRomSize) return true;
-        switch (m_config.id) {
-        case 74: return bank >= 0x08 && bank <= 0x09;
-        case 119: return bank >= 0x40 && bank <= 0x7F;
-        case 191: return bank >= 0x80 && bank <= 0xFF;
-        case 192: return bank >= 0x08 && bank <= 0x0B;
-        case 194: return bank <= 0x01;
-        case 195: return bank <= 0x03;
-        default: return false;
-        }
-    }
-
-    std::size_t chrRamBankBase() const
-    {
-        switch (m_config.id) {
-        case 74: return 0x08;
-        case 119: return 0x40;
-        case 191: return 0x80;
-        case 192: return 0x08;
-        default: return 0;
-        }
-    }
-
-    uint16_t unscramble114Address(uint16_t a) const
-    {
-        const bool sm1 = m_config.nes20 && m_config.submapper == 1;
-        static constexpr uint16_t sm0From[8] = {0x8000,0x8001,0xA000,0xA001,0xC000,0xC001,0xE000,0xE001};
-        static constexpr uint16_t sm0To[8]   = {0xA001,0xA000,0x8000,0xC000,0x8001,0xC001,0xE000,0xE001};
-        static constexpr uint16_t sm1To[8]   = {0xA001,0x8001,0x8000,0xC001,0xA000,0xC000,0xE000,0xE001};
-        for (int i=0;i<8;++i) if (a==sm0From[i]) return sm1 ? sm1To[i] : sm0To[i];
-        return a;
-    }
-
-    uint8_t unscramble114Index(uint8_t i) const
-    {
-        static constexpr uint8_t sm0[8] = {0,3,1,5,6,7,2,4};
-        static constexpr uint8_t sm1[8] = {0,2,5,3,6,1,7,4};
-        return (m_config.nes20 && m_config.submapper == 1) ? sm1[i & 7] : sm0[i & 7];
-    }
-
-    uint16_t unscramble215Address(uint16_t a) const
-    {
-        static constexpr uint16_t written[8] = {0x8000,0x8001,0xA000,0xA001,0xC000,0xC001,0xE000,0xE001};
-        static constexpr uint16_t table[8][8] = {
-            {0x8000,0x8001,0xA000,0xA001,0xC000,0xC001,0xE000,0xE001},
-            {0xA001,0xA000,0x8000,0xC000,0x8001,0xC001,0xE000,0xE001},
-            {0x8000,0x8001,0xA000,0xA001,0xC000,0xC001,0xE000,0xE001},
-            {0xC001,0x8000,0x8001,0xA000,0xA001,0xE001,0xE000,0xC000},
-            {0xA001,0x8001,0x8000,0xC000,0xA000,0xC001,0xE000,0xE001},
-            {0x8000,0x8001,0xA000,0xA001,0xC000,0xC001,0xE000,0xE001},
-            {0x8000,0x8001,0xA000,0xA001,0xC000,0xC001,0xE000,0xE001},
-            {0x8000,0x8001,0xA000,0xA001,0xC000,0xC001,0xE000,0xE001}
-        };
-        for (int i=0;i<8;++i) if (a==written[i]) return table[m_m215Scramble & 7][i];
-        return a;
-    }
-
-    uint8_t unscramble215Index(uint8_t i) const
-    {
-        static constexpr uint8_t table[8][8] = {
-            {0,1,2,3,4,5,6,7}, {0,2,6,1,7,3,4,5},
-            {0,5,4,1,7,2,6,3}, {0,6,3,7,5,2,4,1},
-            {0,2,5,3,6,1,7,4}, {0,1,2,3,4,5,6,7},
-            {0,1,2,3,4,5,6,7}, {0,1,2,3,4,5,6,7}
-        };
-        return table[m_m215Scramble & 7][i & 7];
-    }
-
-    static uint8_t reverse121Low6(uint8_t value)
-    {
-        return uint8_t(((value & 0x01) << 5) | ((value & 0x02) << 3) |
-            ((value & 0x04) << 1) | ((value & 0x08) >> 1) |
-            ((value & 0x10) >> 3) | ((value & 0x20) >> 5));
-    }
-
-    void update121ExRegs()
-    {
-        switch (m_m121Ex[5] & 0x3F) {
-        case 0x20: case 0x29: case 0x2B: case 0x3C: case 0x3F:
-            m_m121Ex[7] = 1; m_m121Ex[0] = m_m121Ex[6]; break;
-        case 0x26:
-            m_m121Ex[7] = 0; m_m121Ex[0] = m_m121Ex[6]; break;
-        case 0x2C:
-            m_m121Ex[7] = 1; if (m_m121Ex[6]) m_m121Ex[0] = m_m121Ex[6]; break;
-        case 0x28:
-            m_m121Ex[7] = 0; m_m121Ex[1] = m_m121Ex[6]; break;
-        case 0x2A:
-            m_m121Ex[7] = 0; m_m121Ex[2] = m_m121Ex[6]; break;
-        case 0x2F:
-            break;
-        default:
-            m_m121Ex[5] = 0; break;
-        }
-    }
-
-    void reset121()
-    {
-        for (uint8_t& value : m_m121Ex) value = 0;
-        m_m121Ex[3] = 0x80;
-    }
-
-    void reset45Outer()
-    {
-        m_m45Index = 0;
-        m_m45Outer[0] = 0;
-        m_m45Outer[1] = 0;
-        m_m45Outer[2] = 0x0F;
-        m_m45Outer[3] = 0;
-    }
-
-    void clockIrq()
-    {
-        if (m_irqCounter == 0 || m_irqReload) {
-            m_irqCounter = m_irqLatch;
-            m_irqReload = false;
-        }
-        else {
-            --m_irqCounter;
-        }
-        // Mapper 12.0 uses a Huang-1 in MMC3A-compatible mode. Like MMC3A,
-        // a latch value of zero does not continuously assert an IRQ. Mapper
-        // 114 has the same clone-specific zero-latch behavior.
-        if (m_irqCounter == 0 && m_irqEnabled && !((m_config.id == 12 || m_config.id == 114) && m_irqLatch == 0))
-            m_irqPending = true;
-    }
-};
-
-class Mapper7 final : public Mapper {
-public:
-    explicit Mapper7(const MapperConfig& config) : Mapper(config) {}
-
-    bool cpuMapRead(uint16_t addr, uint32_t& mapped) const override
-    {
-        if (addr < 0x8000 || m_config.prgRomSize == 0) return false;
-        mapped = mapBank(m_bank & 0x07, 0x8000, m_config.prgRomSize, addr - 0x8000);
-        return true;
-    }
-
-    bool cpuWrite(uint16_t addr, uint8_t data, uint64_t) override
-    {
-        if (addr < 0x8000) return false;
-        m_bank = data;
-        m_mirror = (data & 0x10) ? Mirror::OnescreenHi : Mirror::OnescreenLo;
-        return true;
-    }
-
-    bool hasBusConflicts() const override
-    {
-        // AxROM submapper 0 keeps the historical no-conflict emulator default.
-        return m_config.nes20 && m_config.submapper == 2;
-    }
-
-    void saveState(std::vector<uint8_t>& out) const override { put8(out, m_bank); }
-    bool loadState(const uint8_t*& p, const uint8_t* end) override
-    {
-        if (!get8(p, end, m_bank)) return false;
-        m_mirror = (m_bank & 0x10) ? Mirror::OnescreenHi : Mirror::OnescreenLo;
-        return true;
-    }
-
-private:
-    uint8_t m_bank = 0;
 };
 
 class Mapper9 final : public Mapper {
@@ -1202,9 +132,7 @@ private:
     uint8_t m_chrFE0 = 0;
     uint8_t m_chrFD1 = 0;
     uint8_t m_chrFE1 = 0;
-    // MMC2 powers up selecting the FE banks. The left latch responds only to
-    // the exact $0FD8/$0FE8 addresses; the right latch responds to the eight-
-    // byte $1FD8-$1FDF/$1FE8-$1FEF ranges.
+
     bool m_latch0 = true;
     bool m_latch1 = true;
 
@@ -1292,8 +220,7 @@ private:
     uint8_t m_chrFE0 = 0;
     uint8_t m_chrFD1 = 0;
     uint8_t m_chrFE1 = 0;
-    // MMC4 powers up selecting the FE banks. Unlike MMC2, both pattern-table
-    // latches respond to eight-address ranges.
+
     bool m_latch0 = true;
     bool m_latch1 = true;
 
@@ -1360,8 +287,7 @@ public:
     void initializePrgImage(const uint8_t* data, std::size_t size) override
     {
         if (!m_flashEnabled) return;
-        // Flashable UNROM-512 uses an SST39SF040 (512 KiB). Preserve a
-        // smaller supplied image at the bottom and leave unwritten space erased.
+
         m_flash.assign(0x80000, 0xFF);
         if (data && size)
             std::copy_n(data, std::min<std::size_t>(size, m_flash.size()), m_flash.begin());
@@ -1383,7 +309,7 @@ public:
         if (!m_flashEnabled || addr < 0x8000 || m_flash.empty()) return false;
         const uint32_t phys = flashPhysicalAddress(addr);
         if (m_flashIdMode) {
-            // SST39SF040 software-ID mode: manufacturer BFh, device B7h.
+
             const uint16_t chipAddr = uint16_t(phys & 0x7FFF);
             if (chipAddr == 0) data = 0xBF;
             else if (chipAddr == 1) data = 0xB7;
@@ -1398,18 +324,12 @@ public:
     {
         if (addr < 0x8000) return false;
 
-        // With flash enabled, $8000-$BFFF is connected to the SST39SF040
-        // write input rather than the bank latch. Submapper 4 also decodes
-        // these writes into its cartridge LED register.
         if (m_flashEnabled && addr < 0xC000) {
             flashWrite(flashPhysicalAddress(addr), data);
             if (m_ledVariant) m_led = data;
             return true;
         }
 
-        // Explicit no-conflict variants gate the mapper latch to $C000-$FFFF.
-        // Submapper 4 uses $8000-$BFFF for its LED register even when a dump
-        // is not marked battery-backed/self-flashable.
         const bool latchHighOnly = m_flashEnabled || (m_config.nes20 && m_config.submapper >= 1);
         if (latchHighOnly && addr < 0xC000) {
             if (m_ledVariant) m_led = data;
@@ -1465,8 +385,7 @@ public:
             m_led = 0xFF;
             updateMirror();
         }
-        // A console reset aborts an in-progress flash command but does not
-        // erase programmed flash contents.
+
         m_flashState = 0;
         m_flashIdMode = false;
     }
@@ -1517,9 +436,7 @@ private:
     {
         if (m_flash.empty()) return;
         const uint16_t chipAddr = uint16_t(phys & 0x7FFF);
-        // F0 is a software reset while idle/unlocking, but after the A0
-        // byte-program command it is ordinary payload data and must be
-        // programmable like any other byte.
+
         if (data == 0xF0 && m_flashState != 3) {
             m_flashState = 0;
             m_flashIdMode = false;
@@ -1542,7 +459,7 @@ private:
             } else m_flashState = 0;
             break;
         case 3:
-            // NOR flash programming can only clear bits (1 -> 0).
+
             m_flash[phys & 0x7FFFFu] &= data;
             m_flashState = 0;
             break;
@@ -1571,7 +488,7 @@ private:
     void updateMirror()
     {
         if (m_hvControlled) {
-            // UNROM-512 submapper 3: D7=0 vertical, D7=1 horizontal.
+
             m_mirror = (m_bank & 0x80) ? Mirror::Horizontal : Mirror::Vertical;
         }
         else if (m_oneScreenHeader) {
@@ -1668,12 +585,7 @@ public:
     bool cpuWrite(uint16_t addr, uint8_t data, uint64_t) override
     {
         if (addr >= 0x8000 && addr <= 0x9FFF) {
-            // NES 2.0 submapper 1 is BF9097/Fire Hawk with mapper-controlled
-            // single-screen mirroring. Submapper 0 is hardwired H/V. Legacy
-            // iNES keeps the established heuristic: only $9000-$9FFF enables
-            // the Fire Hawk-style mirroring latch. Once observed, remember the
-            // board inference because BF9097 also exposes only three PRG-bank
-            // bits, unlike the four-bit BF9093 used by the normal boards.
+
             const bool fireHawk = m_config.nes20 ? (m_config.submapper == 1) : (addr >= 0x9000);
             if (!m_config.nes20 && addr >= 0x9000) m_legacyFireHawk = true;
             if (fireHawk)
@@ -1824,7 +736,7 @@ public:
     bool cpuWrite(uint16_t addr, uint8_t data, uint64_t) override
     {
         if (addr < 0x8000) return false;
-        // Color Dreams: D1-D0 select 32 KiB PRG; D7-D4 select 8 KiB CHR.
+
         m_prg = data & 0x03;
         m_chr = (data >> 4) & 0x0F;
         return true;
@@ -1899,7 +811,6 @@ private:
     uint8_t m_chr = 0;
 };
 
-
 class Mapper185 final : public Mapper {
 public:
     explicit Mapper185(const MapperConfig& config) : Mapper(config) {}
@@ -1922,19 +833,14 @@ public:
     {
         if (addr >= 0x2000 || m_config.chrRomSize == 0) return false;
         if (!chrEnabled()) return false;
-        // Mapper 185 mounts one 8 KiB CHR-ROM. The latch is protection-only;
-        // its two low bits drive the ROM's programmable chip-select pins.
+
         mapped = static_cast<uint32_t>(addr % m_config.chrRomSize);
         return true;
     }
 
     bool ppuReadOverride(uint16_t addr, PpuFetchKind kind, uint8_t& data) override
     {
-        // Legacy iNES images cannot identify which one of the four CS1/CS2
-        // values enables CHR. The established compatibility heuristic for all
-        // known mapper-185 dumps is to expose open bus ($FF) on the first two
-        // CPU PPUDATA pattern-table reads after reset, then treat CHR as
-        // enabled. Rendering fetches must not consume this two-read window.
+
         if (addr >= 0x2000 || m_config.submapper != 0 || kind != PpuFetchKind::Cpu || m_legacyCpuReads >= 2)
             return false;
         ++m_legacyCpuReads;
@@ -1982,7 +888,7 @@ public:
         if (addr < 0x8000 || m_config.prgRomSize == 0) return false;
 
         const uint8_t chip = uint8_t((m_regAddr >> 11) & 0x03);
-        if (chip == 2) return false; // Action 52 has no PRG chip in socket 2.
+        if (chip == 2) return false;
 
         const std::size_t chipBase = chip == 3 ? 0x100000u : std::size_t(chip) * 0x80000u;
         if (chipBase >= m_config.prgRomSize) return false;
@@ -1994,7 +900,7 @@ public:
             const uint32_t in = addr & 0x3FFF;
             mapped = static_cast<uint32_t>(chipBase + bank16 * 0x4000u + in);
         } else {
-            // 32 KiB mode forces bit 0 of the 16 KiB page number from A14.
+
             page = uint8_t((page & 0x1E) | ((addr >> 14) & 1));
             mapped = static_cast<uint32_t>(chipBase + std::size_t(page) * 0x4000u + (addr & 0x3FFF));
         }
@@ -2062,9 +968,7 @@ private:
 };
 
 #include "MapperMore.inc"
-#include "MapperHard.inc"
 #include "MapperFds.inc"
-
 
 class Mapper104 final : public Mapper {
 public:
@@ -2172,9 +1076,7 @@ public:
 
     bool cpuWrite(uint16_t addr, uint8_t data, uint64_t) override {
         if (addr < 0x8000) return false;
-        // Historical mapper 111 is a non-serialized MMC1 clone: each write
-        // directly replaces the selected MMC1 register rather than shifting
-        // one serial bit at a time.
+
         switch ((addr & 0x6000) >> 13) {
         case 0: m_ctrl = data; updateMirror(); break;
         case 1: m_chr0 = data; break;
@@ -2186,9 +1088,7 @@ public:
 
     bool ppuMapRead(uint16_t addr, uint32_t& mapped) override {
         if (addr >= 0x2000 || m_config.chrRomSize == 0) return false;
-        // Unlike a normal MMC1, this clone exposes enough CHR address lines
-        // for 256 KiB. In 4 KiB mode the entire direct-write register is the
-        // bank number; in 8 KiB mode CHR0 bit 0 is ignored.
+
         uint8_t page;
         if (m_ctrl & 0x10)
             page = addr < 0x1000 ? m_chr0 : m_chr1;
@@ -2258,8 +1158,7 @@ public:
             const uint32_t phys = uint32_t((std::size_t(m_reg & 0x0F) * 0x8000 + (addr & 0x7FFF)) & 0x7FFFF);
             flashWrite(phys, data);
         }
-        // Latch when A14 and A12 are both high; this decodes $5000-$5FFF,
-        // $7000-$7FFF, $D000-$DFFF and $F000-$FFFF.
+
         if ((addr & 0x5000) == 0x5000) m_reg = data;
         return addr >= 0x5000;
     }
@@ -2337,8 +1236,7 @@ private:
     std::vector<uint8_t> m_flash;
 };
 
-
-} // namespace
+}
 
 Mapper::Mapper(const MapperConfig& config)
     : m_config(config), m_mirror(config.headerMirror)
@@ -2430,23 +1328,22 @@ std::size_t Mapper::chrBanks(std::size_t bankSize) const
 
 std::unique_ptr<Mapper> createMapper(const MapperConfig& config)
 {
+    if (auto mapper = createNintendoDiscreteMapper(config))
+        return mapper;
+
     switch (config.id) {
-    case 0: return std::make_unique<Mapper0>(config);
-    case 1: case 155: return std::make_unique<Mapper1>(config);
-    case 2: return std::make_unique<Mapper2>(config);
-    case 3: return std::make_unique<Mapper3>(config);
+    case 1: case 155: return createMmc1Mapper(config);
     case 4: case 37: case 44: case 45: case 47: case 49: case 52: case 74: case 114: case 115: case 118: case 119: case 121: case 123: case 191: case 192: case 194: case 195: case 197: case 215:
-        return std::make_unique<Mapper4>(config);
+        return createMmc3Mapper(config);
     case 182: {
         MapperConfig compat = config; compat.id = 114;
-        return std::make_unique<Mapper4>(compat);
+        return createMmc3Mapper(compat);
     }
-    case 5: return std::make_unique<Mapper5>(config);
-    case 6: case 8: case 17: return std::make_unique<MapperSuperMagicCard>(config);
+    case 5: return createMmc5Mapper(config);
+    case 6: case 8: case 17: return createUnlicensedMapper(config);
     case 12:
-        if (config.submapper == 1) return std::make_unique<MapperSuperMagicCard>(config);
-        return std::make_unique<Mapper4>(config);
-    case 7: return std::make_unique<Mapper7>(config);
+        if (config.submapper == 1) return createUnlicensedMapper(config);
+        return createMmc3Mapper(config);
     case 9: return std::make_unique<Mapper9>(config);
     case 10: return std::make_unique<Mapper10>(config);
     case 11: return std::make_unique<Mapper11>(config);
@@ -2458,17 +1355,17 @@ std::unique_ptr<Mapper> createMapper(const MapperConfig& config)
     case 116: return std::make_unique<Mapper116>(config);
     case 117: return std::make_unique<Mapper117>(config);
     case 18: return std::make_unique<Mapper18>(config);
-    case 19: case 210: return std::make_unique<Mapper19>(config);
+    case 19: case 210: return createNamcoMapper(config);
     case 20: return std::make_unique<Mapper20>(config);
-    case 21: case 22: case 23: case 25: case 27: return std::make_unique<MapperVrc24>(config);
+    case 21: case 22: case 23: case 25: case 27: return createVrcMapper(config);
     case 28: return std::make_unique<Mapper28>(config);
-    case 24: case 26: return std::make_unique<MapperVrc6>(config);
+    case 24: case 26: return createVrcMapper(config);
     case 30: return std::make_unique<Mapper30>(config);
     case 31: return std::make_unique<Mapper31>(config);
     case 32: return std::make_unique<Mapper32>(config);
     case 33: return std::make_unique<Mapper33>(config);
     case 34: return std::make_unique<Mapper34>(config);
-    case 35: return std::make_unique<MapperJY>(config);
+    case 35: return createUnlicensedMapper(config);
     case 36: return std::make_unique<Mapper36>(config);
     case 38: return std::make_unique<Mapper38>(config);
     case 39: return std::make_unique<Mapper39>(config);
@@ -2494,14 +1391,14 @@ std::unique_ptr<Mapper> createMapper(const MapperConfig& config)
     case 64: case 158: return std::make_unique<Mapper64>(config);
     case 65: return std::make_unique<Mapper65>(config);
     case 66: return std::make_unique<Mapper66>(config);
-    case 67: return std::make_unique<Mapper67>(config);
-    case 68: return std::make_unique<Mapper68>(config);
-    case 69: return std::make_unique<Mapper69>(config);
+    case 67: return createSunsoftMapper(config);
+    case 68: return createSunsoftMapper(config);
+    case 69: return createSunsoftMapper(config);
     case 70: case 152: return std::make_unique<Mapper70>(config);
     case 71: return std::make_unique<Mapper71>(config);
     case 72: case 92: return std::make_unique<Mapper72>(config);
-    case 73: return std::make_unique<Mapper73>(config);
-    case 75: case 151: return std::make_unique<Mapper75>(config);
+    case 73: return createVrcMapper(config);
+    case 75: case 151: return createVrcMapper(config);
     case 76: return std::make_unique<Mapper76>(config);
     case 77: return std::make_unique<Mapper77>(config);
     case 78: return std::make_unique<Mapper78>(config);
@@ -2509,14 +1406,14 @@ std::unique_ptr<Mapper> createMapper(const MapperConfig& config)
     case 80: case 207: return std::make_unique<Mapper80>(config);
     case 81: return std::make_unique<Mapper81>(config);
     case 82: return std::make_unique<Mapper82>(config);
-    case 85: return std::make_unique<Mapper85>(config);
+    case 85: return createVrcMapper(config);
     case 86: return std::make_unique<Mapper86>(config);
     case 87: return std::make_unique<Mapper87>(config);
     case 88: case 154: return std::make_unique<Mapper88>(config);
-    case 89: return std::make_unique<Mapper89>(config);
-    case 90: case 209: case 211: return std::make_unique<MapperJY>(config);
+    case 89: return createSunsoftMapper(config);
+    case 90: case 209: case 211: return createUnlicensedMapper(config);
     case 91: return std::make_unique<Mapper91>(config);
-    case 93: return std::make_unique<Mapper93>(config);
+    case 93: return createSunsoftMapper(config);
     case 94: return std::make_unique<Mapper94>(config);
     case 95: return std::make_unique<Mapper95>(config);
     case 96: return std::make_unique<Mapper96>(config);
@@ -2531,10 +1428,8 @@ std::unique_ptr<Mapper> createMapper(const MapperConfig& config)
     case 111: if (config.chrRomSize) return std::make_unique<Mapper111Mmc1>(config); else return std::make_unique<Mapper111>(config);
     case 112: return std::make_unique<Mapper112>(config);
     case 120: return std::make_unique<Mapper120>(config);
-    // Historical fwNES assignment: mapper 122 describes the same Sunsoft-1
-    // hardware standardized as mapper 184. Keep both numbers on one tested
-    // implementation rather than duplicating the banking logic.
-    case 122: case 184: return std::make_unique<Mapper184>(config);
+
+    case 122: case 184: return createSunsoftMapper(config);
     case 125: return std::make_unique<Mapper125>(config);
     case 132: return std::make_unique<Mapper132>(config);
     case 133: return std::make_unique<Mapper133>(config);
@@ -2552,7 +1447,7 @@ std::unique_ptr<Mapper> createMapper(const MapperConfig& config)
     case 156: return std::make_unique<Mapper156>(config);
     case 171: return std::make_unique<Mapper171>(config);
     case 174: return std::make_unique<Mapper174>(config);
-    case 176: case 179: return std::make_unique<Mapper176>(config);
+    case 176: case 179: return createUnlicensedMapper(config);
     case 180: return std::make_unique<Mapper180>(config);
     case 185: return std::make_unique<Mapper185>(config);
     case 193: return std::make_unique<Mapper193>(config);
@@ -2569,7 +1464,7 @@ std::unique_ptr<Mapper> createMapper(const MapperConfig& config)
     case 241: return std::make_unique<Mapper241>(config);
     case 242: return std::make_unique<Mapper242>(config);
     case 243: return std::make_unique<Mapper243>(config);
-    case 268: return std::make_unique<Mapper268>(config);
+    case 268: return createUnlicensedMapper(config);
     case 246: return std::make_unique<Mapper246>(config);
     default: return std::make_unique<MapperFallback>(config);
     }
@@ -2577,9 +1472,7 @@ std::unique_ptr<Mapper> createMapper(const MapperConfig& config)
 
 bool mapperImplementationSupported(uint16_t mapper, uint8_t submapper)
 {
-    // For NES 2.0 variants that describe materially different hardware, do
-    // not silently claim support for submappers the implementation does not
-    // actually emulate. Submapper 0 remains the legacy/iNES-compatible path.
+
     switch (mapper) {
     case 1: return submapper == 0 || submapper == 5;
     case 155: return submapper == 0 || submapper == 5;

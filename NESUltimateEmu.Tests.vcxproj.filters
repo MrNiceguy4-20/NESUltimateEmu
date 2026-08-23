@@ -19,6 +19,9 @@
     <ClCompile Include="src\core\APU.cpp"><Filter>Core</Filter></ClCompile>
     <ClCompile Include="src\core\Cartridge.cpp"><Filter>Core</Filter></ClCompile>
     <ClCompile Include="src\core\Mapper.cpp"><Filter>Core</Filter></ClCompile>
+    <ClCompile Include="src\core\MapperNintendoDiscrete.cpp"><Filter>Core</Filter></ClCompile>
+    <ClCompile Include="src\core\MapperMmc1.cpp"><Filter>Core</Filter></ClCompile>
+    <ClCompile Include="src\core\MapperMmc3.cpp"><Filter>Core</Filter></ClCompile>
     <ClCompile Include="tests\probes\PpuConformanceProbe.cpp">
       <Filter>Tests\Probes</Filter>
     </ClCompile>
@@ -56,5 +59,14 @@
     <ClCompile Include="tests\probes\DmaArbitrationProbe.cpp">
       <Filter>Source Files\tests\probes</Filter>
     </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\core\MapperMmc5.cpp"><Filter>Source Files</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\core\MapperNamco.cpp"><Filter>Source Files</Filter></ClCompile>
+<ClCompile Include="src\core\MapperVrc.cpp"><Filter>Source Files</Filter></ClCompile>
+<ClCompile Include="src\core\MapperSunsoft.cpp"><Filter>Source Files</Filter></ClCompile>
+<ClCompile Include="src\core\MapperUnlicensed.cpp"><Filter>Source Files</Filter></ClCompile>
   </ItemGroup>
 </Project>

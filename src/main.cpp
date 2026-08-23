@@ -25,7 +25,7 @@ int main(int, char**)
     );
 
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1,
-        SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+        SDL_RENDERER_ACCELERATED);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -34,7 +34,6 @@ int main(int, char**)
     ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer2_Init(renderer);
 
-    // Heap-allocate large components (PPU framebuffer alone is ~240 KB)
     auto bus = std::make_unique<Bus>();
     auto cpu = std::make_unique<CPU>(*bus);
     auto ppu = std::make_unique<PPU>();
@@ -70,16 +69,3 @@ int main(int, char**)
     SDL_Quit();
     return 0;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-

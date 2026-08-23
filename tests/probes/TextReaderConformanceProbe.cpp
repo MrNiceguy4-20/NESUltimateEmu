@@ -67,10 +67,6 @@ int runTextReaderConformanceProbe()
         return 4;
     }
 
-
-    // Dialogue-region extraction must ignore otherwise-valid text outside the
-    // configured speech box. This is the invariant that prevents status and
-    // command menus from being read aloud by profile-specific voice capture.
     std::array<uint8_t, 960> region{};
     region.fill(0x5F);
     auto putRegion = [&](int row, int col, const std::string& text) {
@@ -92,7 +88,7 @@ int runTextReaderConformanceProbe()
     }
 
     std::array<uint8_t, 960> zelda{};
-    zelda.fill(0x24); // non-text tile for Zelda profile
+    zelda.fill(0x24);
     auto putZelda = [&](int row, int col, const std::string& text) {
         for (std::size_t i = 0; i < text.size(); ++i) {
             const char ch = text[i];
@@ -110,16 +106,12 @@ int runTextReaderConformanceProbe()
         return 6;
     }
 
-    // DW1 can expose cleared nametable bytes as tile 00, which decodes to the
-    // glyph '0'. Numeric-only transition/background captures are not speech.
     if (hasDialogueLanguage("0000000000") || !hasDialogueLanguage("Welcome 000", 2) ||
         looksLikeSpokenDialogue("aa 0000000") || !looksLikeSpokenDialogue("Thou hast 120 gold.")) {
         std::cerr << "Dialogue language filter failed\n";
         return 7;
     }
 
-    // Scrolling text must emit only newly revealed words. These cases model
-    // both an accumulating DW2 box and the line-upward scroll transition.
     if (novelDialogueText("Brave warrior", "Brave warrior Welcome friend") != "Welcome friend" ||
         novelDialogueText("First line Second line", "Second line Third line") != "Third line" ||
         novelDialogueText("First line\nSecond line", "Second line\nThird line") != "Third line" ||

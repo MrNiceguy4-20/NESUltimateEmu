@@ -30,24 +30,18 @@ int runDmcApuConflictProbe(const std::string& romPath) {
     if (!m.cart.loadFromFile(romPath) || !m.cart.mapperSupported()) return 2;
     m.bus.powerOn();
 
-    // Low 5 DMA bits = $15 while CPU is halted in $4000-$401F must activate $4015.
     if (!reach4000(m)) return 1;
     m.apu.testSetFrameIrqFlag(true);
-    m.bus.testSetInternalDataBus(0x00); // D5 must remain clear across DMC external GET
+    m.bus.testSetInternalDataBus(0x00);
     if (!m.bus.requestDmcDma(0xC015)) return 1;
     while (m.bus.dmcDmaActive()) m.bus.clock();
-    // A $4015 activation requests the acknowledge on the DMA GET itself; the
-    // frame IRQ latch clears on the following APU GET transition rather than
-    // combinationally inside the register read. Allow that transition here,
-    // matching AccuracyCoin's double-read phase test.
+
     if (m.apu.testFrameIrqFlag()) m.bus.clock();
     if (m.apu.testFrameIrqFlag()) {
         std::cerr << "$4015 conflict did not clear frame IRQ\n";
         return 1;
     }
-    // The DMA byte ($A5, D5=1) is visible externally, but a conflicting
-    // internal $4015 activation must not copy that D5 into the 2A03 internal
-    // data latch. Prime the internal latch with D5=0 before the DMA.
+
     const uint8_t extLatch = m.bus.testExternalDataBus();
     const uint8_t intLatch = m.bus.testInternalDataBus();
     if (extLatch != 0xA5 || (intLatch & 0x20) != 0) {
@@ -61,13 +55,12 @@ int runDmcApuConflictProbe(const std::string& romPath) {
         return 1;
     }
 
-    // Low 5 DMA bits = $16 activates controller 1 even though the CPU read is $4000.
-    m.bus.setController1(0x02); // A=0, B=1
+    m.bus.setController1(0x02);
     m.bus.testLatchControllers();
     if (!reach4000(m)) return 1;
     if (!m.bus.requestDmcDma(0xC016)) return 1;
     while (m.bus.dmcDmaActive()) m.bus.clock();
-    const uint8_t conflicted = m.bus.read(0x4000); // releases controller select
+    const uint8_t conflicted = m.bus.read(0x4000);
     const uint8_t next = m.bus.read(0x4016);
     if ((conflicted & 1) != 0 || (next & 1) != 1) {
         std::cerr << "$4016 activation mismatch conflict=" << unsigned(conflicted)

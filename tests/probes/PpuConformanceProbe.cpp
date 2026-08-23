@@ -8,10 +8,7 @@ void setV(PPU& p, uint16_t v)
 {
     p.cpuWrite(0x2006, static_cast<uint8_t>((v >> 8) & 0x3F));
     p.cpuWrite(0x2006, static_cast<uint8_t>(v & 0xFF));
-    // A real CPU cannot issue the following PPU register access before the
-    // second $2006 write has propagated through these ~5 PPU dots. Direct
-    // probe calls can, so settle the transfer here unless a test explicitly
-    // targets the delay itself.
+
     for (int i = 0; i < 5; ++i) p.clock();
 }
 
@@ -37,8 +34,6 @@ RegionalVblankRaceResult probeRegionalVblankRace(ConsoleTiming timing)
     const int vblankLine = consoleVblankStartScanline(timing);
     RegionalVblankRaceResult result;
 
-    // Dot 0: the read still observes VBlank clear and prevents the dot-1
-    // assertion/NMI from occurring for this frame.
     {
         Bus bus;
         CPU cpu(bus);
@@ -59,8 +54,6 @@ RegionalVblankRaceResult probeRegionalVblankRace(ConsoleTiming timing)
                               !cpu.testNmiPending();
     }
 
-    // Dot 1: the read returns VBlank set, but the pulse is suppressed before
-    // the CPU can commit the NMI.
     {
         Bus bus;
         CPU cpu(bus);
@@ -80,8 +73,6 @@ RegionalVblankRaceResult probeRegionalVblankRace(ConsoleTiming timing)
                                  !cpu.testNmiPending();
     }
 
-    // One dot after assertion: VBlank reads set and the still-short NMI pulse
-    // is cancelable by the status read.
     {
         Bus bus;
         CPU cpu(bus);
@@ -101,8 +92,6 @@ RegionalVblankRaceResult probeRegionalVblankRace(ConsoleTiming timing)
                                 !cpu.testNmiPending();
     }
 
-    // Two dots after assertion: the CPU has committed the edge. Reading
-    // PPUSTATUS still clears VBlank, but must not retract the pending NMI.
     {
         Bus bus;
         CPU cpu(bus);
@@ -134,7 +123,6 @@ int runPpuConformanceProbe()
     PPU p;
     p.testBypassRegisterWriteInhibit();
 
-    // Outside rendering, PPUDATA obeys PPUCTRL's linear +1/+32 increment.
     p.cpuWrite(0x2001, 0x00);
     p.cpuWrite(0x2000, 0x00);
     setV(p, 0x2000);
@@ -146,11 +134,6 @@ int runPpuConformanceProbe()
     (void)p.cpuRead(0x2007);
     const bool linear32 = p.testVramAddress() == 0x2020;
 
-    // PPUMASK background/sprite enable does not reach the rendering pipeline
-    // immediately. The hardware-tested deterministic model uses a three-PPU-dot delay.
-    // Register bits are accepted at once, while rendering remains off for the
-    // first two dots and becomes active on the third. Disable follows the
-    // same propagation path.
     PPU maskDelay;
     maskDelay.testBypassRegisterWriteInhibit();
     maskDelay.cpuWrite(0x2001, 0x18);
@@ -171,9 +154,6 @@ int runPpuConformanceProbe()
         disableHeld ? "PASS" : "FAIL", disableApplied ? "PASS" : "FAIL");
     ok &= delayArmed && enableHeld && enableApplied && disableHeld && disableApplied;
 
-    // The second PPUADDR write updates t immediately but the active v/address
-    // bus receives the completed address five PPU dots later in the CPU/PPU
-    // phase modeled by the default RP2C02G profile.
     PPU addrDelay;
     addrDelay.testBypassRegisterWriteInhibit();
     addrDelay.testClearFetchTrace();
@@ -196,17 +176,13 @@ int runPpuConformanceProbe()
         addrBusVisibleThirdDot ? "PASS" : "FAIL");
     ok &= firstWriteLeavesV && addrDelayArmed && addrHeldTwoDots && addrAppliedThirdDot && addrBusVisibleThirdDot;
 
-    // If that delayed reload lands on a rendering increment dot, the 2C02's
-    // internal buses fight. Only the component being incremented is affected:
-    // it becomes the bitwise AND of the incremented old-v input and the t-load
-    // input, and that corrupted component feeds back into both v and t.
     PPU xConflict;
     xConflict.testBypassRegisterWriteInhibit();
     xConflict.testForceEffectiveRenderMask(0x08);
     xConflict.testSetScrollAddresses(0x0000, 0x0000);
     xConflict.cpuWrite(0x2006, 0x24);
     xConflict.cpuWrite(0x2006, 0x13);
-    xConflict.testSetTimingPosition(0, 4); // five-dot transfer applies on dot 8
+    xConflict.testSetTimingPosition(0, 4);
     for (int i = 0; i < 5; ++i) xConflict.clock();
     const bool xConflictV = xConflict.testVramAddress() == 0x2001;
     const bool xConflictT = xConflict.testTempVramAddress() == 0x2001;
@@ -217,7 +193,7 @@ int runPpuConformanceProbe()
     xyConflict.testSetScrollAddresses(0x0000, 0x0000);
     xyConflict.cpuWrite(0x2006, 0x34);
     xyConflict.cpuWrite(0x2006, 0x13);
-    xyConflict.testSetTimingPosition(0, 252); // five-dot transfer applies on dot 256
+    xyConflict.testSetTimingPosition(0, 252);
     for (int i = 0; i < 5; ++i) xyConflict.clock();
     const bool xyConflictV = xyConflict.testVramAddress() == 0x1001;
     const bool xyConflictT = xyConflict.testTempVramAddress() == 0x1001;
@@ -227,9 +203,6 @@ int runPpuConformanceProbe()
         xyConflictV ? "PASS" : "FAIL", xyConflictT ? "PASS" : "FAIL");
     ok &= xConflictV && xConflictT && xyConflictV && xyConflictT;
 
-    // During visible/pre-render rendering, PPUDATA's rendering-carry increment
-    // reaches v only after its internal propagation delay. PPUCTRL's +1/+32
-    // selection is ignored for this update.
     PPU dataDelay;
     dataDelay.testBypassRegisterWriteInhibit();
     dataDelay.testForceEffectiveRenderMask(0x08);
@@ -242,8 +215,6 @@ int runPpuConformanceProbe()
     dataDelay.clock();
     const bool renderReadIncrement = dataDelay.testVramAddress() == 0x3001;
 
-    // Alternate CPU/PPU master-clock alignment delays the same rendering-time
-    // PPUDATA increment by one additional PPU dot (6 instead of 5).
     PPU dataDelayLate;
     dataDelayLate.testBypassRegisterWriteInhibit();
     dataDelayLate.testForceEffectiveRenderMask(0x08);
@@ -270,13 +241,11 @@ int runPpuConformanceProbe()
     dataWrap.testBypassRegisterWriteInhibit();
     dataWrap.testForceEffectiveRenderMask(0x08);
     dataWrap.testSetTimingPosition(0, 270);
-    dataWrap.testSetScrollAddresses(0x33BF, 0x33BF); // fineY=3, coarseY=29, coarseX=31
+    dataWrap.testSetScrollAddresses(0x33BF, 0x33BF);
     (void)dataWrap.cpuRead(0x2007);
     for (int i = 0; i < 6; ++i) dataWrap.clock();
     const bool renderWrap = dataWrap.testVramAddress() == 0x47A0;
 
-    // A delayed PPUDATA increment that arrives on dot 257 fights the horizontal
-    // t->v reload. The X component is ANDed and fed back into t.
     PPU dataXConflict;
     dataXConflict.testBypassRegisterWriteInhibit();
     dataXConflict.testForceEffectiveRenderMask(0x08);
@@ -287,8 +256,6 @@ int runPpuConformanceProbe()
     const bool dataXConflictV = (dataXConflict.testVramAddress() & 0x041F) == 0x0001;
     const bool dataXConflictT = (dataXConflict.testTempVramAddress() & 0x041F) == 0x0001;
 
-    // On pre-render dots 280-304 the same mechanism applies to the vertical
-    // component while the horizontal component remains from the increment.
     PPU dataYConflict;
     dataYConflict.testBypassRegisterWriteInhibit();
     dataYConflict.testForceEffectiveRenderMask(0x08);
@@ -313,8 +280,6 @@ int runPpuConformanceProbe()
         renderLateArmed && renderLateHeldFive && renderLateIncrement && renderWriteIncrement &&
         renderWrap && dataXConflictV && dataXConflictT && dataYConflictV && dataYConflictT;
 
-    // Frame-complete is raised when entering the pre-render scanline. The first
-    // such pre-render after power-on is marked odd by this implementation.
     PPU timing;
     timing.testBypassRegisterWriteInhibit();
     timing.cpuWrite(0x2001, 0x08);
@@ -348,11 +313,6 @@ int runPpuConformanceProbe()
 
     ok &= entersPreRenderAtDot0 && nextPreRenderAtDot0 && oddSkipAtEnd && evenFullLength;
 
-    // End-of-scanline bus sequencing: after the two background-prefetch tiles
-    // (321-336), the PPU performs two otherwise-unused nametable reads at
-    // dots 337 and 339. Both must be mapper-visible and use the same current
-    // nametable address; there are no additional external reads at 338/340 in
-    // this core's one-read-per-two-dot bus representation.
     PPU fetchTiming;
     fetchTiming.testBypassRegisterWriteInhibit();
     fetchTiming.cpuWrite(0x2001, 0x08);
@@ -381,16 +341,13 @@ int runPpuConformanceProbe()
         dot337Count, dot339Count, otherTailCount);
     ok &= tailFetches;
 
-    // VBlank race: reading PPUSTATUS on dot 0 immediately before the flag is
-    // asserted on dot 1 suppresses both the flag and the corresponding NMI
-    // for that frame. A normal entry without the dot-0 read must still set it.
     PPU vblankNormal;
     vblankNormal.testBypassRegisterWriteInhibit();
     while (!(vblankNormal.scanline() == consoleVblankStartScanline(ConsoleTiming::NTSC) &&
              vblankNormal.cycle() == 0))
         vblankNormal.clock();
-    vblankNormal.clock(); // dot 0 -> dot 1
-    vblankNormal.clock(); // execute dot 1 VBlank set
+    vblankNormal.clock();
+    vblankNormal.clock();
     const bool normalVblankSet = (vblankNormal.testStatus() & 0x80) != 0;
 
     PPU vblankSuppressed;
@@ -399,8 +356,8 @@ int runPpuConformanceProbe()
              vblankSuppressed.cycle() == 0))
         vblankSuppressed.clock();
     const uint8_t beforeVblank = vblankSuppressed.cpuRead(0x2002);
-    vblankSuppressed.clock(); // dot 0 -> dot 1
-    vblankSuppressed.clock(); // dot 1 attempts to set VBlank
+    vblankSuppressed.clock();
+    vblankSuppressed.clock();
     const bool dot0ReadWasClear = (beforeVblank & 0x80) == 0;
     const bool dot0SuppressedVblank = (vblankSuppressed.testStatus() & 0x80) == 0;
 
@@ -410,14 +367,9 @@ int runPpuConformanceProbe()
         dot0SuppressedVblank ? "PASS" : "FAIL");
     ok &= normalVblankSet && dot0ReadWasClear && dot0SuppressedVblank;
 
-    // Complete the $2002/VBlank race window. A read on the exact set dot must
-    // return VBlank=1 even though this scheduler has not yet executed dot 1;
-    // it then suppresses the frame's NMI/flag. A read one dot after the set
-    // sees 1 and remains inside the cancelable NMI window. By two dots after,
-    // the edge is committed and the special cancellation window is over.
     PPU vblankSameDot;
     vblankSameDot.testBypassRegisterWriteInhibit();
-    vblankSameDot.cpuWrite(0x2000, 0x80); // enable NMI output for cancellation-window checks
+    vblankSameDot.cpuWrite(0x2000, 0x80);
     while (!(vblankSameDot.scanline() == consoleVblankStartScanline(ConsoleTiming::NTSC) &&
              vblankSameDot.cycle() == 1))
         vblankSameDot.clock();
@@ -428,23 +380,23 @@ int runPpuConformanceProbe()
 
     PPU vblankPlusOne;
     vblankPlusOne.testBypassRegisterWriteInhibit();
-    vblankPlusOne.cpuWrite(0x2000, 0x80); // enable NMI output for cancellation-window checks
+    vblankPlusOne.cpuWrite(0x2000, 0x80);
     while (!(vblankPlusOne.scanline() == consoleVblankStartScanline(ConsoleTiming::NTSC) &&
              vblankPlusOne.cycle() == 1))
         vblankPlusOne.clock();
-    vblankPlusOne.clock(); // execute dot 1 set; now positioned at dot 2
+    vblankPlusOne.clock();
     const bool oneDotWindowOpen = vblankPlusOne.testNmiCancelWindow() == 1;
     const uint8_t plusOneStatus = vblankPlusOne.cpuRead(0x2002);
     const bool plusOneReadsSet = (plusOneStatus & 0x80) != 0;
 
     PPU vblankPlusTwo;
     vblankPlusTwo.testBypassRegisterWriteInhibit();
-    vblankPlusTwo.cpuWrite(0x2000, 0x80); // enable NMI output for cancellation-window checks
+    vblankPlusTwo.cpuWrite(0x2000, 0x80);
     while (!(vblankPlusTwo.scanline() == consoleVblankStartScanline(ConsoleTiming::NTSC) &&
              vblankPlusTwo.cycle() == 1))
         vblankPlusTwo.clock();
-    vblankPlusTwo.clock(); // dot 1 set -> dot 2, cancel window = 1
-    vblankPlusTwo.clock(); // execute dot 2 -> dot 3, window expires
+    vblankPlusTwo.clock();
+    vblankPlusTwo.clock();
     const bool twoDotWindowClosed = vblankPlusTwo.testNmiCancelWindow() == 0;
     const uint8_t plusTwoStatus = vblankPlusTwo.cpuRead(0x2002);
     const bool plusTwoReadsSetNormally = (plusTwoStatus & 0x80) != 0;
@@ -461,10 +413,6 @@ int runPpuConformanceProbe()
         twoDotWindowClosed ? "PASS" : "FAIL");
     ok &= vblankRaceWindow;
 
-    // The local VBlank/$2002 race is a PPU property and must remain identical
-    // across the supported NTSC, PAL, and Dendy frame geometries. Keep this
-    // as an integrated PPU+CPU assertion so a future regional timing change
-    // cannot accidentally alter NMI cancellation semantics.
     const RegionalVblankRaceResult ntscRace = probeRegionalVblankRace(ConsoleTiming::NTSC);
     const RegionalVblankRaceResult palRace = probeRegionalVblankRace(ConsoleTiming::PAL);
     const RegionalVblankRaceResult dendyRace = probeRegionalVblankRace(ConsoleTiming::Dendy);
@@ -478,11 +426,6 @@ int runPpuConformanceProbe()
         racePass(dendyRace) ? "PASS" : "FAIL");
     ok &= regionalVblankRace;
 
-    // PPUCTRL NMI-output edge behavior while VBlank is already active.
-    // The PPU's /NMI output is (vblank_flag && PPUCTRL.7), so enabling bit 7
-    // during VBlank must create an immediate edge. Disabling it inside the
-    // one-dot cancellation window can withdraw an asynchronous edge; enabling
-    // it again must create a fresh edge, allowing multiple NMIs in one VBlank.
     Bus nmiBus;
     CPU nmiCpu(nmiBus);
     PPU nmiCtrl;
@@ -493,7 +436,7 @@ int runPpuConformanceProbe()
     while (!(nmiCtrl.scanline() == consoleVblankStartScanline(ConsoleTiming::NTSC) &&
              nmiCtrl.cycle() == 1))
         nmiCtrl.clock();
-    nmiCtrl.clock(); // VBlank flag sets with NMI output disabled.
+    nmiCtrl.clock();
     const bool noEdgeWhileDisabled = !nmiCpu.testNmiPending();
 
     nmiCtrl.cpuWrite(0x2000, 0x80);
@@ -503,9 +446,6 @@ int runPpuConformanceProbe()
     nmiCtrl.cpuWrite(0x2000, 0x80);
     const bool reenableCreatesFreshEdge = nmiCpu.testNmiPending() && nmiCtrl.testNmiCancelWindow() == 1;
 
-    // A disable one PPU dot after the edge is still inside the short-pulse
-    // cancellation window. Two dots after, the edge is committed and lowering
-    // PPUCTRL.7 must not erase the CPU's already-latched NMI.
     Bus nmiPlusOneBus;
     CPU nmiPlusOneCpu(nmiPlusOneBus);
     PPU nmiPlusOne;
@@ -513,11 +453,11 @@ int runPpuConformanceProbe()
     nmiPlusOneBus.connectPPU(&nmiPlusOne);
     nmiPlusOne.connectCPU(&nmiPlusOneCpu);
     nmiPlusOne.testBypassRegisterWriteInhibit();
-    nmiPlusOne.cpuWrite(0x2000, 0x80); // VBlank itself will create the edge.
+    nmiPlusOne.cpuWrite(0x2000, 0x80);
     while (!(nmiPlusOne.scanline() == consoleVblankStartScanline(ConsoleTiming::NTSC) &&
              nmiPlusOne.cycle() == 1))
         nmiPlusOne.clock();
-    nmiPlusOne.clock(); // execute VBlank-set dot; now at +1 with window open
+    nmiPlusOne.clock();
     nmiPlusOne.cpuWrite(0x2000, 0x00);
     const bool disablePlusOneCancels = !nmiPlusOneCpu.testNmiPending();
 
@@ -528,12 +468,12 @@ int runPpuConformanceProbe()
     nmiPlusTwoBus.connectPPU(&nmiPlusTwo);
     nmiPlusTwo.connectCPU(&nmiPlusTwoCpu);
     nmiPlusTwo.testBypassRegisterWriteInhibit();
-    nmiPlusTwo.cpuWrite(0x2000, 0x80); // VBlank itself will create the edge.
+    nmiPlusTwo.cpuWrite(0x2000, 0x80);
     while (!(nmiPlusTwo.scanline() == consoleVblankStartScanline(ConsoleTiming::NTSC) &&
              nmiPlusTwo.cycle() == 1))
         nmiPlusTwo.clock();
-    nmiPlusTwo.clock(); // +1, cancelable
-    nmiPlusTwo.clock(); // +2, window expired
+    nmiPlusTwo.clock();
+    nmiPlusTwo.clock();
     nmiPlusTwo.cpuWrite(0x2000, 0x00);
     const bool disablePlusTwoCommitted = nmiPlusTwoCpu.testNmiPending();
 
@@ -549,20 +489,15 @@ int runPpuConformanceProbe()
         disablePlusTwoCommitted ? "PASS" : "FAIL");
     ok &= nmiCtrlEdges;
 
-    // Pre-render status clear boundary. VBlank, sprite-0 hit, and sprite
-    // overflow remain latched through pre-render dot 0 and are all cleared
-    // together when dot 1 executes. A PPUSTATUS read immediately before that
-    // hardware clear may clear VBlank itself, but must leave the two sprite
-    // flags alone until the dot-1 clear event.
     PPU preRenderStatus;
     preRenderStatus.testBypassRegisterWriteInhibit();
     while (!(preRenderStatus.scanline() == -1 && preRenderStatus.cycle() == 0))
         preRenderStatus.clock();
     preRenderStatus.testSetStatusFlags(0xE0);
     const bool preDot0AllSet = (preRenderStatus.testStatus() & 0xE0) == 0xE0;
-    preRenderStatus.clock(); // execute dot 0 -> positioned at dot 1
+    preRenderStatus.clock();
     const bool beforeDot1AllSet = (preRenderStatus.testStatus() & 0xE0) == 0xE0;
-    preRenderStatus.clock(); // execute dot 1 clear -> positioned at dot 2
+    preRenderStatus.clock();
     const bool afterDot1AllClear = (preRenderStatus.testStatus() & 0xE0) == 0x00;
 
     PPU preRenderRead;
@@ -570,15 +505,12 @@ int runPpuConformanceProbe()
     while (!(preRenderRead.scanline() == -1 && preRenderRead.cycle() == 0))
         preRenderRead.clock();
     preRenderRead.testSetStatusFlags(0xE0);
-    preRenderRead.clock(); // dot 0 -> dot 1, flags still set
+    preRenderRead.clock();
     const uint8_t preClearRead = preRenderRead.cpuRead(0x2002);
-    // A CPU read beginning on pre-render dot 1 samples the cleared status by
-    // M2 fall. The internal dot-1 clear itself has not executed yet in this
-    // direct probe, so only the CPU read side effect (VBlank clear) is visible
-    // in m_status until the next PPU clock.
+
     const bool readSeesBoundaryClear = (preClearRead & 0xE0) == 0x00;
     const bool readOnlyClearsVblank = (preRenderRead.testStatus() & 0xE0) == 0x60;
-    preRenderRead.clock(); // hardware dot-1 clear removes sprite flags too
+    preRenderRead.clock();
     const bool hardwareClearFinishes = (preRenderRead.testStatus() & 0xE0) == 0x00;
 
     const bool preRenderClear = preDot0AllSet && beforeDot1AllSet && afterDot1AllClear &&
@@ -592,9 +524,6 @@ int runPpuConformanceProbe()
         hardwareClearFinishes ? "PASS" : "FAIL");
     ok &= preRenderClear;
 
-    // PPU reset warm-up: $2000/$2001/$2005/$2006 remain inhibited until
-    // the internal reset signal releases. Ignored $2005/$2006 writes must not
-    // advance the shared write toggle. Other ports remain usable immediately.
     PPU warmup;
     const bool warmupStartsInhibited = warmup.testRegisterWriteInhibited();
     warmup.cpuWrite(0x2005, 0x17);
@@ -632,9 +561,6 @@ int runPpuConformanceProbe()
           liveOamDuringWarmup && stillInhibitedBeforeBoundary && boundaryMinusOneIgnored &&
           releasedAtBoundary && acceptedAfterBoundary && palBeforeBoundary && palAtBoundary;
 
-    // PAL and Dendy swap PPUMASK's red/green emphasis controls relative to
-    // NTSC. With the same base palette entry, NTSC bit 5 must match PAL/Dendy
-    // bit 6, and NTSC bit 6 must match PAL/Dendy bit 5.
     PPU ntscColor; ntscColor.testBypassRegisterWriteInhibit();
     ntscColor.cpuWrite(0x2001, 0x20);
     const uint32_t ntscRed = ntscColor.testColor(0x21);
@@ -658,10 +584,6 @@ int runPpuConformanceProbe()
     std::printf("region_emphasis_swap=%s\n", emphasisSwap ? "PASS" : "FAIL");
     ok &= emphasisSwap;
 
-    // Sprite-0 hit timing/eligibility. X=0 (cycle 1) can hit when PPUMASK's
-    // left-edge enables expose both pixels; X=255 (cycle 256) never hits.
-    // Left-edge masking and transparent pixels reach this rule as zero-valued
-    // pixels, while sprite priority is intentionally absent from the condition.
     PPU spriteHitRules;
     const bool spriteHitCycle1Allowed = spriteHitRules.testSpriteZeroHitRule(1, true, true, true);
     const bool spriteHitCycle2Allowed = spriteHitRules.testSpriteZeroHitRule(2, true, true, true);
@@ -680,8 +602,6 @@ int runPpuConformanceProbe()
         spriteHitNonZeroIdentityRequired ? "PASS" : "FAIL");
     ok &= spriteHitRulesOk;
 
-    // Exercise the real renderer, including PPUMASK left-edge clipping.
-    // The hit flag must become visible only after the collision dot executes.
     auto renderHitAt = [](int cycle, uint8_t mask, bool bgOpaque = true, bool spriteOpaque = true) {
         PPU p;
         p.testPrimeSpriteZeroHitPixel(cycle, mask, bgOpaque, spriteOpaque);
@@ -720,9 +640,6 @@ int runPpuConformanceProbe()
         rendererTransparentBg && rendererTransparentSprite ? "PASS" : "FAIL");
     ok &= spriteHitRendererOk;
 
-    // AccuracyCoin OAM Y=$EE (238) appears on the final visible scanline 239.
-    // The collision circuit must therefore still operate on scanline 239,
-    // while scanline 240 is outside the visible picture and cannot hit.
     auto renderHitAtScanline = [](int scanline) {
         PPU p;
         p.testPrimeSpriteZeroHitPixel(20, kRenderBoth | kShowBgLeft | kShowSpriteLeft, true, true, scanline);
@@ -735,9 +652,6 @@ int runPpuConformanceProbe()
         spriteHitLastVisible ? "PASS" : "FAIL", spriteHitPostVisibleSuppressed ? "PASS" : "FAIL");
     ok &= spriteHitLastVisible && spriteHitPostVisibleSuppressed;
 
-    // AccuracyCoin documents the physical 2C02 pattern serial inputs: low
-    // bitplane shifts in 0, high bitplane shifts in 1. The external ROM test
-    // reveals the high-plane 1 by forcing blank across the normal reload.
     PPU bgSerial;
     bgSerial.testForceEffectiveRenderMask(0x08);
     bgSerial.testSetBackgroundPatternShifters(0, 0);
@@ -747,16 +661,10 @@ int runPpuConformanceProbe()
     std::printf("bg_serial_in=lo0:%s hi1:%s\n", bgSerialLo ? "PASS" : "FAIL", bgSerialHi ? "PASS" : "FAIL");
     ok &= bgSerialLo && bgSerialHi;
 
-
-    // Sprite overflow follows the 2C02's diagonal OAM scan bug after the first
-    // eight in-range sprites fill secondary OAM. This produces both false
-    // positives (a non-Y byte is interpreted as Y) and false negatives (a real
-    // ninth sprite's Y byte is skipped). Exercise the actual timed evaluator.
     auto overflowCase = [](int mode) {
         PPU p;
         p.testBypassRegisterWriteInhibit();
 
-        // Fill OAM with values that are safely out of range for scanline 20.
         p.cpuWrite(0x2003, 0x00);
         for (unsigned i = 0; i < 256; ++i)
             p.cpuWrite(0x2004, 0xF0);
@@ -769,27 +677,22 @@ int runPpuConformanceProbe()
             p.cpuWrite(0x2004, x);
         };
 
-        // Eight ordinary in-range sprites fill secondary OAM.
         for (unsigned n = 0; n < 8; ++n)
             writeSprite(n, 20, 0xF0, 0xF0, 0xF0);
 
         if (mode == 0) {
-            // Reliable true overflow: the immediately following sprite is in range.
+
             writeSprite(8, 20, 0xF0, 0xF0, 0xF0);
         } else if (mode == 1) {
-            // False positive: sprite 8 Y is out of range, then the diagonal scan
-            // treats sprite 9's tile byte as a Y coordinate and finds it in range.
+
             writeSprite(8, 0xF0, 0xF0, 0xF0, 0xF0);
             writeSprite(9, 0xF0, 20, 0xF0, 0xF0);
         } else {
-            // False negative: there really is a ninth in-range sprite at #9, but
-            // after sprite 8 misses the diagonal scan checks #9's tile, not its Y.
+
             writeSprite(8, 0xF0, 0xF0, 0xF0, 0xF0);
             writeSprite(9, 20, 0xF0, 0xF0, 0xF0);
         }
 
-        // Normal gameplay resets OAMADDR before rendering. Keep this overflow
-        // test isolated from the separate 2C02 rendering-start row-copy bug.
         p.cpuWrite(0x2003, 0x00);
         p.cpuWrite(0x2001, 0x18);
         while (!(p.scanline() == 20 && p.cycle() == 65))

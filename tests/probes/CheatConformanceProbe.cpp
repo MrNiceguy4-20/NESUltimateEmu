@@ -53,19 +53,16 @@ int runCheatConformanceProbe()
         check(cheats.setEntryEnabled(0, true), "re-enable Game Genie entry");
     }
 
-
     if (cheats.entries().size() >= 3) {
         check(cheats.setEntryEnabled(2, true), "enable raw CPU entry");
         check(cheats.applyRawCpuRead(0x0025, 0x00) == 0x63, "raw address:value cheat overrides CPU read");
         check(cheats.applyRawCpuRead(0x0026, 0x44) == 0x44, "raw cheat leaves other addresses untouched");
     }
 
-    // Verify the cartridge path itself applies Game Genie substitution after
-    // mapper translation, which is required for bank-switched PRG reads.
     std::vector<uint8_t> rom(16 + 0x4000 + 0x2000, 0);
     rom[0] = 'N'; rom[1] = 'E'; rom[2] = 'S'; rom[3] = 0x1A;
     rom[4] = 1; rom[5] = 1;
-    rom[16 + 0x11DD] = 0x99; // $D1DD in mirrored 16 KiB NROM PRG
+    rom[16 + 0x11DD] = 0x99;
     Cartridge cart;
     check(cart.loadFromMemory(rom, "CheatProbe.nes"), "load synthetic NROM for cartridge cheat path");
     check(cart.cheats().loadFromFile(path.string()), "attach cheat database to cartridge");

@@ -57,9 +57,7 @@ public:
     void ejectDisk() { if (m_mapper) m_mapper->ejectDisk(); }
 
     uint8_t cpuRead(uint16_t addr);
-    // Returns true only when cartridge hardware actually drives the CPU bus.
-    // Expansion space such as $4020-$5FFF is often physically unhandled and
-    // must remain CPU open bus instead of being forced to zero.
+
     bool cpuRead(uint16_t addr, uint8_t& data);
     void    cpuWrite(uint16_t addr, uint8_t data, uint64_t cpuCycle = ~uint64_t(0));
     void    observeCpuWrite(uint16_t addr, uint8_t data);
@@ -76,8 +74,7 @@ public:
     void clockCpu();
     void scanlineTick();
     void resetMapper(bool hard);
-    // iNES RAM-cartridge extracts can request a hard-reset bootstrap through
-    // their trainer. Returns true when CPU reset completion should redirect.
+
     bool hardResetBootstrap(uint16_t normalVector, uint16_t& entry, bool& jsr) const;
 
     void saveState(std::vector<uint8_t>& out) const;
@@ -98,7 +95,7 @@ private:
     std::vector<uint8_t> m_chrRom;
     std::vector<uint8_t> m_chrRam;
     std::vector<uint8_t> m_prgRam;
-    std::vector<uint8_t> m_identityData; // raw FDS image bytes; NES images use PRG/CHR below
+    std::vector<uint8_t> m_identityData;
 
     std::size_t m_prgNvRamSize = 0;
     std::size_t m_chrNvRamSize = 0;

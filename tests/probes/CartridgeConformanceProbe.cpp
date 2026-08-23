@@ -54,11 +54,8 @@ int runCartridgeConformanceProbe()
     bool ok = true;
     const auto root = tempRoot();
 
-    // Mapper 19 has 128 bytes of ASIC-internal sound RAM, but that RAM is
-    // battery-backed only when the cartridge header requests battery backup.
-    // Do not turn every N163 image into a save-bearing cartridge.
     auto n163Header = baseHeader(2, 1);
-    n163Header[6] = 0x30; // mapper 19 low nibble, battery bit clear
+    n163Header[6] = 0x30;
     n163Header[7] = 0x10;
     const auto n163VolatilePath = root / "n163_volatile.nes";
     Cartridge n163VolatileCart;
@@ -78,12 +75,10 @@ int runCartridgeConformanceProbe()
         n163VolatileCart.hasBattery() ? 1 : 0, n163BatteryCart.hasBattery() ? 1 : 0);
     ok &= n163NoImplicitBattery && n163ExplicitBattery;
 
-    // Archaic/dirty iNES: classic post-header garbage must not contribute the
-    // upper mapper nibble or byte-8 RAM extension.
     auto archaic = baseHeader(2, 0);
-    archaic[6] = 0x20; // mapper 2 low nibble
-    archaic[7] = 0x44; // 'D': garbage high mapper nibble + archaic version bits
-    archaic[8] = 0x69; // 'i': must not mean 105 x 8 KiB PRG RAM
+    archaic[6] = 0x20;
+    archaic[7] = 0x44;
+    archaic[8] = 0x69;
     archaic[12] = 'u'; archaic[13] = 'd'; archaic[14] = 'e'; archaic[15] = '!';
     const auto archaicPath = root / "archaic.nes";
     const bool archaicWritten = writeRom(archaicPath, archaic, 0x8000, 0);
@@ -96,10 +91,7 @@ int runCartridgeConformanceProbe()
         unsigned(archaicCart.mapper()), archaicCart.prgRamSize());
     ok &= archaicMapper && archaicRam;
 
-    // Phase 30 hash database: mapper 53 has two incompatible physical PRG
-    // dump orders. A CRC32 signature over the first 32 KiB selects the
-    // EPROM-first wiring without relying on filenames.
-    auto m53Header = baseHeader(0x88, 1); // 0x220000 PRG
+    auto m53Header = baseHeader(0x88, 1);
     m53Header[6] = 0x50; m53Header[7] = 0x30;
     std::vector<uint8_t> m53Prg(0x220000);
     for (std::size_t i=0;i<m53Prg.size();++i) m53Prg[i]=static_cast<uint8_t>(i/0x4000);
@@ -113,9 +105,6 @@ int runCartridgeConformanceProbe()
     std::printf("rom_database_mapper53=%s crc=%08X boot=%02X\n",m53Database?"PASS":"FAIL",RomDatabase::crc32(m53Prg.data(),0x8000),m53Loaded?m53Cart.cpuRead(0x8000):0);
     ok &= m53Database;
 
-    // Phase 31 database metadata corrections. These synthetic payloads have
-    // the verified PRG+CHR CRCs of the real cartridges, while deliberately
-    // carrying incomplete/wrong legacy iNES metadata.
     auto writeCrcPayload = [&](const std::filesystem::path& path, std::array<uint8_t,16> h,
                                std::size_t prg, std::size_t chr,
                                std::array<uint8_t,4> tail) {
@@ -152,7 +141,6 @@ int runCartridgeConformanceProbe()
         unsigned(fcCart.mapper()),unsigned(fcCart.submapper()),fcCart.prgRamSize());
     ok &= hdDb&&ccDb&&fcDb;
 
-    // Trainers initialize CPU $7000-$71FF before execution.
     auto trainerHeader = baseHeader(1, 0);
     trainerHeader[6] = 0x04;
     std::vector<uint8_t> trainer(512);
@@ -169,11 +157,9 @@ int runCartridgeConformanceProbe()
         trainerLoaded ? trainerCart.cpuRead(0x71FF) : 0);
     ok &= trainerMapped;
 
-    // Front Fareast RAM-cartridge extracts use the iNES trainer as a boot
-    // helper, but mapper 6/8/12.1 and mapper 17 have different conventions.
-    auto mc6Header = baseHeader(8, 0); // 128 KiB game image
-    mc6Header[6] = 0x64; // mapper 6 + trainer
-    std::vector<uint8_t> mcTrainer(512, 0xEA); mcTrainer[3] = 0x60; // RTS at $7003
+    auto mc6Header = baseHeader(8, 0);
+    mc6Header[6] = 0x64;
+    std::vector<uint8_t> mcTrainer(512, 0xEA); mcTrainer[3] = 0x60;
     const auto mc6Path = root / "magic_card6.nes";
     Cartridge mc6Cart;
     const bool mc6Loaded = writeRom(mc6Path, mc6Header, 0x20000, 0, &mcTrainer) && mc6Cart.loadFromFile(mc6Path.string());
@@ -182,10 +168,10 @@ int runCartridgeConformanceProbe()
         mc6Entry==0x7003 && mc6Jsr && mc6Cart.cpuRead(0x7003)==0x60 &&
         mc6Cart.prgRamSize()>=0x29000 && mc6Cart.chrRamSize()>=0x8000 && !mc6Cart.hasBattery();
 
-    auto smc17Header = baseHeader(0x20, 0); // 512 KiB PRG snapshot
-    smc17Header[6] = 0x14; // mapper 17 low nibble + trainer
-    smc17Header[7] = 0x18; // mapper high nibble 1 + NES2
-    smc17Header[8] = 0x10; // submapper 1 -> trainer at $5D00
+    auto smc17Header = baseHeader(0x20, 0);
+    smc17Header[6] = 0x14;
+    smc17Header[7] = 0x18;
+    smc17Header[8] = 0x10;
     const auto smc17Path = root / "super_magic17.nes";
     Cartridge smc17Cart;
     const bool smc17Loaded = writeRom(smc17Path,smc17Header,0x80000,0,&mcTrainer) && smc17Cart.loadFromFile(smc17Path.string());
@@ -197,9 +183,6 @@ int runCartridgeConformanceProbe()
         mc6Boot?"PASS":"FAIL",smc17Boot?"PASS":"FAIL",unsigned(mc6Entry),unsigned(smc17Entry));
     ok &= mc6Boot && smc17Boot;
 
-    // NES 2.0 cartridge metadata is part of save-state identity. Identical
-    // PRG/CHR bytes with a different hard-wired mirroring configuration must
-    // not accept each other's states.
     auto nes2a = baseHeader(1, 1);
     nes2a[7] = 0x08;
     auto nes2b = nes2a;
@@ -214,12 +197,11 @@ int runCartridgeConformanceProbe()
     std::printf("state_identity_metadata=%s\n", identitySeparatesMetadata ? "PASS" : "FAIL");
     ok &= identitySeparatesMetadata;
 
-    // NES 2.0 PRG+CHR NVRAM round-trip through the versioned battery format.
     auto batteryHeader = baseHeader(1, 0);
     batteryHeader[6] = 0x02;
     batteryHeader[7] = 0x08;
-    batteryHeader[10] = 0x70; // 8 KiB PRG NVRAM
-    batteryHeader[11] = 0x70; // 8 KiB CHR NVRAM
+    batteryHeader[10] = 0x70;
+    batteryHeader[11] = 0x70;
     const auto batteryPath = root / "battery.nes";
     const auto savePath = root / "battery.sav";
     std::error_code ec;
@@ -242,10 +224,6 @@ int runCartridgeConformanceProbe()
         batteryLoadedB ? batteryB.ppuRead(0x0123) : 0);
     ok &= batteryRoundTrip;
 
-
-    // NES 2.0 submappers 1/2 for UxROM explicitly select no-conflict vs
-    // AND-type bus-conflict hardware. The same CPU write must therefore pick
-    // bank 3 on submapper 1 but be masked to bank 0 by ROM byte $00 on submapper 2.
     auto uxNoConflictHeader = baseHeader(4, 0);
     uxNoConflictHeader[6] = 0x20; uxNoConflictHeader[7] = 0x08; uxNoConflictHeader[8] = 0x10;
     auto uxConflictHeader = uxNoConflictHeader; uxConflictHeader[8] = 0x20;
@@ -265,13 +243,10 @@ int runCartridgeConformanceProbe()
         uxLoaded ? uxNoConflict.cpuRead(0x8000) : 0, uxLoaded ? uxConflict.cpuRead(0x8000) : 0);
     ok &= busConflictSubmaps;
 
-    // Reset lifecycle reaches cartridge hardware through Bus. Mapper 116.3 is
-    // a five-game reset-select board: power-on selects game 0, soft Reset
-    // advances the outer ROM window, and powerOn returns to game 0.
-    auto reset116Header = baseHeader(0x30, 0x60); // 768 KiB PRG + 768 KiB CHR
+    auto reset116Header = baseHeader(0x30, 0x60);
     reset116Header[6] = 0x40;
-    reset116Header[7] = 0x78; // mapper 116 + NES 2.0 marker
-    reset116Header[8] = 0x30; // submapper 3
+    reset116Header[7] = 0x78;
+    reset116Header[8] = 0x30;
     const auto reset116Path = root / "mapper116_reset.nes";
     Cartridge reset116Cart;
     const bool reset116Loaded = writeRom(reset116Path, reset116Header, 0xC0000, 0xC0000, nullptr, true) &&
@@ -298,13 +273,9 @@ int runCartridgeConformanceProbe()
         reset116Banks[3], reset116Banks[4], reset116Banks[5], reset116Hard);
     ok &= mapperResetLifecycle;
 
-    // Cartridge loadState is transactional even when a mapper payload parses
-    // partially and then fails its exact-size check.
     auto uxromHeader = baseHeader(4, 0);
     uxromHeader[6] = 0x20;
-    // This probe validates transactional state loading, not bus conflicts.
-    // Declare NES 2.0 Mapper 2 submapper 1 so bank writes are explicitly
-    // conflict-free and independent of the byte currently driven by PRG ROM.
+
     uxromHeader[7] = 0x08;
     uxromHeader[8] = 0x10;
     const auto uxromPath = root / "state_txn.nes";
@@ -316,7 +287,7 @@ int runCartridgeConformanceProbe()
         stateCart.cpuWrite(0x8000, 2);
         std::vector<uint8_t> malformed;
         stateCart.saveState(malformed);
-        // Cartridge state: mapper id[2], submapper[1], mapper-size[4], mapper data...
+
         if (malformed.size() > 8 && malformed[3] == 1 && malformed[4] == 0 &&
             malformed[5] == 0 && malformed[6] == 0) {
             malformed[3] = 2;
@@ -333,9 +304,6 @@ int runCartridgeConformanceProbe()
         stateTransactional ? "PASS" : "FAIL", stateLoaded ? stateCart.cpuRead(0x8000) : 0);
     ok &= stateTransactional;
 
-    // Archive loading feeds cartridge images from memory. The parsing and ROM
-    // identity must be identical to loading the same iNES bytes from disk,
-    // even when the archive member uses a nonstandard extension.
     auto memoryHeader = baseHeader(2, 1);
     std::vector<uint8_t> memoryImage(memoryHeader.begin(), memoryHeader.end());
     memoryImage.resize(16 + 0x8000 + 0x2000);

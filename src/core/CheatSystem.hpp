@@ -24,14 +24,9 @@ class CheatSystem {
 public:
     void clear();
 
-    // Load RetroArch/libretro .cht entries for a ROM. Search order is the ROM
-    // directory's cheats/nes folder, then ./cheats/nes. Exact basename matches
-    // win; normalized title matching is a fallback for region-tagged databases.
     bool loadForRom(const std::string& romPath, const std::string& romFileName);
     bool loadFromFile(const std::string& path);
 
-    // Game Genie is physically in the cartridge bus path and may replace only
-    // reads in $8000-$FFFF. The mapper-provided byte is the compare source.
     uint8_t applyGameGenie(uint16_t address, uint8_t original) const;
     uint8_t applyRawCpuRead(uint16_t address, uint8_t original) const;
 

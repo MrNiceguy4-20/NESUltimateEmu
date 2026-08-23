@@ -45,10 +45,10 @@ int runDmcPpuConflictProbe(const std::string& romPath) {
     const bool align = !m.bus.dmaGetCycle();
     if (!m.bus.requestDmcDma(0xC000)) return 1;
     while (m.bus.dmcDmaActive()) m.bus.clock();
-    // DMC GET completed; CPU is still held for that slot. Resume the original read.
+
     m.bus.clock();
     const uint16_t v1 = m.ppu.testVramAddress();
-    const uint16_t expectedDelta = align ? 4 : 3; // halt + dummy + [align] + resumed CPU read
+    const uint16_t expectedDelta = align ? 4 : 3;
     const uint16_t actualDelta = static_cast<uint16_t>(v1 - v0);
     if (actualDelta != expectedDelta) {
         std::cerr << "$2007 v delta mismatch: got " << actualDelta
@@ -60,10 +60,10 @@ int runDmcPpuConflictProbe(const std::string& romPath) {
         std::cerr << "did not reach $2002 read\n";
         return 1;
     }
-    m.ppu.cpuWrite(0x2005, 0x12); // first scroll write sets w=1
+    m.ppu.cpuWrite(0x2005, 0x12);
     if (!m.ppu.testWriteToggle()) return 1;
     if (!m.bus.requestDmcDma(0xC000)) return 1;
-    m.bus.clock(); // DMC halt repeats the stalled $2002 read
+    m.bus.clock();
     if (m.ppu.testWriteToggle()) {
         std::cerr << "$2002 halt read did not clear PPU write toggle\n";
         return 1;

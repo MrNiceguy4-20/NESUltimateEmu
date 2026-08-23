@@ -19,11 +19,9 @@ GG = set("APZLGITYEOXUKSVN")
 RAW = re.compile(r"^[0-9A-Fa-f]{1,4}:[0-9A-Fa-f]{1,2}$")
 CODE = re.compile(r'^cheat\d+_code\s*=\s*"(.*)"\s*$')
 
-
 def supported_token(token: str) -> bool:
     token = token.strip().replace("-", "").upper()
     return (len(token) in (6, 8) and all(ch in GG for ch in token)) or bool(RAW.fullmatch(token))
-
 
 def file_has_supported_code(path: Path) -> bool:
     try:
@@ -37,7 +35,6 @@ def file_has_supported_code(path: Path) -> bool:
         if any(supported_token(part) for part in m.group(1).split("+")):
             return True
     return False
-
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -61,7 +58,6 @@ def main() -> int:
     print(f"Imported {copied} compatible NES cheat files; skipped {skipped} unsupported files.")
     print("Data source: libretro/libretro-database (CC-BY-SA-4.0).")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

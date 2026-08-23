@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <sstream>
 #include <limits>
+#include <cmath>
 #include "../core/CPU.hpp"
 #include "../core/Bus.hpp"
 #include "../core/Cartridge.hpp"
@@ -174,14 +175,12 @@ bool extractArchiveEntry(const std::string& archive, const std::string& entry,
     std::vector<uint8_t>& data)
 {
     DWORD code = 0;
-    // -O writes the selected member to stdout without touching the filesystem.
+
     return runTarCapture({ "-xOf", archive, "--", entry }, data,
         512u * 1024u * 1024u, code);
 }
 }
 #endif
-
-
 
 Frontend::Frontend(SDL_Window* window, SDL_Renderer* renderer,
     CPU& cpu, Bus& bus, Cartridge& cart, PPU& ppu, APU& apu)
@@ -205,6 +204,8 @@ Frontend::Frontend(SDL_Window* window, SDL_Renderer* renderer,
     setDefaultBindings();
     loadFrontendConfig();
     m_apu.setMasterVolume(m_masterVolume);
+    m_apu.setHostAudioEnabled(m_emulationSpeed == EmulationSpeed::Normal);
+    m_apu.setAudioPlaybackPaused(true);
     openGamepad();
 }
 
@@ -220,6 +221,10 @@ void Frontend::openGamepad()
 
 Frontend::~Frontend()
 {
+#ifdef _WIN32
+    if (m_systemSleepSuppressed)
+        SetThreadExecutionState(ES_CONTINUOUS);
+#endif
     saveFrontendConfig();
     m_cart.saveBattery();
     if (m_gamepad) {
@@ -250,8 +255,6 @@ SDL_Rect Frontend::gameDestinationRect() const
     int winW = 0, winH = 0;
     SDL_GetWindowSize(m_window, &winW, &winH);
 
-    // Borderless fullscreen fills as much of the desktop as possible while
-    // preserving the selected NES display aspect. Windowed mode keeps 1x-4x.
     if (m_fullscreen) {
         const double displayW = m_ntscAspect ? (256.0 * 8.0 / 7.0) : 256.0;
         const double displayH = 240.0;
@@ -309,15 +312,29 @@ void Frontend::stepInstruction()
 
 void Frontend::run()
 {
-    Uint64 freq = SDL_GetPerformanceFrequency();
-    Uint64 last = SDL_GetPerformanceCounter();
+    resetPacing();
 
     while (m_running) {
         processEvents();
         updateControllers();
+        updateSystemSleepSuppression();
 
-        if (m_cart.isLoaded() && !m_paused) {
-            runFrame();
+        const bool activelyEmulating = m_cart.isLoaded() && !m_paused;
+        const bool rewinding = activelyEmulating && rewindHeld();
+        if (!activelyEmulating || rewinding || m_emulationSpeed != EmulationSpeed::Normal)
+            m_apu.setAudioPlaybackPaused(true);
+
+        if (activelyEmulating) {
+            if (rewinding) {
+
+                rewindStep();
+            } else {
+                const int frameBatch = framesPerPresentation();
+                for (int i = 0; i < frameBatch; ++i) {
+                    runFrame();
+                    captureRewindState();
+                }
+            }
             updateTexture();
         }
 
@@ -338,20 +355,246 @@ void Frontend::run()
             SDL_RenderCopy(m_renderer, m_nesTexture, nullptr, &dst);
         }
 
-        // Fullscreen is intentionally game-only: no window chrome or ImGui overlay.
-        // The configured fullscreen hotkey (F11 by default) returns to the UI.
         if (!m_fullscreen)
             ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), m_renderer);
         SDL_RenderPresent(m_renderer);
 
-        const double targetFrameMs = 1000.0 / consoleFrameRate(m_bus.timing());
-        Uint64 now = SDL_GetPerformanceCounter();
-        double elapsedMs = (double)(now - last) / (double)freq * 1000.0;
-        if (elapsedMs < targetFrameMs) {
-            SDL_Delay((Uint32)(targetFrameMs - elapsedMs));
-        }
-        last = SDL_GetPerformanceCounter();
+        if (!m_paused && m_cart.isLoaded())
+            pacePresentation(!rewinding);
+        else
+            resetPacing();
     }
+
+#ifdef _WIN32
+    if (m_systemSleepSuppressed) {
+        SetThreadExecutionState(ES_CONTINUOUS);
+        m_systemSleepSuppressed = false;
+    }
+#endif
+    m_apu.setAudioPlaybackPaused(true);
+}
+
+void Frontend::updateSystemSleepSuppression()
+{
+#ifdef _WIN32
+    const bool shouldSuppress = m_cart.isLoaded() && !m_paused;
+    if (shouldSuppress == m_systemSleepSuppressed)
+        return;
+
+    if (shouldSuppress) {
+        const EXECUTION_STATE result = SetThreadExecutionState(
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
+        if (result != 0)
+            m_systemSleepSuppressed = true;
+    }
+    else {
+        SetThreadExecutionState(ES_CONTINUOUS);
+        m_systemSleepSuppressed = false;
+    }
+#endif
+}
+
+int Frontend::framesPerPresentation() const
+{
+    switch (m_emulationSpeed) {
+
+    case EmulationSpeed::Double: return 4;
+    case EmulationSpeed::Quadruple: return 8;
+    case EmulationSpeed::Uncapped: return 16;
+    case EmulationSpeed::Normal:
+    default: return 1;
+    }
+}
+
+double Frontend::emulationSpeedMultiplier() const
+{
+    switch (m_emulationSpeed) {
+    case EmulationSpeed::Double: return 2.0;
+    case EmulationSpeed::Quadruple: return 4.0;
+    case EmulationSpeed::Uncapped: return 0.0;
+    case EmulationSpeed::Normal:
+    default: return 1.0;
+    }
+}
+
+const char* Frontend::emulationSpeedName() const
+{
+    switch (m_emulationSpeed) {
+    case EmulationSpeed::Double: return "2x";
+    case EmulationSpeed::Quadruple: return "4x";
+    case EmulationSpeed::Uncapped: return "Uncapped";
+    case EmulationSpeed::Normal:
+    default: return "1x";
+    }
+}
+
+void Frontend::setEmulationSpeed(EmulationSpeed speed)
+{
+    if (m_emulationSpeed == speed) return;
+    m_emulationSpeed = speed;
+
+    m_apu.setHostAudioEnabled(speed == EmulationSpeed::Normal);
+    m_apu.setAudioPlaybackPaused(true);
+    resetPacing();
+    m_statusMessage = std::string("Emulation speed: ") + emulationSpeedName();
+    m_statusIsError = false;
+}
+
+void Frontend::resetPacing()
+{
+    m_pacingDeadline = 0;
+    m_audioPacingPrimed = false;
+}
+
+void Frontend::pacePresentation(bool allowAudioSync)
+{
+    if (m_emulationSpeed == EmulationSpeed::Uncapped)
+        return;
+
+    const uint64_t freq = SDL_GetPerformanceFrequency();
+    const uint64_t now = SDL_GetPerformanceCounter();
+    const double frameSeconds = 1.0 / consoleFrameRate(m_bus.timing());
+    const double speed = std::max(1.0, emulationSpeedMultiplier());
+    const double presentationSeconds = frameSeconds * double(framesPerPresentation()) / speed;
+
+    if (m_pacingDeadline == 0)
+        m_pacingDeadline = now + uint64_t(presentationSeconds * double(freq));
+    else
+        m_pacingDeadline += uint64_t(presentationSeconds * double(freq));
+
+    if (allowAudioSync && m_emulationSpeed == EmulationSpeed::Normal && m_apu.audioOpen()) {
+        const size_t queued = m_apu.queuedAudioSamples();
+        const int sampleRate = std::max(1, m_apu.outputSampleRate());
+        constexpr size_t targetSamples = 1536;
+        constexpr size_t primeSamples = 1024;
+
+        if (!m_audioPacingPrimed) {
+            if (queued < primeSamples) {
+                m_pacingDeadline = SDL_GetPerformanceCounter();
+                return;
+            }
+            m_audioPacingPrimed = true;
+            m_apu.setAudioPlaybackPaused(false);
+            m_pacingDeadline = SDL_GetPerformanceCounter() + uint64_t(presentationSeconds * double(freq));
+        }
+
+        const double errorSeconds = (double(queued) - double(targetSamples)) / double(sampleRate);
+        const double correction = std::clamp(errorSeconds * 0.12, -0.0015, 0.0030);
+        const int64_t correctionTicks = static_cast<int64_t>(correction * double(freq));
+        if (correctionTicks >= 0)
+            m_pacingDeadline += static_cast<uint64_t>(correctionTicks);
+        else {
+            const uint64_t magnitude = static_cast<uint64_t>(-correctionTicks);
+            m_pacingDeadline = magnitude < m_pacingDeadline ? m_pacingDeadline - magnitude : 0;
+        }
+    }
+
+    uint64_t current = SDL_GetPerformanceCounter();
+    const uint64_t maxLag = uint64_t(presentationSeconds * 4.0 * double(freq));
+    if (current > m_pacingDeadline + maxLag) {
+
+        m_pacingDeadline = current;
+        return;
+    }
+
+    while (current < m_pacingDeadline) {
+        const double remainingMs = double(m_pacingDeadline - current) * 1000.0 / double(freq);
+        if (remainingMs > 2.0)
+            SDL_Delay(static_cast<Uint32>(remainingMs - 1.0));
+        else
+            SDL_Delay(0);
+        current = SDL_GetPerformanceCounter();
+    }
+}
+
+bool Frontend::rewindHeld() const
+{
+    if (!m_cart.isLoaded()) return false;
+    const SDL_Keycode key = m_hotkeys[static_cast<int>(HotkeyAction::Rewind)];
+    if (key == SDLK_UNKNOWN) return false;
+    const SDL_Scancode sc = SDL_GetScancodeFromKey(key);
+    if (sc == SDL_SCANCODE_UNKNOWN) return false;
+    const Uint8* keys = SDL_GetKeyboardState(nullptr);
+    return keys && keys[sc] != 0 && !ImGui::GetIO().WantCaptureKeyboard;
+}
+
+std::vector<uint8_t> Frontend::captureMachinePayload() const
+{
+    std::vector<uint8_t> payload;
+    m_cpu.saveState(payload);
+    m_ppu.saveState(payload);
+    m_bus.saveState(payload);
+    m_apu.saveState(payload);
+    m_cart.saveState(payload);
+    return payload;
+}
+
+bool Frontend::loadMachinePayload(const std::vector<uint8_t>& payload)
+{
+    if (payload.empty()) return false;
+    const uint8_t* cursor = payload.data();
+    const uint8_t* finish = payload.data() + payload.size();
+    return m_cpu.loadState(cursor, finish) && m_ppu.loadState(cursor, finish) &&
+        m_bus.loadState(cursor, finish) && m_apu.loadState(cursor, finish) &&
+        m_cart.loadState(cursor, finish) && cursor == finish;
+}
+
+void Frontend::clearRewindHistory()
+{
+    m_rewindStates.clear();
+    m_rewindBytes = 0;
+    m_rewindFrameCounter = 0;
+    m_rewindRomIdentity = m_cart.isLoaded() ? m_cart.romIdentity() : 0;
+}
+
+void Frontend::captureRewindState()
+{
+    if (!m_cart.isLoaded()) return;
+    if (m_rewindRomIdentity != m_cart.romIdentity())
+        clearRewindHistory();
+
+    if ((++m_rewindFrameCounter & 1u) != 0)
+        return;
+
+    auto payload = captureMachinePayload();
+    m_rewindBytes += payload.size();
+    m_rewindStates.emplace_back(std::move(payload));
+
+    while (!m_rewindStates.empty() &&
+        (m_rewindStates.size() > kMaxRewindSnapshots || m_rewindBytes > kMaxRewindBytes)) {
+        m_rewindBytes -= m_rewindStates.front().size();
+        m_rewindStates.pop_front();
+    }
+}
+
+bool Frontend::rewindStep()
+{
+    if (!m_cart.isLoaded()) return false;
+    if (m_rewindRomIdentity != m_cart.romIdentity()) {
+        clearRewindHistory();
+        return false;
+    }
+    if (m_rewindStates.empty())
+        return false;
+
+    std::vector<uint8_t> payload = std::move(m_rewindStates.back());
+    m_rewindBytes -= payload.size();
+    m_rewindStates.pop_back();
+    if (!loadMachinePayload(payload)) {
+        clearRewindHistory();
+        m_statusMessage = "Rewind state rejected; rewind history cleared.";
+        m_statusIsError = true;
+        return false;
+    }
+
+    const bool wantHostAudio = m_emulationSpeed == EmulationSpeed::Normal;
+    m_apu.setHostAudioEnabled(false);
+    if (wantHostAudio) m_apu.setHostAudioEnabled(true);
+    m_apu.setAudioPlaybackPaused(true);
+    resetPacing();
+    m_statusMessage = "Rewinding...";
+    m_statusIsError = false;
+    return true;
 }
 
 void Frontend::setDefaultBindings()
@@ -365,7 +608,7 @@ void Frontend::setDefaultBindings()
         SDL_CONTROLLER_BUTTON_START, SDL_CONTROLLER_BUTTON_DPAD_UP, SDL_CONTROLLER_BUTTON_DPAD_DOWN,
         SDL_CONTROLLER_BUTTON_DPAD_LEFT, SDL_CONTROLLER_BUTTON_DPAD_RIGHT };
     m_hotkeys = { SDLK_p, SDLK_F10, SDLK_r, SDLK_1, SDLK_2, SDLK_3, SDLK_4,
-        SDLK_F5, SDLK_F9, SDLK_F6, SDLK_F7, SDLK_a, SDLK_c, SDLK_F11, SDLK_ESCAPE };
+        SDLK_F5, SDLK_F9, SDLK_F6, SDLK_F7, SDLK_a, SDLK_c, SDLK_F11, SDLK_COMMA, SDLK_PERIOD, SDLK_ESCAPE, SDLK_BACKSPACE };
     m_masterVolume = 1.50f;
 }
 
@@ -389,6 +632,11 @@ void Frontend::loadFrontendConfig()
             in >> timing;
             if (timing >= int(TimingOverride::Auto) && timing <= int(TimingOverride::Dendy))
                 m_timingOverride = static_cast<TimingOverride>(timing);
+        } else if (key == "emulation_speed") {
+            int speed = 0;
+            in >> speed;
+            if (speed >= int(EmulationSpeed::Normal) && speed <= int(EmulationSpeed::Uncapped))
+                m_emulationSpeed = static_cast<EmulationSpeed>(speed);
         } else if ((key == "p1key" || key == "p2key" || key == "p1pad" || key == "hotkey") && (in >> index >> value)) {
             if (key == "p1key" && index >= 0 && index < int(m_p1Keys.size()))
                 m_p1Keys[index] = static_cast<SDL_Scancode>(value);
@@ -396,8 +644,14 @@ void Frontend::loadFrontendConfig()
                 m_p2Keys[index] = static_cast<SDL_Scancode>(value);
             else if (key == "p1pad" && index >= 0 && index < int(m_p1PadButtons.size()))
                 m_p1PadButtons[index] = static_cast<SDL_GameControllerButton>(value);
-            else if (key == "hotkey" && configVersion >= 2 && index >= 0 && index < int(m_hotkeys.size()))
-                m_hotkeys[index] = static_cast<SDL_Keycode>(value);
+            else if (key == "hotkey" && configVersion >= 2) {
+                if (configVersion >= 4 && index >= 0 && index < int(m_hotkeys.size()))
+                    m_hotkeys[index] = static_cast<SDL_Keycode>(value);
+                else if (configVersion < 4 && index >= 0 && index < 14)
+                    m_hotkeys[index] = static_cast<SDL_Keycode>(value);
+                else if (configVersion < 4 && index == 14)
+                    m_hotkeys[static_cast<int>(HotkeyAction::Quit)] = static_cast<SDL_Keycode>(value);
+            }
         } else {
             std::string ignored;
             std::getline(in, ignored);
@@ -409,7 +663,8 @@ void Frontend::saveFrontendConfig() const
 {
     std::ofstream out("nesultimate.cfg", std::ios::out | std::ios::trunc);
     if (!out) return;
-    out << "config_version 3\n";
+    out << "config_version 4\n";
+    out << "emulation_speed " << int(m_emulationSpeed) << '\n';
     out << "volume " << m_masterVolume << '\n';
     out << "timing_override " << int(m_timingOverride) << '\n';
     for (int i = 0; i < int(m_p1Keys.size()); ++i) out << "p1key " << i << ' ' << int(m_p1Keys[i]) << '\n';
@@ -479,7 +734,7 @@ bool Frontend::handleHotkey(SDL_Keycode key)
     if (match(HotkeyAction::Pause)) { m_paused = !m_paused; return true; }
     if (match(HotkeyAction::StepInstruction)) { if (m_cart.isLoaded()) stepInstruction(); return true; }
     if (match(HotkeyAction::Reset)) {
-        if (m_cart.isLoaded()) { m_bus.reset(); m_statusMessage = "System reset."; m_statusIsError = false; }
+        if (m_cart.isLoaded()) { m_bus.reset(); clearRewindHistory(); m_statusMessage = "System reset."; m_statusIsError = false; }
         return true;
     }
     if (match(HotkeyAction::Scale1)) { m_scale = 1; return true; }
@@ -493,6 +748,23 @@ bool Frontend::handleHotkey(SDL_Keycode key)
     if (match(HotkeyAction::Aspect)) { m_ntscAspect = !m_ntscAspect; m_statusMessage = m_ntscAspect ? "NTSC aspect ON (8:7)" : "Square pixels"; m_statusIsError = false; return true; }
     if (match(HotkeyAction::ChipMod)) { m_apu.setChipMod(!m_apu.chipMod()); m_statusMessage = m_apu.chipMod() ? "Chip Mod ON (KYLXBN-style 2A03/VRC6/VRC7/N163)" : "Chip Mod OFF (accurate nonlinear mix)"; m_statusIsError = false; return true; }
     if (match(HotkeyAction::Fullscreen)) { toggleFullscreen(); return true; }
+    if (match(HotkeyAction::SpeedPrevious)) {
+        int speed = std::max(0, int(m_emulationSpeed) - 1);
+        setEmulationSpeed(static_cast<EmulationSpeed>(speed));
+        saveFrontendConfig();
+        return true;
+    }
+    if (match(HotkeyAction::SpeedNext)) {
+        int speed = std::min(int(EmulationSpeed::Uncapped), int(m_emulationSpeed) + 1);
+        setEmulationSpeed(static_cast<EmulationSpeed>(speed));
+        saveFrontendConfig();
+        return true;
+    }
+    if (match(HotkeyAction::Rewind)) {
+
+        if (m_cart.isLoaded() && rewindStep()) updateTexture();
+        return true;
+    }
     return false;
 }
 
@@ -570,12 +842,18 @@ void Frontend::drawUI()
     ImGui::SameLine();
     if (ImGui::Button("Reset") && m_cart.isLoaded()) {
         m_bus.reset();
+        clearRewindHistory();
         m_statusMessage = "System reset.";
         m_statusIsError = false;
     }
     ImGui::SameLine();
     if (ImGui::Button(m_paused ? "Resume" : "Pause"))
         m_paused = !m_paused;
+
+    ImGui::SameLine();
+    if (ImGui::Button("Rewind") && m_cart.isLoaded()) {
+        if (rewindStep()) updateTexture();
+    }
 
     ImGui::SameLine();
     ImGui::BeginDisabled(!m_cart.isLoaded());
@@ -667,6 +945,17 @@ void Frontend::drawUI()
     }
 
     ImGui::SameLine();
+    ImGui::TextUnformatted("Speed");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(95.0f);
+    int speedIndex = int(m_emulationSpeed);
+    const char* speedItems[] = { "1x", "2x", "4x", "Uncapped" };
+    if (ImGui::Combo("##EmulationSpeed", &speedIndex, speedItems, 4)) {
+        setEmulationSpeed(static_cast<EmulationSpeed>(speedIndex));
+        saveFrontendConfig();
+    }
+
+    ImGui::SameLine();
     ImGui::TextUnformatted("Volume");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(155.0f);
@@ -754,6 +1043,11 @@ void Frontend::drawUI()
 
         ImGui::Text("Scale  : %dx", m_scale);
         ImGui::Text("Paused : %s", m_paused ? "yes" : "no");
+        ImGui::Text("Speed  : %s", emulationSpeedName());
+        if (m_apu.audioOpen() && m_emulationSpeed == EmulationSpeed::Normal)
+            ImGui::Text("Audio  : %zu queued / %llu underruns / %llu overruns", m_apu.queuedAudioSamples(),
+                static_cast<unsigned long long>(m_apu.audioUnderrunCount()),
+                static_cast<unsigned long long>(m_apu.audioOverrunCount()));
         ImGui::Text("Slot   : %d", m_saveSlot);
         ImGui::Text("Aspect : %s", m_ntscAspect ? "NTSC 8:7" : "Square");
         ImGui::Text("Volume : %.0f%%", m_masterVolume * 100.0f);
@@ -817,7 +1111,8 @@ void Frontend::drawSettings()
 {
     if (!m_settingsOpen) return;
     static const char* names[] = { "Pause / Resume", "Step Instruction", "Reset", "Scale 1x", "Scale 2x", "Scale 3x", "Scale 4x",
-        "Save State", "Load State", "Next Save Slot", "Previous Save Slot", "Toggle Aspect", "Chip Mod", "Fullscreen", "Quit" };
+        "Save State", "Load State", "Next Save Slot", "Previous Save Slot", "Toggle Aspect", "Chip Mod", "Fullscreen",
+        "Speed Down", "Speed Up", "Quit", "Rewind" };
     ImGui::Begin("Settings - Hotkeys", &m_settingsOpen, ImGuiWindowFlags_AlwaysAutoResize);
     ImGui::Text("Every emulator hotkey can be reassigned. Click one and press the new key.");
     ImGui::Separator();
@@ -855,8 +1150,6 @@ bool Frontend::openRomDialog()
 
     m_cart.saveBattery();
 
-    // Native images are signature-validated by Cartridge, so iNES/NES 2.0
-    // files still load even when they have a nonstandard extension.
     if (!isArchivePath(filename) && m_cart.loadFromFile(filename)) {
         applyTimingOverride(true);
         reloadCheatsForLoadedRom();
@@ -866,11 +1159,6 @@ bool Frontend::openRomDialog()
         return true;
     }
 
-    // Windows 10/11 ship tar.exe based on libarchive. Use it as a general
-    // archive reader instead of binding the emulator to one compression
-    // format or extracting members to temporary files. bsdtar supports ZIP,
-    // 7-Zip, RAR and the common tar/compressor families when enabled by the
-    // installed Windows build.
     std::vector<std::string> entries;
     if (listArchiveEntries(filename, entries)) {
         std::vector<std::size_t> order;
@@ -880,8 +1168,6 @@ bool Frontend::openRomDialog()
         for (std::size_t i = 0; i < entries.size(); ++i)
             if (hasFdsExtension(entries[i])) order.push_back(i);
 
-        // If no conventional extension is present, inspect archive members by
-        // signature. This lets renamed .bin/.rom iNES files load from archives.
         if (order.empty()) {
             const std::size_t inspectCount = std::min<std::size_t>(entries.size(), 64);
             for (std::size_t i = 0; i < inspectCount; ++i) order.push_back(i);
@@ -1060,8 +1346,7 @@ uint64_t readU64(const uint8_t* p)
 
 uint32_t stateChecksum(const uint8_t* data, size_t size)
 {
-    // FNV-1a checksum catches truncation/corruption before live emulator
-    // state is modified during a load.
+
     uint32_t hash = 2166136261u;
     for (size_t i = 0; i < size; ++i) {
         hash ^= data[i];
@@ -1196,9 +1481,6 @@ bool Frontend::loadStateFromPath(const std::string& path)
         return false;
     }
 
-    // Loading is transactional. Component deserializers mutate as they parse,
-    // so preserve the current machine first; if a later component rejects a
-    // corrupt/incompatible payload, restore the exact pre-load state.
     std::vector<uint8_t> rollback;
     m_cpu.saveState(rollback);
     m_ppu.saveState(rollback);
@@ -1219,6 +1501,7 @@ bool Frontend::loadStateFromPath(const std::string& path)
         m_statusIsError = true;
         return false;
     }
+    clearRewindHistory();
     m_statusMessage = "State loaded: " + path;
     m_statusIsError = false;
     return true;
@@ -1234,35 +1517,3 @@ void Frontend::toggleFullscreen()
         : "Borderless fullscreen OFF";
     m_statusIsError = false;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

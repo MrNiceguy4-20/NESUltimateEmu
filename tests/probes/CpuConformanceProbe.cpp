@@ -72,7 +72,7 @@ bool writeRom(const std::filesystem::path& path, uint16_t reset,
             rom[off++] = byte;
     }
     const size_t vectors = 16 + 0x3FFA;
-    rom[vectors + 0] = static_cast<uint8_t>(reset & 0xFF); // NMI harmlessly points at reset
+    rom[vectors + 0] = static_cast<uint8_t>(reset & 0xFF);
     rom[vectors + 1] = static_cast<uint8_t>(reset >> 8);
     rom[vectors + 2] = static_cast<uint8_t>(reset & 0xFF);
     rom[vectors + 3] = static_cast<uint8_t>(reset >> 8);
@@ -116,7 +116,6 @@ bool testImpliedTiming()
     if (runInstruction(m.cpu) != 2 || stateOf(m.cpu).x != 0x10)
         return false;
 
-    // Cycle 1 fetches INX but must not modify X yet.
     m.cpu.clock();
     const CpuState afterFetch = stateOf(m.cpu);
     const CPU::BusCycle second = m.cpu.nextBusCycle();
@@ -129,8 +128,6 @@ bool testImpliedTiming()
     if (runInstruction(m.cpu) != 2 || stateOf(m.cpu).a != 0x81)
         return false;
 
-    // ASL A follows the same two-cycle rule; carry/result appear on cycle 2,
-    // and the externally visible access must be the byte after the opcode.
     m.cpu.clock();
     const CpuState aslFetch = stateOf(m.cpu);
     const CPU::BusCycle aslSecond = m.cpu.nextBusCycle();
@@ -151,9 +148,7 @@ bool testImpliedTiming()
 bool testUnstableStoreRdy()
 {
     const auto path = std::filesystem::temp_directory_path() / "nesultimate_cpu_shx_rdy_probe.nes";
-    // SHX $0500,Y with X=$A5,Y=0 normally stores $04 because H+1=$06.
-    // If RDY is asserted on the provisional read immediately before the write,
-    // RP2A03 behavior drops H and the instruction becomes STX, storing $A5.
+
     if (!writeRom(path, 0x8000, {{0x8000, {0xA2,0xA5,0xA0,0x00,0x9E,0x00,0x05,0xEA}}}))
         return false;
 
@@ -177,9 +172,7 @@ bool testUnstableStoreRdy()
             if (!stalled.bus.requestDmcDma(0x8000)) return false;
             dmaInjected = true;
         }
-        // Before the DMA starts, step the CPU directly so the probe can place
-        // the halt on the exact provisional-read slot. Once requested, use the
-        // real Bus scheduler; it must notify the CPU when DMC acquires RDY.
+
         if (dmaInjected) stalled.bus.clock();
         else stalled.cpu.clock();
         ++clocks;
@@ -202,7 +195,7 @@ bool testJmpIndirectWrap()
     if (!loadAndReset(m, path)) return false;
     m.bus.write(0x02FF, 0x34);
     m.bus.write(0x0200, 0x81);
-    m.bus.write(0x0300, 0x99); // would produce $9934 without the NMOS page-wrap bug
+    m.bus.write(0x0300, 0x99);
 
     std::vector<CPU::BusCycle> trace;
     const int cycles = runInstruction(m.cpu, &trace);
@@ -224,7 +217,7 @@ bool testBranchCycles()
         return false;
     Machine m;
     if (!loadAndReset(m, path)) return false;
-    if (runInstruction(m.cpu) != 2) return false; // LDA #$00 -> Z=1
+    if (runInstruction(m.cpu) != 2) return false;
 
     std::vector<CPU::BusCycle> trace;
     const int cycles = runInstruction(m.cpu, &trace);
@@ -237,7 +230,6 @@ bool testBranchCycles()
     return cycles == 3 && s.pc == 0x8006 && traceOk;
 }
 }
-
 
 bool testAllOpcodeBusCyclesExact()
 {
@@ -270,11 +262,8 @@ bool testAllOpcodeBusCyclesExact()
         if (!m.cpu.atInstructionBoundary())
             return false;
 
-        // Power-on clears internal RAM, so install the test instruction only
-        // after the reset sequence has reached the $0200 reset vector.
         m.bus.write(0x0200, opcode);
-        // Safe deterministic operands. $0000/$0001 are ordinary internal RAM,
-        // while relative offset 0 keeps branch targets in the test area.
+
         m.bus.write(0x0201, 0x00);
         m.bus.write(0x0202, 0x00);
         m.bus.write(0x0000, 0x00);

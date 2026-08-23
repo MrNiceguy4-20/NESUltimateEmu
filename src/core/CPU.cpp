@@ -8,15 +8,11 @@ CPU::CPU(Bus& bus) : m_bus(bus)
 
 void CPU::powerOn()
 {
-    // The RP2A03's externally observable power-up state used by the NES CPU
-    // reset tests. Bit 5 is kept set internally; B is synthesized only when
-    // status is pushed by PHP/BRK.
+
     m_a = 0;
     m_x = 0;
     m_y = 0;
-    // Power-on enters the same externally visible RESET bus sequence. Start
-    // S at $00 so the three reset stack-page reads/decrements leave it at
-    // the NES-observed $FD value when opcode execution begins.
+
     m_sp = 0x00;
     m_status = 0x24;
     m_pc = 0x0000;
@@ -35,18 +31,12 @@ void CPU::powerOn()
     m_pendingIoData = 0;
     m_instructionCount = 0;
 
-    // RESET occupies seven externally visible CPU bus clocks.
     m_cycles = 7;
 }
 
 void CPU::reset()
 {
-    // The physical RESET input is not a second power-on. A, X and Y are not
-    // modified. Its three would-be stack writes are reads on real hardware;
-    // defer those accesses and S decrements to clockResetSequence().
 
-    // RESET asserts interrupt-disable while otherwise preserving flags. The
-    // B flag is not a physical status latch, so keep our internal copy clear.
     m_status = static_cast<uint8_t>((m_status | 0x24) & 0xEF);
 
     m_nmiPending = false;
@@ -62,15 +52,12 @@ void CPU::reset()
     m_pendingIoAddr = 0;
     m_pendingIoData = 0;
 
-    // The reset sequence consumes seven explicit CPU bus clocks.
     m_cycles = 7;
 }
 
 void CPU::nmi()
 {
-    // NMI is edge-triggered. Latch it and service it at the next
-    // instruction boundary rather than interrupting an instruction that
-    // is already in progress.
+
     m_nmiPending = true;
 }
 
@@ -84,9 +71,7 @@ void CPU::sampleNmiInput()
 
 void CPU::cancelPendingNmi()
 {
-    // Once the CPU has sampled the edge for the current instruction it is
-    // committed. Only the asynchronous, not-yet-polled edge can disappear
-    // in the PPU's short VBlank/NMI suppression race.
+
     if (!m_nmiPolled && !m_nmiSampled)
         m_nmiPending = false;
 }
@@ -98,16 +83,13 @@ void CPU::setIrqLine(bool asserted)
 
 void CPU::irq()
 {
-    // Kept for compatibility with any caller that still pulses IRQ directly.
-    // Normal system wiring uses Bus::clock() to drive the shared level line.
+
     m_irqLine = true;
 }
 
 void CPU::serviceNmi()
 {
-    // Interrupt entry must remain visible on the CPU bus for all seven
-    // cycles. In particular, an IRQ/BRK sequence can have its vector fetch
-    // hijacked by an NMI that arrives after the sequence has begun.
+
     m_nmiPolled = false;
     m_nmiSampled = false;
     m_irqPolled = false;
@@ -151,16 +133,6 @@ void CPU::clockInterruptEntry()
         m_pendingIoOp == PendingIoOp::InterruptIrqIrq ||
         m_pendingIoOp == PendingIoOp::InterruptIrqNmi;
 
-    // NMI takeover has a subtle BRK/IRQ distinction. BRK and hardware IRQ both commit the vector after the status-push
-    // boundary.  BRK still retains its origin semantics (PC+2 and B=1 in the
-    // pushed status) when an NMI has hijacked the vector before that point.
-    // BRK and hardware IRQ select their vector at the boundary immediately
-    // before the status-push tick (T4 -> T5 internally). An NMI edge that has
-    // been recognized by then can hijack the sequence; an edge arriving once
-    // the low-vector read is about to begin is too late and must remain
-    // pending for the next interrupt opportunity. Keeping BRK hijackable at
-    // m_cycles == 2 incorrectly allowed a late NMI to redirect only after
-    // vector selection had already committed.
     const bool brkCanBeHijacked =
         brkSequence && m_pendingIoOp == PendingIoOp::InterruptBrkIrq &&
         m_nmiSampled && m_cycles >= 3;
@@ -183,9 +155,7 @@ void CPU::clockInterruptEntry()
     const uint16_t vector = useNmiVector ? 0xFFFA : 0xFFFE;
 
     if (brkSequence) {
-        // BRK cycle 1 (opcode fetch) was performed by fetch(). PC has already
-        // been advanced by two so the stack receives the architectural BRK
-        // return address; cycle 2 still reads the padding byte at PC-1.
+
         switch (m_cycles) {
         case 6:
             (void)read(static_cast<uint16_t>(m_pc - 1));
@@ -216,9 +186,6 @@ void CPU::clockInterruptEntry()
         return;
     }
 
-    // Hardware IRQ/NMI entry has two discarded reads before the three stack
-    // writes. Keeping those cycles explicit is required for NMI-over-IRQ
-    // vector hijacking and for interrupt/DMA timing tests.
     switch (m_cycles) {
     case 7:
     case 6:
@@ -392,8 +359,6 @@ void CPU::clockZpIndexedSequence()
     m_pendingIoOp = PendingIoOp::None;
 }
 
-
-
 bool CPU::isDirectMemorySequence() const
 {
     return m_pendingIoOp == PendingIoOp::ZpRead ||
@@ -405,10 +370,10 @@ bool CPU::isDirectMemorySequence() const
 uint8_t CPU::directStoreValue() const
 {
     switch (m_currentOpcode) {
-    case 0x85: case 0x8D: return m_a; // STA
-    case 0x86: case 0x8E: return m_x; // STX
-    case 0x84: case 0x8C: return m_y; // STY
-    case 0x87: case 0x8F: return static_cast<uint8_t>(m_a & m_x); // SAX
+    case 0x85: case 0x8D: return m_a;
+    case 0x86: case 0x8E: return m_x;
+    case 0x84: case 0x8C: return m_y;
+    case 0x87: case 0x8F: return static_cast<uint8_t>(m_a & m_x);
     default: return 0;
     }
 }
@@ -416,19 +381,19 @@ uint8_t CPU::directStoreValue() const
 void CPU::applyDirectMemoryRead(uint8_t value)
 {
     switch (m_currentOpcode) {
-    case 0xA5: case 0xAD: // LDA
+    case 0xA5: case 0xAD:
         m_a = value; setZeroNeg(m_a); break;
-    case 0xA6: case 0xAE: // LDX
+    case 0xA6: case 0xAE:
         m_x = value; setZeroNeg(m_x); break;
-    case 0xA4: case 0xAC: // LDY
+    case 0xA4: case 0xAC:
         m_y = value; setZeroNeg(m_y); break;
-    case 0x25: case 0x2D: // AND
+    case 0x25: case 0x2D:
         m_a = static_cast<uint8_t>(m_a & value); setZeroNeg(m_a); break;
-    case 0x05: case 0x0D: // ORA
+    case 0x05: case 0x0D:
         m_a = static_cast<uint8_t>(m_a | value); setZeroNeg(m_a); break;
-    case 0x45: case 0x4D: // EOR
+    case 0x45: case 0x4D:
         m_a = static_cast<uint8_t>(m_a ^ value); setZeroNeg(m_a); break;
-    case 0x65: case 0x6D: { // ADC
+    case 0x65: case 0x6D: {
         const uint16_t sum = static_cast<uint16_t>(m_a) + value + (getFlag(0x01) ? 1 : 0);
         setFlag(0x01, sum > 0xFF);
         const uint8_t result = static_cast<uint8_t>(sum);
@@ -436,7 +401,7 @@ void CPU::applyDirectMemoryRead(uint8_t value)
         m_a = result; setZeroNeg(m_a);
         break;
     }
-    case 0xE5: case 0xED: { // SBC
+    case 0xE5: case 0xED: {
         const uint8_t inv = static_cast<uint8_t>(value ^ 0xFF);
         const uint16_t sum = static_cast<uint16_t>(m_a) + inv + (getFlag(0x01) ? 1 : 0);
         setFlag(0x01, sum > 0xFF);
@@ -445,20 +410,20 @@ void CPU::applyDirectMemoryRead(uint8_t value)
         m_a = result; setZeroNeg(m_a);
         break;
     }
-    case 0xC5: case 0xCD: // CMP
+    case 0xC5: case 0xCD:
         cmpHelper(m_a, value); break;
-    case 0xE4: case 0xEC: // CPX
+    case 0xE4: case 0xEC:
         cmpHelper(m_x, value); break;
-    case 0xC4: case 0xCC: // CPY
+    case 0xC4: case 0xCC:
         cmpHelper(m_y, value); break;
-    case 0x24: case 0x2C: // BIT
+    case 0x24: case 0x2C:
         setFlag(0x02, (m_a & value) == 0);
         setFlag(0x40, (value & 0x40) != 0);
         setFlag(0x80, (value & 0x80) != 0);
         break;
-    case 0xA7: case 0xAF: // LAX
+    case 0xA7: case 0xAF:
         m_a = m_x = value; setZeroNeg(value); break;
-    case 0x04: case 0x44: case 0x64: case 0x0C: // memory NOPs
+    case 0x04: case 0x44: case 0x64: case 0x0C:
         break;
     default:
         break;
@@ -507,7 +472,6 @@ void CPU::clockDirectMemorySequence()
     }
 }
 
-
 bool CPU::isAbsIndexedReadSequence() const
 {
     return m_pendingIoOp == PendingIoOp::AbsXRead ||
@@ -517,19 +481,19 @@ bool CPU::isAbsIndexedReadSequence() const
 void CPU::applyAbsIndexedRead(uint8_t value)
 {
     switch (m_currentOpcode) {
-    case 0xBD: case 0xB9: // LDA abs,X / abs,Y
+    case 0xBD: case 0xB9:
         m_a = value; setZeroNeg(m_a); break;
-    case 0xBE: // LDX abs,Y
+    case 0xBE:
         m_x = value; setZeroNeg(m_x); break;
-    case 0xBC: // LDY abs,X
+    case 0xBC:
         m_y = value; setZeroNeg(m_y); break;
-    case 0x3D: case 0x39: // AND
+    case 0x3D: case 0x39:
         m_a = static_cast<uint8_t>(m_a & value); setZeroNeg(m_a); break;
-    case 0x1D: case 0x19: // ORA
+    case 0x1D: case 0x19:
         m_a = static_cast<uint8_t>(m_a | value); setZeroNeg(m_a); break;
-    case 0x5D: case 0x59: // EOR
+    case 0x5D: case 0x59:
         m_a = static_cast<uint8_t>(m_a ^ value); setZeroNeg(m_a); break;
-    case 0x7D: case 0x79: { // ADC
+    case 0x7D: case 0x79: {
         const uint16_t sum = static_cast<uint16_t>(m_a) + value + (getFlag(0x01) ? 1 : 0);
         setFlag(0x01, sum > 0xFF);
         const uint8_t result = static_cast<uint8_t>(sum);
@@ -537,7 +501,7 @@ void CPU::applyAbsIndexedRead(uint8_t value)
         m_a = result; setZeroNeg(m_a);
         break;
     }
-    case 0xFD: case 0xF9: { // SBC
+    case 0xFD: case 0xF9: {
         const uint8_t inv = static_cast<uint8_t>(value ^ 0xFF);
         const uint16_t sum = static_cast<uint16_t>(m_a) + inv + (getFlag(0x01) ? 1 : 0);
         setFlag(0x01, sum > 0xFF);
@@ -546,15 +510,15 @@ void CPU::applyAbsIndexedRead(uint8_t value)
         m_a = result; setZeroNeg(m_a);
         break;
     }
-    case 0xDD: case 0xD9: // CMP
+    case 0xDD: case 0xD9:
         cmpHelper(m_a, value); break;
-    case 0xBF: // LAX abs,Y
+    case 0xBF:
         m_a = m_x = value; setZeroNeg(value); break;
-    case 0xBB: // LAS abs,Y
+    case 0xBB:
         value = static_cast<uint8_t>(value & m_sp);
         m_a = m_x = m_sp = value; setZeroNeg(value); break;
     case 0x1C: case 0x3C: case 0x5C: case 0x7C: case 0xDC: case 0xFC:
-        // Unofficial absolute,X NOPs still perform the final memory read.
+
         break;
     default:
         break;
@@ -601,10 +565,7 @@ void CPU::clockAbsIndexedReadSequence()
 
 void CPU::notifyRdyReadStall()
 {
-    // AccuracyCoin deliberately pulls RDY low on the indexed provisional read
-    // two clocks before the SH*/SHA write. On NMOS silicon this suppresses the
-    // H+1 term for the eventual write. Only latch the condition for that exact
-    // bus phase; unrelated DMC stalls must not alter the instruction.
+
     const bool absHigh = m_pendingIoOp == PendingIoOp::AbsXHighStore ||
                          m_pendingIoOp == PendingIoOp::AbsYHighStore;
     const bool indHigh = m_pendingIoOp == PendingIoOp::IndYHighStore;
@@ -664,10 +625,10 @@ void CPU::clockAbsIndexedStoreSequence()
 
     uint8_t source = 0;
     switch (m_currentOpcode) {
-    case 0x9C: source = m_y; break; // SHY abs,X
-    case 0x9E: source = m_x; break; // SHX abs,Y
-    case 0x9F: source = static_cast<uint8_t>(m_a & m_x); break; // AHX abs,Y
-    case 0x9B: source = m_sp; break; // TAS abs,Y
+    case 0x9C: source = m_y; break;
+    case 0x9E: source = m_x; break;
+    case 0x9F: source = static_cast<uint8_t>(m_a & m_x); break;
+    case 0x9B: source = m_sp; break;
     default:
         m_pendingIoOp = PendingIoOp::None;
         return;
@@ -686,8 +647,6 @@ void CPU::clockAbsIndexedStoreSequence()
     m_pendingIoOp = PendingIoOp::None;
     m_unstableHighStoreRdy = false;
 }
-
-
 
 bool CPU::isDirectRmwSequence() const
 {
@@ -741,7 +700,6 @@ void CPU::clockDirectRmwSequence()
     if (m_cycles == 1) { write(addr, m_pendingIoData2); m_pendingIoOp = PendingIoOp::None; }
 }
 
-
 bool CPU::isImmediateSequence() const
 {
     return m_pendingIoOp == PendingIoOp::Immediate;
@@ -755,46 +713,46 @@ bool CPU::isImpliedSequence() const
 void CPU::applyImplied()
 {
     switch (m_currentOpcode) {
-    case 0xE8: ++m_x; setZeroNeg(m_x); break; // INX
-    case 0xCA: --m_x; setZeroNeg(m_x); break; // DEX
-    case 0xC8: ++m_y; setZeroNeg(m_y); break; // INY
-    case 0x88: --m_y; setZeroNeg(m_y); break; // DEY
+    case 0xE8: ++m_x; setZeroNeg(m_x); break;
+    case 0xCA: --m_x; setZeroNeg(m_x); break;
+    case 0xC8: ++m_y; setZeroNeg(m_y); break;
+    case 0x88: --m_y; setZeroNeg(m_y); break;
 
-    case 0x78: setFlag(0x04, true); break;  // SEI
-    case 0x58: setFlag(0x04, false); break; // CLI
-    case 0x18: setFlag(0x01, false); break; // CLC
-    case 0x38: setFlag(0x01, true); break;  // SEC
-    case 0xD8: setFlag(0x08, false); break; // CLD
-    case 0xF8: setFlag(0x08, true); break;  // SED (ignored by 2A03 ADC/SBC)
-    case 0xB8: setFlag(0x40, false); break; // CLV
+    case 0x78: setFlag(0x04, true); break;
+    case 0x58: setFlag(0x04, false); break;
+    case 0x18: setFlag(0x01, false); break;
+    case 0x38: setFlag(0x01, true); break;
+    case 0xD8: setFlag(0x08, false); break;
+    case 0xF8: setFlag(0x08, true); break;
+    case 0xB8: setFlag(0x40, false); break;
 
-    case 0xAA: m_x = m_a; setZeroNeg(m_x); break; // TAX
-    case 0x8A: m_a = m_x; setZeroNeg(m_a); break; // TXA
-    case 0xA8: m_y = m_a; setZeroNeg(m_y); break; // TAY
-    case 0x98: m_a = m_y; setZeroNeg(m_a); break; // TYA
-    case 0xBA: m_x = m_sp; setZeroNeg(m_x); break; // TSX
-    case 0x9A: m_sp = m_x; break;                    // TXS
+    case 0xAA: m_x = m_a; setZeroNeg(m_x); break;
+    case 0x8A: m_a = m_x; setZeroNeg(m_a); break;
+    case 0xA8: m_y = m_a; setZeroNeg(m_y); break;
+    case 0x98: m_a = m_y; setZeroNeg(m_a); break;
+    case 0xBA: m_x = m_sp; setZeroNeg(m_x); break;
+    case 0x9A: m_sp = m_x; break;
 
-    case 0x0A: { // ASL A
+    case 0x0A: {
         setFlag(0x01, (m_a & 0x80) != 0);
         m_a = static_cast<uint8_t>(m_a << 1);
         setZeroNeg(m_a);
         break;
     }
-    case 0x4A: { // LSR A
+    case 0x4A: {
         setFlag(0x01, (m_a & 0x01) != 0);
         m_a = static_cast<uint8_t>(m_a >> 1);
         setZeroNeg(m_a);
         break;
     }
-    case 0x2A: { // ROL A
+    case 0x2A: {
         const uint8_t carryIn = getFlag(0x01) ? 1 : 0;
         setFlag(0x01, (m_a & 0x80) != 0);
         m_a = static_cast<uint8_t>((m_a << 1) | carryIn);
         setZeroNeg(m_a);
         break;
     }
-    case 0x6A: { // ROR A
+    case 0x6A: {
         const uint8_t carryIn = getFlag(0x01) ? 0x80 : 0x00;
         setFlag(0x01, (m_a & 0x01) != 0);
         m_a = static_cast<uint8_t>((m_a >> 1) | carryIn);
@@ -802,7 +760,6 @@ void CPU::applyImplied()
         break;
     }
 
-    // Official and unofficial one-byte NOPs.
     case 0xEA: case 0x1A: case 0x3A: case 0x5A:
     case 0x7A: case 0xDA: case 0xFA:
         break;
@@ -813,8 +770,7 @@ void CPU::applyImplied()
 
 void CPU::clockImpliedSequence()
 {
-    // Cycle 1 was the opcode fetch. Cycle 2 re-reads PC, then the internal
-    // register/flag operation becomes visible at the end of that cycle.
+
     if (m_cycles != 1)
         return;
     (void)read(m_pc);
@@ -878,7 +834,7 @@ void CPU::applyImmediate(uint8_t value)
     }
     case 0xAB: m_a = m_x = value; setZeroNeg(value); break;
     case 0x8B: m_a = static_cast<uint8_t>((m_a | 0xEE) & m_x & value); setZeroNeg(m_a); break;
-    // Immediate NOPs $80/$82/$89/$C2/$E2 consume the byte only.
+
     default: break;
     }
 }
@@ -920,9 +876,7 @@ void CPU::clockJmpSequence()
 
 void CPU::clockBranchSequence()
 {
-    // Cycle 2 always fetches the signed relative offset. A not-taken branch
-    // ends here. For a taken branch, keep the sequential PC until the extra
-    // discarded bus cycle(s) have completed.
+
     if (m_cycles == 1 && m_pendingIoData2 == 0) {
         const int8_t offset = static_cast<int8_t>(read(m_pc++));
         m_pendingIoData = static_cast<uint8_t>(offset);
@@ -950,14 +904,11 @@ void CPU::clockBranchSequence()
         m_pendingIoAddr = target;
         m_branchPageCrossed = (sequentialPc & 0xFF00) != (target & 0xFF00);
         m_pendingIoData2 = 1;
-        // We are currently on cycle 2. After CPU::clock() decrements m_cycles,
-        // leave one extra slot for an ordinary taken branch and two for a
-        // page-crossing branch.
+
         m_cycles = m_branchPageCrossed ? 3 : 2;
         return;
     }
 
-    // First taken-branch extra cycle: discarded read from the sequential PC.
     if ((!m_branchPageCrossed && m_cycles == 1) ||
         (m_branchPageCrossed && m_cycles == 2)) {
         (void)read(m_pc);
@@ -968,8 +919,6 @@ void CPU::clockBranchSequence()
         return;
     }
 
-    // Page-crossing final penalty cycle reads from the target low byte while
-    // still driving the old page high byte, then commits the corrected PC.
     if (m_branchPageCrossed && m_cycles == 1) {
         const uint16_t provisional = static_cast<uint16_t>((m_pc & 0xFF00) |
                                                            (m_pendingIoAddr & 0x00FF));
@@ -989,7 +938,7 @@ void CPU::applyIndexedRmw(uint8_t oldValue, uint8_t& value)
 {
     value = oldValue;
     switch (m_currentOpcode) {
-    // ASL / SLO
+
     case 0x06: case 0x0E: case 0x07: case 0x0F: case 0x1E: case 0x1F: case 0x1B: case 0x03: case 0x13:
         setFlag(0x01, value & 0x80);
         value = static_cast<uint8_t>(value << 1);
@@ -998,7 +947,6 @@ void CPU::applyIndexedRmw(uint8_t oldValue, uint8_t& value)
         } else setZeroNeg(value);
         break;
 
-    // ROL / RLA
     case 0x26: case 0x2E: case 0x27: case 0x2F: case 0x3E: case 0x3F: case 0x3B: case 0x23: case 0x33: {
         const uint8_t carryIn = getFlag(0x01) ? 1 : 0;
         setFlag(0x01, value & 0x80);
@@ -1009,7 +957,6 @@ void CPU::applyIndexedRmw(uint8_t oldValue, uint8_t& value)
         break;
     }
 
-    // LSR / SRE
     case 0x46: case 0x4E: case 0x47: case 0x4F: case 0x5E: case 0x5F: case 0x5B: case 0x43: case 0x53:
         setFlag(0x01, value & 0x01);
         value = static_cast<uint8_t>(value >> 1);
@@ -1018,7 +965,6 @@ void CPU::applyIndexedRmw(uint8_t oldValue, uint8_t& value)
         } else setZeroNeg(value);
         break;
 
-    // ROR / RRA
     case 0x66: case 0x6E: case 0x67: case 0x6F: case 0x7E: case 0x7F: case 0x7B: case 0x63: case 0x73: {
         const uint8_t carryIn = getFlag(0x01) ? 0x80 : 0x00;
         setFlag(0x01, value & 0x01);
@@ -1033,7 +979,6 @@ void CPU::applyIndexedRmw(uint8_t oldValue, uint8_t& value)
         break;
     }
 
-    // INC / ISC
     case 0xE6: case 0xEE: case 0xE7: case 0xEF: case 0xFE: case 0xFF: case 0xFB: case 0xE3: case 0xF3:
         value = static_cast<uint8_t>(value + 1);
         if (m_currentOpcode == 0xE7 || m_currentOpcode == 0xEF || m_currentOpcode == 0xFF || m_currentOpcode == 0xFB || m_currentOpcode == 0xE3 || m_currentOpcode == 0xF3) {
@@ -1046,7 +991,6 @@ void CPU::applyIndexedRmw(uint8_t oldValue, uint8_t& value)
         } else setZeroNeg(value);
         break;
 
-    // DEC / DCP
     case 0xC6: case 0xCE: case 0xC7: case 0xCF: case 0xDE: case 0xDF: case 0xDB: case 0xC3: case 0xD3:
         value = static_cast<uint8_t>(value - 1);
         if (m_currentOpcode == 0xC7 || m_currentOpcode == 0xCF || m_currentOpcode == 0xDF || m_currentOpcode == 0xDB || m_currentOpcode == 0xC3 || m_currentOpcode == 0xD3)
@@ -1125,15 +1069,15 @@ void CPU::clockZpIndexedRmwSequence()
         uint8_t value = oldValue;
 
         switch (m_currentOpcode) {
-        case 0x16: // ASL zp,X
-        case 0x17: // SLO zp,X
+        case 0x16:
+        case 0x17:
             setFlag(0x01, value & 0x80);
             value = static_cast<uint8_t>(value << 1);
             if (m_currentOpcode == 0x17) { m_a = static_cast<uint8_t>(m_a | value); setZeroNeg(m_a); }
             else setZeroNeg(value);
             break;
-        case 0x36: // ROL zp,X
-        case 0x37: { // RLA zp,X
+        case 0x36:
+        case 0x37: {
             const uint8_t carryIn = getFlag(0x01) ? 1 : 0;
             setFlag(0x01, value & 0x80);
             value = static_cast<uint8_t>((value << 1) | carryIn);
@@ -1141,15 +1085,15 @@ void CPU::clockZpIndexedRmwSequence()
             else setZeroNeg(value);
             break;
         }
-        case 0x56: // LSR zp,X
-        case 0x57: // SRE zp,X
+        case 0x56:
+        case 0x57:
             setFlag(0x01, value & 0x01);
             value = static_cast<uint8_t>(value >> 1);
             if (m_currentOpcode == 0x57) { m_a = static_cast<uint8_t>(m_a ^ value); setZeroNeg(m_a); }
             else setZeroNeg(value);
             break;
-        case 0x76: // ROR zp,X
-        case 0x77: { // RRA zp,X
+        case 0x76:
+        case 0x77: {
             const uint8_t carryIn = getFlag(0x01) ? 0x80 : 0x00;
             setFlag(0x01, value & 0x01);
             value = static_cast<uint8_t>((value >> 1) | carryIn);
@@ -1164,14 +1108,14 @@ void CPU::clockZpIndexedRmwSequence()
             } else setZeroNeg(value);
             break;
         }
-        case 0xD6: // DEC zp,X
-        case 0xD7: // DCP zp,X
+        case 0xD6:
+        case 0xD7:
             value = static_cast<uint8_t>(value - 1);
             if (m_currentOpcode == 0xD7) cmpHelper(m_a, value);
             else setZeroNeg(value);
             break;
-        case 0xF6: // INC zp,X
-        case 0xF7: // ISC zp,X
+        case 0xF6:
+        case 0xF7:
             value = static_cast<uint8_t>(value + 1);
             if (m_currentOpcode == 0xF7) {
                 const uint8_t operand = static_cast<uint8_t>(value ^ 0xFF);
@@ -1222,15 +1166,15 @@ bool CPU::isIndirectSequence() const
 void CPU::applyIndirectRead(uint8_t value)
 {
     switch (m_currentOpcode) {
-    case 0xA1: case 0xB1: // LDA
+    case 0xA1: case 0xB1:
         m_a = value; setZeroNeg(m_a); break;
-    case 0x21: case 0x31: // AND
+    case 0x21: case 0x31:
         m_a = static_cast<uint8_t>(m_a & value); setZeroNeg(m_a); break;
-    case 0x01: case 0x11: // ORA
+    case 0x01: case 0x11:
         m_a = static_cast<uint8_t>(m_a | value); setZeroNeg(m_a); break;
-    case 0x41: case 0x51: // EOR
+    case 0x41: case 0x51:
         m_a = static_cast<uint8_t>(m_a ^ value); setZeroNeg(m_a); break;
-    case 0x61: case 0x71: { // ADC
+    case 0x61: case 0x71: {
         const uint16_t sum = static_cast<uint16_t>(m_a) + value + (getFlag(0x01) ? 1 : 0);
         setFlag(0x01, sum > 0xFF);
         const uint8_t result = static_cast<uint8_t>(sum);
@@ -1238,7 +1182,7 @@ void CPU::applyIndirectRead(uint8_t value)
         m_a = result; setZeroNeg(m_a);
         break;
     }
-    case 0xE1: case 0xF1: { // SBC
+    case 0xE1: case 0xF1: {
         const uint8_t inv = static_cast<uint8_t>(value ^ 0xFF);
         const uint16_t sum = static_cast<uint16_t>(m_a) + inv + (getFlag(0x01) ? 1 : 0);
         setFlag(0x01, sum > 0xFF);
@@ -1247,9 +1191,9 @@ void CPU::applyIndirectRead(uint8_t value)
         m_a = result; setZeroNeg(m_a);
         break;
     }
-    case 0xC1: case 0xD1: // CMP
+    case 0xC1: case 0xD1:
         cmpHelper(m_a, value); break;
-    case 0xA3: case 0xB3: // LAX
+    case 0xA3: case 0xB3:
         m_a = m_x = value; setZeroNeg(value); break;
     default:
         break;
@@ -1264,9 +1208,9 @@ void CPU::clockIndirectSequence()
     const bool store = op == PendingIoOp::IndXStore || op == PendingIoOp::IndYStore || op == PendingIoOp::IndYHighStore;
 
     if (indX) {
-        // ($nn,X): operand, unindexed dummy, indexed pointer low/high, data.
+
         if (m_cycles == (rmw ? 7 : 5)) {
-            m_pendingIoAddr = read(m_pc++); // zero-page operand
+            m_pendingIoAddr = read(m_pc++);
             return;
         }
         if (m_cycles == (rmw ? 6 : 4)) {
@@ -1275,7 +1219,7 @@ void CPU::clockIndirectSequence()
         }
         if (m_cycles == (rmw ? 5 : 3)) {
             const uint8_t ptr = static_cast<uint8_t>(m_pendingIoAddr + m_x);
-            m_pendingIoData = read(ptr); // pointer low
+            m_pendingIoData = read(ptr);
             return;
         }
         if (m_cycles == (rmw ? 4 : 2)) {
@@ -1315,9 +1259,8 @@ void CPU::clockIndirectSequence()
         return;
     }
 
-    // ($nn),Y: operand, pointer low/high, provisional read, corrected access.
     if (m_cycles == (rmw ? 7 : (store ? 5 : 4))) {
-        m_pendingIoAddr = read(m_pc++); // zero-page pointer address
+        m_pendingIoAddr = read(m_pc++);
         return;
     }
     if (m_cycles == (rmw ? 6 : (store ? 4 : 3))) {
@@ -1390,7 +1333,7 @@ void CPU::clockIndirectSequence()
     }
 
     if (!store && m_cycles == 2) {
-        // Crossing read: provisional address is externally visible and discarded.
+
         (void)read(provisional);
         return;
     }
@@ -1470,7 +1413,7 @@ void CPU::clockStackSequence()
     case PendingIoOp::StackJsr:
         switch (m_cycles) {
         case 5:
-            m_pendingIoData = read(m_pc++); // target low byte
+            m_pendingIoData = read(m_pc++);
             break;
         case 4:
             (void)read(static_cast<uint16_t>(0x0100 | m_sp));
@@ -1563,8 +1506,7 @@ void CPU::pollNmi()
 
 void CPU::pollIrq()
 {
-    // CLI/SEI/PLP change I too late to affect their own IRQ poll. RTI is
-    // intentionally excluded: its restored I flag is visible in time.
+
     bool irqDisabled = getFlag(0x04);
     if (m_currentOpcode == 0x58 || m_currentOpcode == 0x78 || m_currentOpcode == 0x28)
         irqDisabled = m_irqDisableBeforeInstruction;
@@ -1574,8 +1516,7 @@ void CPU::pollIrq()
 
 void CPU::pollInterrupts()
 {
-    // Branches have their own polling points, where both asynchronous NMI and
-    // the level-sensitive IRQ input are sampled together.
+
     pollNmi();
     pollIrq();
 }
@@ -1593,11 +1534,7 @@ bool CPU::isBranchOpcode(uint8_t opcode)
 
 bool CPU::needsSecondCyclePcRead(uint8_t opcode)
 {
-    // NMOS 6502 one-byte instructions still fetch the following byte during
-    // cycle 2. The value is discarded, but the bus access is observable when
-    // PC points at memory-mapped I/O (notably $2002 in cpu_exec_space_ppuio).
-    // JAM/KIL opcodes are intentionally excluded because this core models
-    // their halted state separately.
+
     switch (opcode) {
     case 0x08: case 0x0A: case 0x18: case 0x1A:
     case 0x28: case 0x2A: case 0x38: case 0x3A:
@@ -1615,53 +1552,43 @@ bool CPU::needsSecondCyclePcRead(uint8_t opcode)
 
 bool CPU::indexedDummyReadAddress(uint16_t& addr) const
 {
-    // Indexed 6502 addressing performs a provisional read before the final
-    // access. For read instructions this occurs only when the low-byte add
-    // carries into the high byte; indexed stores always perform it. The
-    // provisional address uses the original high byte with the corrected
-    // low byte. This bus access is observable through PPU/APU I/O mirrors.
+
     uint16_t base = 0;
     bool always = false;
 
     switch (m_currentOpcode) {
-    // abs,X reads whose final access is kept pending by this core
-    case 0xBD: // LDA abs,X
-    case 0xBC: // LDY abs,X
+
+    case 0xBD:
+    case 0xBC:
         base = static_cast<uint16_t>(m_pendingIoAddr - m_x);
         break;
 
-    // abs,Y reads whose final access is kept pending
-    case 0xB9: // LDA abs,Y
-    case 0xBE: // LDX abs,Y
-    case 0xBF: // LAX abs,Y (unofficial)
+    case 0xB9:
+    case 0xBE:
+    case 0xBF:
         base = static_cast<uint16_t>(m_pendingIoAddr - m_y);
         break;
 
-    // (zp),Y reads whose final access is kept pending
-    case 0xB1: // LDA (zp),Y
-    case 0xB3: // LAX (zp),Y (unofficial)
+    case 0xB1:
+    case 0xB3:
         base = static_cast<uint16_t>(m_pendingIoAddr - m_y);
         break;
 
-    // Indexed stores always issue the provisional read, regardless of carry.
-    case 0x9D: // STA abs,X
+    case 0x9D:
         base = static_cast<uint16_t>(m_pendingIoAddr - m_x);
         always = true;
         break;
-    case 0x99: // STA abs,Y
-    case 0x91: // STA (zp),Y
+    case 0x99:
+    case 0x91:
         base = static_cast<uint16_t>(m_pendingIoAddr - m_y);
         always = true;
         break;
 
-    // The unstable high-byte stores retain the unindexed base in the pending
-    // I/O slot. They otherwise use the same store-addressing provisional read
-    // as STA: old high byte plus the already-indexed low byte.
-    case 0x9C: // SHY/SYA abs,X
-    case 0x9E: // SHX/SXA abs,Y
-    case 0x9F: // SHA/AHX abs,Y
-    case 0x9B: // TAS/SHS abs,Y
-    case 0x93: // SHA/AHX (zp),Y
+    case 0x9C:
+    case 0x9E:
+    case 0x9F:
+    case 0x9B:
+    case 0x93:
         if (m_pendingIoOp != PendingIoOp::UnstableHighStore)
             return false;
         base = m_pendingIoAddr;
@@ -1703,8 +1630,6 @@ CPU::BusCycle CPU::nextBusCycle() const
     cycle.dummy = false;
     cycle.exact = false;
 
-    // At an instruction boundary the CPU will either begin IRQ/NMI entry with
-    // a discarded PC read or fetch the next opcode. Both place PC on the bus.
     if (m_cycles == 0) {
         cycle.address = m_pc;
         cycle.exact = true;
@@ -2116,17 +2041,16 @@ CPU::BusCycle CPU::nextBusCycle() const
         return cycle;
     }
 
-
     if (isBranchSequence()) {
         cycle.exact = true;
         if (m_pendingIoData2 == 0) {
-            // Cycle 2: relative offset fetch.
+
             cycle.address = m_pc;
             return cycle;
         }
         if ((!m_branchPageCrossed && m_cycles == 1) ||
             (m_branchPageCrossed && m_cycles == 2)) {
-            // Taken branch discarded sequential-PC read.
+
             cycle.address = m_pc;
             cycle.dummy = true;
             return cycle;
@@ -2140,7 +2064,6 @@ CPU::BusCycle CPU::nextBusCycle() const
         return cycle;
     }
 
-    // Phase 26G2 direct zero-page/absolute memory RMW sequences.
     if (isDirectRmwSequence()) {
         const bool absolute = m_pendingIoOp == PendingIoOp::AbsRmw;
         cycle.exact = true;
@@ -2170,7 +2093,6 @@ CPU::BusCycle CPU::nextBusCycle() const
         return cycle;
     }
 
-    // Phase 26G1 direct zero-page/absolute memory sequences.
     if (isDirectMemorySequence()) {
         const bool absolute = m_pendingIoOp == PendingIoOp::AbsRead ||
                               m_pendingIoOp == PendingIoOp::AbsStore;
@@ -2209,7 +2131,6 @@ CPU::BusCycle CPU::nextBusCycle() const
         return cycle;
     }
 
-    // One-byte instructions have an observable discarded PC read on cycle 2.
     if (m_pendingIoOp == PendingIoOp::DummyRead) {
         cycle.address = m_pendingIoAddr;
         cycle.dummy = true;
@@ -2217,9 +2138,6 @@ CPU::BusCycle CPU::nextBusCycle() const
         return cycle;
     }
 
-    // NMOS memory RMW instructions use the final two CPU cycles for two
-    // externally visible writes to the same address: first the unmodified
-    // byte, then the modified byte. RDY cannot halt either write cycle.
     if (m_pendingIoOp == PendingIoOp::Rmw && (m_cycles == 2 || m_cycles == 1)) {
         cycle.type = BusCycleType::Write;
         cycle.address = m_pendingIoAddr;
@@ -2229,8 +2147,6 @@ CPU::BusCycle CPU::nextBusCycle() const
         return cycle;
     }
 
-    // Indexed reads/stores expose their provisional address on the cycle
-    // immediately before the final transfer.
     if (m_cycles == 2 && m_pendingIoOp != PendingIoOp::None) {
         uint16_t dummyAddr = 0;
         if (indexedDummyReadAddress(dummyAddr)) {
@@ -2248,9 +2164,6 @@ CPU::BusCycle CPU::nextBusCycle() const
         return cycle;
     }
 
-    // Final scheduled I/O is fully known, including store data. This is the
-    // authoritative signal used by RDY/DMC arbitration instead of a separate
-    // collection of opcode-specific write-cycle guesses.
     if (m_cycles == 1 && m_pendingIoOp != PendingIoOp::None) {
         if (m_pendingIoOp == PendingIoOp::Write) {
             cycle.type = BusCycleType::Write;
@@ -2288,11 +2201,6 @@ CPU::BusCycle CPU::nextBusCycle() const
         return cycle;
     }
 
-    // Defensive fallback. The all-opcode headless regression verifies that
-    // every executable opcode reaches one of the exact finite sequences above.
-    // In normal execution this path is therefore reserved for the deliberate
-    // JAM/KIL halted representation (or a future unconverted sequence). Keep it
-    // tagged !exact so DMA never mistakes a synthesized PC read for hardware.
     cycle.address = m_pc;
     cycle.dummy = true;
     return cycle;
@@ -2303,8 +2211,7 @@ void CPU::clock()
     bool startedInstruction = false;
 
     if (m_cycles == 0) {
-        // Service only interrupts committed by the previous instruction's
-        // poll. NMI has priority if both were sampled.
+
         if (m_nmiPolled) {
             serviceNmi();
         }
@@ -2315,10 +2222,6 @@ void CPU::clock()
             const bool irqDisableBefore = getFlag(0x04);
             uint8_t opcode = fetch();
 
-            // The opcode fetch advances PC before the instruction body runs.
-            // Capture that address now because RTS/RTI/BRK mutate PC
-            // immediately in this instruction-oriented core, while hardware
-            // still performs its discarded cycle-2 read from this location.
             if (needsSecondCyclePcRead(opcode)) {
                 m_pendingIoOp = PendingIoOp::DummyRead;
                 m_pendingIoAddr = m_pc;
@@ -2336,9 +2239,7 @@ void CPU::clock()
     }
 
     if (m_cycles > 0) {
-        // BRK/IRQ/NMI use an explicit seven-cycle bus sequence. BRK's first
-        // cycle was the opcode fetch above, so its sequence begins on the next
-        // CPU clock; hardware IRQ/NMI begin immediately at this boundary.
+
         if (isInterruptEntry()) {
             if (!startedInstruction)
                 clockInterruptEntry();
@@ -2357,9 +2258,7 @@ void CPU::clock()
         }
 
         if (isStackSequence()) {
-            // Stack/subroutine sequences now own every remaining bus slot.
-            // Preserve the established interrupt poll timing while letting RTI
-            // expose its restored I flag before the poll at m_cycles == 2.
+
             if (m_pollInterruptsThisSequence && m_cycles == 2)
                 pollInterrupts();
 
@@ -2377,10 +2276,7 @@ void CPU::clock()
         }
 
         if (isImpliedSequence()) {
-            // Two-cycle implied/accumulator instructions poll during the
-            // opcode-fetch cycle. The actual register/flag mutation and the
-            // observable discarded PC read happen on cycle 2, so RDY/DMA can
-            // stretch that final cycle without applying the operation early.
+
             if (m_pollInterruptsThisSequence && startedInstruction)
                 pollInterrupts();
             const bool nmiPendingAtFinalCycleStart =
@@ -2395,17 +2291,10 @@ void CPU::clock()
         }
 
         if (isImmediateSequence()) {
-            // Two-cycle immediate instructions poll IRQ/NMI during cycle 1
-            // (the opcode fetch), not during the final operand-read cycle.
-            // Polling on cycle 2 made a just-asserted IRQ suppress the next
-            // instruction, which is visible in cpu_interrupts_v2/4-irq_and_dma
-            // at the +7 boundary (LDA #$07 must finish and STA $4014 must run).
+
             if (m_pollInterruptsThisSequence && startedInstruction)
                 pollInterrupts();
 
-            // NMI is also sampled at the normal second-to-last-cycle point.
-            // Keep the final-cycle late-edge path below for an edge that arrives
-            // after this poll but before the instruction actually completes.
             const bool nmiPendingAtFinalCycleStart =
                 m_pollInterruptsThisSequence && m_cycles == 1 && m_nmiSampled;
             clockImmediateSequence();
@@ -2426,8 +2315,7 @@ void CPU::clock()
         }
 
         if (isBranchSequence()) {
-            // Branches poll once at opcode setup. A taken page-crossing branch
-            // polls again immediately before its PCH-fixup/provisional cycle.
+
             const bool crossingPenaltyCycle = m_branchPageCrossed && m_cycles == 2;
             if (m_pollInterruptsThisSequence && (startedInstruction || crossingPenaltyCycle))
                 pollInterrupts();
@@ -2466,9 +2354,7 @@ void CPU::clock()
         }
 
         if (isIndirectSequence()) {
-            // ($nn),Y reads conditionally gain a provisional page-cross cycle.
-            // Poll on the pointer-high cycle only when it remains the
-            // second-to-last cycle; otherwise poll on the provisional cycle.
+
             const bool indYRead = m_pendingIoOp == PendingIoOp::IndYRead;
             const bool pointerHighCycle = indYRead && m_cycles == 2 && m_pendingIoData2 == 0;
             if (m_pollInterruptsThisSequence && m_cycles == 2 && !pointerHighCycle)
@@ -2501,9 +2387,7 @@ void CPU::clock()
         }
 
         if (isAbsIndexedReadSequence()) {
-            // A crossing read polls on the provisional cycle; a non-crossing
-            // read polls on the high-byte operand cycle. The crossing status
-            // is only known after that high byte has been fetched.
+
             if (m_pollInterruptsThisSequence && m_cycles == 2 && m_pendingIoData != 0)
                 pollInterrupts();
             const bool highOperandCycle = (m_cycles == 2 && m_pendingIoData == 0);
@@ -2562,27 +2446,16 @@ void CPU::clock()
             return;
         }
 
-        // Cycle 2 of every one-byte NMOS instruction reads the byte at the PC
-        // following the opcode. The instruction body is still atomic, but
-        // preserving this externally visible I/O read lets PPU/APU registers
-        // observe the same side effects as hardware.
         if (!startedInstruction && m_pendingIoOp == PendingIoOp::DummyRead) {
             const uint16_t dummyAddr = m_pendingIoAddr;
             m_pendingIoOp = PendingIoOp::None;
             (void)read(dummyAddr);
         }
 
-        // Memory RMW cycle immediately before the final write drives the
-        // original byte back onto the bus. Keep the pending operation alive
-        // so completePendingIo() can perform the modified write next cycle.
         if (!startedInstruction && m_cycles == 2 && m_pendingIoOp == PendingIoOp::Rmw) {
             write(m_pendingIoAddr, m_pendingIoData);
         }
 
-        // Indexed addressing has a provisional bus read one cycle before the
-        // final data access. For page-crossing reads this uses the old high
-        // byte; indexed stores perform it unconditionally. Keep it on the
-        // penultimate CPU cycle so memory-mapped I/O sees the correct order.
         if (!startedInstruction && m_cycles == 2 &&
             m_pendingIoOp != PendingIoOp::None &&
             m_pendingIoOp != PendingIoOp::DummyRead &&
@@ -2592,38 +2465,21 @@ void CPU::clock()
                 (void)read(dummyAddr);
         }
 
-        // Most instructions poll IRQ/NMI on their second-to-last cycle.
-        // Branches are an NMOS 6502 exception: all branches poll during the
-        // opcode/offset setup (before cycle 2), and a taken branch that crosses
-        // a page polls a second time before the PCH fixup cycle.
         if (m_pollInterruptsThisSequence) {
             if (isBranchOpcode(m_currentOpcode)) {
                 if (startedInstruction || (m_branchPageCrossed && m_cycles == 2))
                     pollInterrupts();
             }
             else if (m_cycles == 2) {
-                    // IRQ and NMI are normally recognized at the same
-                // second-to-last-cycle polling point. NMI remains edge-latched
-                // and may still be caught by the final-cycle late-edge path
-                // below if it arrives after this poll.
+
                 pollInterrupts();
             }
         }
 
-        // Remember whether an external NMI edge was already present when the
-        // final cycle began. A final-cycle PPU register access is allowed to
-        // cancel that edge ($2002 read / $2000 disable). Conversely, an NMI
-        // edge created by the final I/O access itself ($2000 enabling NMI
-        // during VBlank) is deliberately not sampled until the next
-        // instruction, preserving the documented one-instruction delay.
         const bool nmiPendingAtFinalCycleStart =
             m_pollInterruptsThisSequence && !isBranchOpcode(m_currentOpcode) &&
             m_cycles == 1 && m_nmiSampled;
 
-        // Memory-mapped APU/PPU I/O happens on the final CPU cycle of the
-        // instruction. Bus::clock() advances the APU before calling here,
-        // which also gives the correct ordering for same-cycle frame/length
-        // clocks versus CPU register accesses.
         if (m_cycles == 1) {
             completePendingIo();
             if (nmiPendingAtFinalCycleStart && m_nmiSampled)
@@ -2646,9 +2502,6 @@ void CPU::execute(uint8_t opcode)
 {
     Instruction& inst = m_table[opcode];
 
-    // Establish the base cycle count before executing the operation.
-    // Addressing helpers and branches may add page-cross/taken-branch
-    // penalties to m_cycles.  The old ordering overwrote those penalties.
     if (inst.operate) {
         m_cycles = inst.cycles;
         (this->*inst.operate)();
@@ -2660,9 +2513,7 @@ void CPU::execute(uint8_t opcode)
 
 void CPU::scheduleIoWrite(uint16_t addr, uint8_t data)
 {
-    // Stores put their value on the external bus on the final instruction
-    // cycle. Keeping every scheduled store pending (not just PPU/APU writes)
-    // also gives indexed stores a real penultimate dummy-read slot.
+
     m_pendingIoOp = PendingIoOp::Write;
     m_pendingIoAddr = addr;
     m_pendingIoData = data;
@@ -2670,10 +2521,7 @@ void CPU::scheduleIoWrite(uint16_t addr, uint8_t data)
 
 void CPU::scheduleUnstableHighStore(uint16_t base)
 {
-    // $93/$9B/$9C/$9E/$9F need the original, unindexed base until the final
-    // bus cycle. On a page crossing the NMOS address-high computation collides
-    // with the value being stored, so the final address high byte is corrupted
-    // by the same AND that produces the data byte.
+
     m_pendingIoOp = PendingIoOp::UnstableHighStore;
     m_pendingIoAddr = base;
     m_pendingIoData = 0;
@@ -2681,9 +2529,7 @@ void CPU::scheduleUnstableHighStore(uint16_t base)
 
 void CPU::scheduleIoRead(PendingIoOp op, uint16_t addr)
 {
-    // Loads/BIT/LAX that use this helper perform the data read on their final
-    // cycle. This is required for indexed page-cross dummy reads: the
-    // provisional read must happen first, then the corrected effective read.
+
     m_pendingIoOp = op;
     m_pendingIoAddr = addr;
     m_pendingIoData = 0;
@@ -2717,20 +2563,20 @@ void CPU::completePendingIo()
         uint8_t source = 0;
 
         switch (m_currentOpcode) {
-        case 0x9C: // SHY/SYA abs,X
+        case 0x9C:
             index = m_x;
             source = m_y;
             break;
-        case 0x9E: // SHX/SXA abs,Y
+        case 0x9E:
             index = m_y;
             source = m_x;
             break;
-        case 0x9F: // SHA/AHX abs,Y
-        case 0x93: // SHA/AHX (zp),Y
+        case 0x9F:
+        case 0x93:
             index = m_y;
             source = static_cast<uint8_t>(m_a & m_x);
             break;
-        case 0x9B: // TAS/SHS abs,Y
+        case 0x9B:
             index = m_y;
             source = m_sp;
             break;
@@ -2742,10 +2588,6 @@ void CPU::completePendingIo()
         const uint8_t stored = static_cast<uint8_t>(source & hPlusOne);
         uint16_t target = static_cast<uint16_t>(base + index);
 
-        // Without a carry, the normal base high byte remains on the address
-        // bus. With a carry, the incremented high byte is ANDed with the same
-        // source that drives the data bus. Thus the high byte of the actual
-        // write address becomes exactly the byte being stored.
         if ((base & 0xFF00) != (target & 0xFF00))
             target = static_cast<uint16_t>((static_cast<uint16_t>(stored) << 8) |
                                            (target & 0x00FF));
@@ -2791,8 +2633,6 @@ uint16_t CPU::addrIndirect()
 
     uint8_t lo = read(ptr);
 
-    // NMOS 6502 JMP-indirect page-wrap bug: if the pointer ends in
-    // $FF, the high byte is read from the beginning of the same page.
     uint16_t hiAddr = (uint16_t)((ptr & 0xFF00) | ((ptr + 1) & 0x00FF));
     uint8_t hi = read(hiAddr);
 
@@ -2845,8 +2685,6 @@ uint16_t CPU::addrIndirectY()
     return base + m_y;
 }
 
-// Read variants with page-cross penalty (for loads/ALU/logic/compare)
-
 uint16_t CPU::addrAbsoluteXRead()
 {
     uint16_t base = addrAbsolute();
@@ -2898,10 +2736,7 @@ bool CPU::getFlag(uint8_t flag) const
 
 void CPU::branchIf(bool condition)
 {
-    // Phase 26H2: branch condition is re-evaluated when the real cycle-2
-    // offset fetch occurs. Do not consume the operand or change PC atomically
-    // during opcode execution. `condition` is intentionally unused here; the
-    // opcode selects the same flag test in clockBranchSequence().
+
     (void)condition;
     m_branchPageCrossed = false;
     m_pendingIoOp = PendingIoOp::Branch;
@@ -2915,19 +2750,12 @@ void CPU::write(uint16_t addr, uint8_t data) { m_bus.write(addr, data); }
 
 void CPU::writeRmw(uint16_t addr, uint8_t oldValue, uint8_t newValue)
 {
-    // Phase 26C: do not perform either NMOS RMW write atomically here. The
-    // original value is driven on the penultimate CPU cycle and the modified
-    // value on the final CPU cycle. This makes both write slots visible to
-    // DMA/RDY arbitration and to memory-mapped mapper/I/O side effects.
+
     m_pendingIoOp = PendingIoOp::Rmw;
     m_pendingIoAddr = addr;
     m_pendingIoData = oldValue;
     m_pendingIoData2 = newValue;
 }
-
-// ---------------------------------------------------------
-// STACK
-// ---------------------------------------------------------
 
 void CPU::push(uint8_t value)
 {
@@ -2954,11 +2782,6 @@ uint16_t CPU::pull16()
     return (uint16_t)lo | ((uint16_t)hi << 8);
 }
 
-// ---------------------------------------------------------
-// INSTRUCTIONS
-// ---------------------------------------------------------
-
-// Loads (existing)
 void CPU::opLDA_imm()
 {
     m_pendingIoOp = PendingIoOp::Immediate;
@@ -2983,7 +2806,6 @@ void CPU::opLDY_imm()
     m_pendingIoData2 = 0;
 }
 
-// Loads (zp/abs you already had)
 void CPU::opLDA_zp() { m_pendingIoOp = PendingIoOp::ZpRead; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
 
 void CPU::opLDA_abs() { m_pendingIoOp = PendingIoOp::AbsRead; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
@@ -2995,8 +2817,6 @@ void CPU::opLDX_abs() { m_pendingIoOp = PendingIoOp::AbsRead; m_pendingIoAddr = 
 void CPU::opLDY_zp() { m_pendingIoOp = PendingIoOp::ZpRead; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
 
 void CPU::opLDY_abs() { m_pendingIoOp = PendingIoOp::AbsRead; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
-
-// NEW Loads: indexed & indirect
 
 void CPU::opLDA_zpx()
 {
@@ -3040,13 +2860,11 @@ void CPU::opLDY_zpx()
 
 void CPU::opLDY_absx() { m_pendingIoOp = PendingIoOp::AbsXRead; m_pendingIoAddr = 0; m_pendingIoData = 0; }
 
-// INC/DEC registers
 void CPU::opINX() { m_pendingIoOp = PendingIoOp::Implied; }
 void CPU::opDEX() { m_pendingIoOp = PendingIoOp::Implied; }
 void CPU::opINY() { m_pendingIoOp = PendingIoOp::Implied; }
 void CPU::opDEY() { m_pendingIoOp = PendingIoOp::Implied; }
 
-// Flags
 void CPU::opSEI() { m_pendingIoOp = PendingIoOp::Implied; }
 void CPU::opCLI() { m_pendingIoOp = PendingIoOp::Implied; }
 
@@ -3056,16 +2874,12 @@ void CPU::opCLD() { m_pendingIoOp = PendingIoOp::Implied; }
 void CPU::opSED() { m_pendingIoOp = PendingIoOp::Implied; }
 void CPU::opCLV() { m_pendingIoOp = PendingIoOp::Implied; }
 
-// Jumps / interrupts
 void CPU::opJMP_abs() { m_pendingIoOp = PendingIoOp::JmpAbs; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
 void CPU::opJMP_ind() { m_pendingIoOp = PendingIoOp::JmpInd; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
 
 void CPU::opBRK()
 {
-    // BRK is architecturally a two-byte instruction, but its stack writes and
-    // vector fetch happen over later bus cycles. Delaying those operations is
-    // what allows a late NMI edge to hijack the BRK vector while preserving
-    // the B flag in the already-pushed status byte.
+
     m_pc++;
     m_pendingIoOp = PendingIoOp::InterruptBrkIrq;
     m_pendingIoAddr = 0;
@@ -3080,7 +2894,6 @@ void CPU::opRTI()
     m_pendingIoData = 0;
 }
 
-// Stores
 void CPU::opSTA_zp() { m_pendingIoOp = PendingIoOp::ZpStore; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
 void CPU::opSTX_zp() { m_pendingIoOp = PendingIoOp::ZpStore; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
 void CPU::opSTY_zp() { m_pendingIoOp = PendingIoOp::ZpStore; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
@@ -3113,7 +2926,6 @@ void CPU::opSTX_abs() { m_pendingIoOp = PendingIoOp::AbsStore; m_pendingIoAddr =
 
 void CPU::opSTY_abs() { m_pendingIoOp = PendingIoOp::AbsStore; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
 
-// Logic (existing imm)
 void CPU::opAND_imm()
 {
     m_pendingIoOp = PendingIoOp::Immediate;
@@ -3138,7 +2950,6 @@ void CPU::opEOR_imm()
     m_pendingIoData2 = 0;
 }
 
-// Logic (zp/abs)
 void CPU::opAND_zp() { m_pendingIoOp = PendingIoOp::ZpRead; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
 
 void CPU::opAND_abs() { m_pendingIoOp = PendingIoOp::AbsRead; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
@@ -3150,8 +2961,6 @@ void CPU::opORA_abs() { m_pendingIoOp = PendingIoOp::AbsRead; m_pendingIoAddr = 
 void CPU::opEOR_zp() { m_pendingIoOp = PendingIoOp::ZpRead; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
 
 void CPU::opEOR_abs() { m_pendingIoOp = PendingIoOp::AbsRead; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
-
-// NEW Logic (indexed / indirect)
 
 void CPU::opAND_zpx()
 {
@@ -3231,13 +3040,9 @@ void CPU::opEOR_indy()
     m_pendingIoData2 = 0;
 }
 
-// BIT
-
 void CPU::opBIT_zp() { m_pendingIoOp = PendingIoOp::ZpRead; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
 
 void CPU::opBIT_abs() { m_pendingIoOp = PendingIoOp::AbsRead; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
-
-// Shifts / rotates
 
 void CPU::opASL_acc()
 {
@@ -3339,8 +3144,6 @@ void CPU::opROR_absx()
     m_pendingIoData2 = 0;
 }
 
-// Branches
-
 void CPU::opBEQ() { branchIf(getFlag(0x02)); }
 void CPU::opBNE() { branchIf(!getFlag(0x02)); }
 void CPU::opBMI() { branchIf(getFlag(0x80)); }
@@ -3350,13 +3153,11 @@ void CPU::opBCS() { branchIf(getFlag(0x01)); }
 void CPU::opBVC() { branchIf(!getFlag(0x40)); }
 void CPU::opBVS() { branchIf(getFlag(0x40)); }
 
-// Stack ops
 void CPU::opPHA() { m_pendingIoOp = PendingIoOp::StackPha; }
 void CPU::opPHP() { m_pendingIoOp = PendingIoOp::StackPhp; }
 void CPU::opPLA() { m_pendingIoOp = PendingIoOp::StackPla; }
 void CPU::opPLP() { m_pendingIoOp = PendingIoOp::StackPlp; }
 
-// Subroutines
 void CPU::opJSR()
 {
     m_pendingIoOp = PendingIoOp::StackJsr;
@@ -3370,8 +3171,6 @@ void CPU::opRTS()
     m_pendingIoAddr = 0;
     m_pendingIoData = 0;
 }
-
-// Transfers
 
 void CPU::opTAX()
 {
@@ -3402,10 +3201,6 @@ void CPU::opTXS()
 {
     m_pendingIoOp = PendingIoOp::Implied;
 }
-
-// ---------------------------------------------------------
-// ARITHMETIC
-// ---------------------------------------------------------
 
 void CPU::opADC_imm()
 {
@@ -3483,14 +3278,10 @@ void CPU::opSBC_indy()
     m_pendingIoData2 = 0;
 }
 
-// ---------------------------------------------------------
-// COMPARE
-// ---------------------------------------------------------
-
 void CPU::cmpHelper(uint8_t reg, uint8_t value)
 {
     uint16_t diff = (uint16_t)reg - (uint16_t)value;
-    setFlag(0x01, reg >= value); // Carry if reg >= value
+    setFlag(0x01, reg >= value);
     setZeroNeg((uint8_t)(diff & 0xFF));
 }
 
@@ -3556,10 +3347,6 @@ void CPU::opCPY_zp() { m_pendingIoOp = PendingIoOp::ZpRead; m_pendingIoAddr = 0;
 
 void CPU::opCPY_abs() { m_pendingIoOp = PendingIoOp::AbsRead; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
 
-// ---------------------------------------------------------
-// MEMORY INC/DEC
-// ---------------------------------------------------------
-
 void CPU::opINC_zp() { m_pendingIoOp = PendingIoOp::ZpRmw; m_pendingIoAddr = 0; m_pendingIoData = 0; m_pendingIoData2 = 0; }
 
 void CPU::opINC_zpx()
@@ -3600,29 +3387,18 @@ void CPU::opDEC_absx()
     m_pendingIoData2 = 0;
 }
 
-// ---------------------------------------------------------
-// MISC
-// ---------------------------------------------------------
-
 void CPU::opNOP()
 {
     m_pendingIoOp = PendingIoOp::Implied;
 }
 
-// ---------------------------------------------------------
-// UNOFFICIAL / ILLEGAL OPCODES
-// ---------------------------------------------------------
-
-// JAM / KIL – freezes the CPU (never returns from the instruction)
 void CPU::opJAM()
 {
-    // Keep the PC on the JAM opcode and burn cycles forever.
-    // Setting a huge cycle count makes the emulator hang here.
-    m_pc--;          // undo the fetch advance so we stay on the JAM
+
+    m_pc--;
     m_cycles = 0x7FFFFFFF;
 }
 
-// Unofficial NOPs that consume an operand
 void CPU::opNOP_imm()
 {
     m_pendingIoOp = PendingIoOp::Immediate;
@@ -3645,7 +3421,6 @@ void CPU::opNOP_abs() { m_pendingIoOp = PendingIoOp::AbsRead; m_pendingIoAddr = 
 
 void CPU::opNOP_absx() { m_pendingIoOp = PendingIoOp::AbsXRead; m_pendingIoAddr = 0; m_pendingIoData = 0; }
 
-// ---------- SLO = ASL mem then ORA A ----------
 void CPU::opSLO_indx()
 {
     m_pendingIoOp = PendingIoOp::IndXRmw;
@@ -3690,7 +3465,6 @@ void CPU::opSLO_absx()
     m_pendingIoData2 = 0;
 }
 
-// ---------- RLA = ROL mem then AND A ----------
 void CPU::opRLA_indx()
 {
     m_pendingIoOp = PendingIoOp::IndXRmw;
@@ -3735,7 +3509,6 @@ void CPU::opRLA_absx()
     m_pendingIoData2 = 0;
 }
 
-// ---------- SRE = LSR mem then EOR A ----------
 void CPU::opSRE_indx()
 {
     m_pendingIoOp = PendingIoOp::IndXRmw;
@@ -3780,7 +3553,6 @@ void CPU::opSRE_absx()
     m_pendingIoData2 = 0;
 }
 
-// ---------- RRA = ROR mem then ADC A ----------
 void CPU::opRRA_indx()
 {
     m_pendingIoOp = PendingIoOp::IndXRmw;
@@ -3825,7 +3597,6 @@ void CPU::opRRA_absx()
     m_pendingIoData2 = 0;
 }
 
-// ---------- SAX = store (A & X) ----------
 void CPU::opSAX_indx()
 {
     m_pendingIoOp = PendingIoOp::IndXStore;
@@ -3846,7 +3617,6 @@ void CPU::opSAX_zpy()
     m_pendingIoData2 = 0;
 }
 
-// ---------- LAX = LDA + LDX ----------
 void CPU::opLAX_indx()
 {
     m_pendingIoOp = PendingIoOp::IndXRead;
@@ -3877,7 +3647,6 @@ void CPU::opLAX_zpy()
 
 void CPU::opLAX_absy() { m_pendingIoOp = PendingIoOp::AbsYRead; m_pendingIoAddr = 0; m_pendingIoData = 0; }
 
-// ---------- DCP = DEC mem then CMP A ----------
 void CPU::opDCP_indx()
 {
     m_pendingIoOp = PendingIoOp::IndXRmw;
@@ -3922,7 +3691,6 @@ void CPU::opDCP_absx()
     m_pendingIoData2 = 0;
 }
 
-// ---------- ISC / ISB = INC mem then SBC A ----------
 void CPU::opISC_indx()
 {
     m_pendingIoOp = PendingIoOp::IndXRmw;
@@ -3967,7 +3735,6 @@ void CPU::opISC_absx()
     m_pendingIoData2 = 0;
 }
 
-// ---------- Immediate unofficial ----------
 void CPU::opANC_imm()
 {
     m_pendingIoOp = PendingIoOp::Immediate;
@@ -4008,7 +3775,6 @@ void CPU::opSBC_imm_unofficial()
     m_pendingIoData2 = 0;
 }
 
-// Unstable immediate approximations (common in accurate emulators)
 void CPU::opLXA_imm()
 {
     m_pendingIoOp = PendingIoOp::Immediate;
@@ -4024,9 +3790,6 @@ void CPU::opANE_imm()
     m_pendingIoData = 0;
     m_pendingIoData2 = 0;
 }
-
-// ---------- Highly unstable store / transfer opcodes ----------
-// These use the classic “AND with (H+1)” approximation.
 
 void CPU::opSHA_indy()
 {
@@ -4064,20 +3827,14 @@ void CPU::opTAS_absy()
 
 void CPU::opLAS_absy() { m_pendingIoOp = PendingIoOp::AbsYRead; m_pendingIoAddr = 0; m_pendingIoData = 0; }
 
-// ---------------------------------------------------------
-// OPCODE TABLE
-// ---------------------------------------------------------
-
 void CPU::buildTable()
 {
     m_table.fill({ nullptr, 2 });
 
-    // Loads (imm)
     m_table[0xA9] = { &CPU::opLDA_imm, 2 };
     m_table[0xA2] = { &CPU::opLDX_imm, 2 };
     m_table[0xA0] = { &CPU::opLDY_imm, 2 };
 
-    // Loads (zp/abs)
     m_table[0xA5] = { &CPU::opLDA_zp, 3 };
     m_table[0xAD] = { &CPU::opLDA_abs, 4 };
     m_table[0xA6] = { &CPU::opLDX_zp, 3 };
@@ -4085,7 +3842,6 @@ void CPU::buildTable()
     m_table[0xA4] = { &CPU::opLDY_zp, 3 };
     m_table[0xAC] = { &CPU::opLDY_abs, 4 };
 
-    // NEW Loads (indexed / indirect)
     m_table[0xB5] = { &CPU::opLDA_zpx, 4 };
     m_table[0xBD] = { &CPU::opLDA_absx, 4 };
     m_table[0xB9] = { &CPU::opLDA_absy, 4 };
@@ -4098,7 +3854,6 @@ void CPU::buildTable()
     m_table[0xB4] = { &CPU::opLDY_zpx, 4 };
     m_table[0xBC] = { &CPU::opLDY_absx, 4 };
 
-    // Stores
     m_table[0x85] = { &CPU::opSTA_zp, 3 };
     m_table[0x86] = { &CPU::opSTX_zp, 3 };
     m_table[0x84] = { &CPU::opSTY_zp, 3 };
@@ -4117,12 +3872,10 @@ void CPU::buildTable()
     m_table[0x81] = { &CPU::opSTA_indx, 6 };
     m_table[0x91] = { &CPU::opSTA_indy, 6 };
 
-    // Logic (imm)
     m_table[0x29] = { &CPU::opAND_imm, 2 };
     m_table[0x09] = { &CPU::opORA_imm, 2 };
     m_table[0x49] = { &CPU::opEOR_imm, 2 };
 
-    // Logic (zp/abs)
     m_table[0x25] = { &CPU::opAND_zp, 3 };
     m_table[0x2D] = { &CPU::opAND_abs, 4 };
     m_table[0x05] = { &CPU::opORA_zp, 3 };
@@ -4130,7 +3883,6 @@ void CPU::buildTable()
     m_table[0x45] = { &CPU::opEOR_zp, 3 };
     m_table[0x4D] = { &CPU::opEOR_abs, 4 };
 
-    // NEW Logic (indexed / indirect)
     m_table[0x35] = { &CPU::opAND_zpx, 4 };
     m_table[0x3D] = { &CPU::opAND_absx, 4 };
     m_table[0x39] = { &CPU::opAND_absy, 4 };
@@ -4149,11 +3901,9 @@ void CPU::buildTable()
     m_table[0x41] = { &CPU::opEOR_indx, 6 };
     m_table[0x51] = { &CPU::opEOR_indy, 5 };
 
-    // BIT
     m_table[0x24] = { &CPU::opBIT_zp, 3 };
     m_table[0x2C] = { &CPU::opBIT_abs, 4 };
 
-    // Shifts / rotates
     m_table[0x0A] = { &CPU::opASL_acc, 2 };
     m_table[0x06] = { &CPU::opASL_zp, 5 };
     m_table[0x16] = { &CPU::opASL_zpx, 6 };
@@ -4178,13 +3928,11 @@ void CPU::buildTable()
     m_table[0x6E] = { &CPU::opROR_abs, 6 };
     m_table[0x7E] = { &CPU::opROR_absx, 7 };
 
-    // INC/DEC registers
     m_table[0xE8] = { &CPU::opINX, 2 };
     m_table[0xCA] = { &CPU::opDEX, 2 };
     m_table[0xC8] = { &CPU::opINY, 2 };
     m_table[0x88] = { &CPU::opDEY, 2 };
 
-    // Flags
     m_table[0x78] = { &CPU::opSEI, 2 };
     m_table[0x58] = { &CPU::opCLI, 2 };
     m_table[0x18] = { &CPU::opCLC, 2 };
@@ -4193,13 +3941,11 @@ void CPU::buildTable()
     m_table[0xF8] = { &CPU::opSED, 2 };
     m_table[0xB8] = { &CPU::opCLV, 2 };
 
-    // Jumps / interrupts
     m_table[0x4C] = { &CPU::opJMP_abs, 3 };
     m_table[0x6C] = { &CPU::opJMP_ind, 5 };
     m_table[0x00] = { &CPU::opBRK, 7 };
     m_table[0x40] = { &CPU::opRTI, 6 };
 
-    // Branches
     m_table[0xF0] = { &CPU::opBEQ, 2 };
     m_table[0xD0] = { &CPU::opBNE, 2 };
     m_table[0x30] = { &CPU::opBMI, 2 };
@@ -4209,17 +3955,14 @@ void CPU::buildTable()
     m_table[0x50] = { &CPU::opBVC, 2 };
     m_table[0x70] = { &CPU::opBVS, 2 };
 
-    // Stack ops
     m_table[0x48] = { &CPU::opPHA, 3 };
     m_table[0x08] = { &CPU::opPHP, 3 };
     m_table[0x68] = { &CPU::opPLA, 4 };
     m_table[0x28] = { &CPU::opPLP, 4 };
 
-    // Subroutines
     m_table[0x20] = { &CPU::opJSR, 6 };
     m_table[0x60] = { &CPU::opRTS, 6 };
 
-    // Transfers
     m_table[0xAA] = { &CPU::opTAX, 2 };
     m_table[0x8A] = { &CPU::opTXA, 2 };
     m_table[0xA8] = { &CPU::opTAY, 2 };
@@ -4227,7 +3970,6 @@ void CPU::buildTable()
     m_table[0xBA] = { &CPU::opTSX, 2 };
     m_table[0x9A] = { &CPU::opTXS, 2 };
 
-    // Arithmetic
     m_table[0x69] = { &CPU::opADC_imm, 2 };
     m_table[0x65] = { &CPU::opADC_zp, 3 };
     m_table[0x75] = { &CPU::opADC_zpx, 4 };
@@ -4246,7 +3988,6 @@ void CPU::buildTable()
     m_table[0xE1] = { &CPU::opSBC_indx, 6 };
     m_table[0xF1] = { &CPU::opSBC_indy, 5 };
 
-    // Compare
     m_table[0xC9] = { &CPU::opCMP_imm, 2 };
     m_table[0xC5] = { &CPU::opCMP_zp, 3 };
     m_table[0xD5] = { &CPU::opCMP_zpx, 4 };
@@ -4264,7 +4005,6 @@ void CPU::buildTable()
     m_table[0xC4] = { &CPU::opCPY_zp, 3 };
     m_table[0xCC] = { &CPU::opCPY_abs, 4 };
 
-    // Memory INC/DEC
     m_table[0xE6] = { &CPU::opINC_zp, 5 };
     m_table[0xF6] = { &CPU::opINC_zpx, 6 };
     m_table[0xEE] = { &CPU::opINC_abs, 6 };
@@ -4275,14 +4015,8 @@ void CPU::buildTable()
     m_table[0xCE] = { &CPU::opDEC_abs, 6 };
     m_table[0xDE] = { &CPU::opDEC_absx, 7 };
 
-    // Misc
     m_table[0xEA] = { &CPU::opNOP, 2 };
 
-    // =========================================================
-    // UNOFFICIAL / ILLEGAL OPCODES – full coverage of all 256
-    // =========================================================
-
-    // --- JAM / KIL (halt the CPU) ---
     m_table[0x02] = { &CPU::opJAM, 2 };
     m_table[0x12] = { &CPU::opJAM, 2 };
     m_table[0x22] = { &CPU::opJAM, 2 };
@@ -4296,8 +4030,6 @@ void CPU::buildTable()
     m_table[0xD2] = { &CPU::opJAM, 2 };
     m_table[0xF2] = { &CPU::opJAM, 2 };
 
-    // --- Unofficial NOPs ---
-    // 1-byte implied
     m_table[0x1A] = { &CPU::opNOP, 2 };
     m_table[0x3A] = { &CPU::opNOP, 2 };
     m_table[0x5A] = { &CPU::opNOP, 2 };
@@ -4305,19 +4037,16 @@ void CPU::buildTable()
     m_table[0xDA] = { &CPU::opNOP, 2 };
     m_table[0xFA] = { &CPU::opNOP, 2 };
 
-    // 2-byte immediate / SKB
     m_table[0x80] = { &CPU::opNOP_imm, 2 };
     m_table[0x82] = { &CPU::opNOP_imm, 2 };
     m_table[0x89] = { &CPU::opNOP_imm, 2 };
     m_table[0xC2] = { &CPU::opNOP_imm, 2 };
     m_table[0xE2] = { &CPU::opNOP_imm, 2 };
 
-    // 2-byte zero-page
     m_table[0x04] = { &CPU::opNOP_zp, 3 };
     m_table[0x44] = { &CPU::opNOP_zp, 3 };
     m_table[0x64] = { &CPU::opNOP_zp, 3 };
 
-    // 2-byte zero-page,X
     m_table[0x14] = { &CPU::opNOP_zpx, 4 };
     m_table[0x34] = { &CPU::opNOP_zpx, 4 };
     m_table[0x54] = { &CPU::opNOP_zpx, 4 };
@@ -4325,10 +4054,8 @@ void CPU::buildTable()
     m_table[0xD4] = { &CPU::opNOP_zpx, 4 };
     m_table[0xF4] = { &CPU::opNOP_zpx, 4 };
 
-    // 3-byte absolute
     m_table[0x0C] = { &CPU::opNOP_abs, 4 };
 
-    // 3-byte absolute,X (page-cross penalty)
     m_table[0x1C] = { &CPU::opNOP_absx, 4 };
     m_table[0x3C] = { &CPU::opNOP_absx, 4 };
     m_table[0x5C] = { &CPU::opNOP_absx, 4 };
@@ -4336,7 +4063,6 @@ void CPU::buildTable()
     m_table[0xDC] = { &CPU::opNOP_absx, 4 };
     m_table[0xFC] = { &CPU::opNOP_absx, 4 };
 
-    // --- SLO (ASL + ORA) ---
     m_table[0x03] = { &CPU::opSLO_indx, 8 };
     m_table[0x07] = { &CPU::opSLO_zp, 5 };
     m_table[0x0F] = { &CPU::opSLO_abs, 6 };
@@ -4345,7 +4071,6 @@ void CPU::buildTable()
     m_table[0x1B] = { &CPU::opSLO_absy, 7 };
     m_table[0x1F] = { &CPU::opSLO_absx, 7 };
 
-    // --- RLA (ROL + AND) ---
     m_table[0x23] = { &CPU::opRLA_indx, 8 };
     m_table[0x27] = { &CPU::opRLA_zp, 5 };
     m_table[0x2F] = { &CPU::opRLA_abs, 6 };
@@ -4354,7 +4079,6 @@ void CPU::buildTable()
     m_table[0x3B] = { &CPU::opRLA_absy, 7 };
     m_table[0x3F] = { &CPU::opRLA_absx, 7 };
 
-    // --- SRE (LSR + EOR) ---
     m_table[0x43] = { &CPU::opSRE_indx, 8 };
     m_table[0x47] = { &CPU::opSRE_zp, 5 };
     m_table[0x4F] = { &CPU::opSRE_abs, 6 };
@@ -4363,7 +4087,6 @@ void CPU::buildTable()
     m_table[0x5B] = { &CPU::opSRE_absy, 7 };
     m_table[0x5F] = { &CPU::opSRE_absx, 7 };
 
-    // --- RRA (ROR + ADC) ---
     m_table[0x63] = { &CPU::opRRA_indx, 8 };
     m_table[0x67] = { &CPU::opRRA_zp, 5 };
     m_table[0x6F] = { &CPU::opRRA_abs, 6 };
@@ -4372,13 +4095,11 @@ void CPU::buildTable()
     m_table[0x7B] = { &CPU::opRRA_absy, 7 };
     m_table[0x7F] = { &CPU::opRRA_absx, 7 };
 
-    // --- SAX (store A & X) ---
     m_table[0x83] = { &CPU::opSAX_indx, 6 };
     m_table[0x87] = { &CPU::opSAX_zp, 3 };
     m_table[0x8F] = { &CPU::opSAX_abs, 4 };
     m_table[0x97] = { &CPU::opSAX_zpy, 4 };
 
-    // --- LAX (LDA + LDX) ---
     m_table[0xA3] = { &CPU::opLAX_indx, 6 };
     m_table[0xA7] = { &CPU::opLAX_zp, 3 };
     m_table[0xAF] = { &CPU::opLAX_abs, 4 };
@@ -4386,7 +4107,6 @@ void CPU::buildTable()
     m_table[0xB7] = { &CPU::opLAX_zpy, 4 };
     m_table[0xBF] = { &CPU::opLAX_absy, 4 };
 
-    // --- DCP (DEC + CMP) ---
     m_table[0xC3] = { &CPU::opDCP_indx, 8 };
     m_table[0xC7] = { &CPU::opDCP_zp, 5 };
     m_table[0xCF] = { &CPU::opDCP_abs, 6 };
@@ -4395,7 +4115,6 @@ void CPU::buildTable()
     m_table[0xDB] = { &CPU::opDCP_absy, 7 };
     m_table[0xDF] = { &CPU::opDCP_absx, 7 };
 
-    // --- ISC / ISB (INC + SBC) ---
     m_table[0xE3] = { &CPU::opISC_indx, 8 };
     m_table[0xE7] = { &CPU::opISC_zp, 5 };
     m_table[0xEF] = { &CPU::opISC_abs, 6 };
@@ -4404,7 +4123,6 @@ void CPU::buildTable()
     m_table[0xFB] = { &CPU::opISC_absy, 7 };
     m_table[0xFF] = { &CPU::opISC_absx, 7 };
 
-    // --- Immediate unofficial ---
     m_table[0x0B] = { &CPU::opANC_imm, 2 };
     m_table[0x2B] = { &CPU::opANC_imm, 2 };
     m_table[0x4B] = { &CPU::opALR_imm, 2 };
@@ -4412,11 +4130,9 @@ void CPU::buildTable()
     m_table[0xCB] = { &CPU::opAXS_imm, 2 };
     m_table[0xEB] = { &CPU::opSBC_imm_unofficial, 2 };
 
-    // Unstable immediate
-    m_table[0xAB] = { &CPU::opLXA_imm, 2 }; // LAX immediate (approx)
-    m_table[0x8B] = { &CPU::opANE_imm, 2 }; // ANE / XAA (approx)
+    m_table[0xAB] = { &CPU::opLXA_imm, 2 };
+    m_table[0x8B] = { &CPU::opANE_imm, 2 };
 
-    // Highly unstable (common approximations used by accurate emulators)
     m_table[0x93] = { &CPU::opSHA_indy, 6 };
     m_table[0x9F] = { &CPU::opSHA_absy, 5 };
     m_table[0x9E] = { &CPU::opSHX_absy, 5 };
@@ -4424,7 +4140,6 @@ void CPU::buildTable()
     m_table[0x9B] = { &CPU::opTAS_absy, 5 };
     m_table[0xBB] = { &CPU::opLAS_absy, 4 };
 }
-
 
 void CPU::saveState(std::vector<uint8_t>& out) const
 {
@@ -4496,27 +4211,3 @@ bool CPU::loadState(const uint8_t*& p, const uint8_t* end)
     m_pendingIoData2 = pendingData2;
     return true;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

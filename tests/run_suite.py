@@ -17,14 +17,12 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, asdict
 from typing import Iterable
 
-
 @dataclass
 class TestCase:
     path: pathlib.Path
     timing: str = "auto"
     runframes: int | None = None
     source: str = "discovery"
-
 
 @dataclass
 class TestResult:
@@ -34,20 +32,16 @@ class TestResult:
     outcome: str
     seconds: float
 
-
 def classify(code: int) -> str:
     return {0: "pass", 1: "fail", 2: "load-error", 3: "timeout", 4: "unsupported"}.get(code, "error")
 
-
 def run_command(args: list[str]) -> int:
     return subprocess.run(args).returncode
-
 
 def discover_roms(root: pathlib.Path) -> list[TestCase]:
     if root.is_file():
         return [TestCase(root)]
     return [TestCase(p) for p in sorted(root.rglob("*.nes"))]
-
 
 def manifest_cases(manifest: pathlib.Path, rom_root: pathlib.Path | None) -> list[TestCase]:
     tree = ET.parse(manifest)
@@ -67,14 +61,12 @@ def manifest_cases(manifest: pathlib.Path, rom_root: pathlib.Path | None) -> lis
         cases.append(TestCase(path=path, timing=timing, runframes=frames, source="manifest"))
     return cases
 
-
 def filter_cases(cases: Iterable[TestCase], selectors: list[str]) -> list[TestCase]:
     out = list(cases)
     if not selectors:
         return out
     wanted = [s.replace("\\", "/").lower() for s in selectors]
     return [c for c in out if any(s in c.path.as_posix().lower() for s in wanted)]
-
 
 def write_json(path: pathlib.Path, builtins_passed: bool, results: list[TestResult]) -> None:
     summary: dict[str, int] = {}
@@ -87,7 +79,6 @@ def write_json(path: pathlib.Path, builtins_passed: bool, results: list[TestResu
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -177,7 +168,6 @@ def main() -> int:
         print(f"JSON report: {args.json}")
 
     return 0 if all(r.exit_code == 0 for r in results) else 1
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

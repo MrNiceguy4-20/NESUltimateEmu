@@ -41,17 +41,17 @@ bool writeRom(const std::string& path) {
         size_t off = 16 + (cpuAddr - 0x8000);
         for (uint8_t b : bytes) rom[off++] = b;
     };
-    // Main: SEI; BRK; padding; forever.
+
     put(0x8000, {0x78, 0x00, 0xEA, 0x4C, 0x03, 0x80});
-    // NMI handler: LDA #$42; STA $6000; forever.
+
     put(0x8100, {0xA9,0x42,0x8D,0x00,0x60,0x4C,0x05,0x81});
-    // IRQ/BRK handler: LDA #$99; STA $6000; forever.
+
     put(0x8200, {0xA9,0x99,0x8D,0x00,0x60,0x4C,0x05,0x82});
-    // Vectors at mirrored top of 16K PRG.
+
     const size_t v = 16 + 0x3FFA;
-    rom[v+0] = 0x00; rom[v+1] = 0x81; // NMI $8100
-    rom[v+2] = 0x00; rom[v+3] = 0x80; // RESET $8000
-    rom[v+4] = 0x00; rom[v+5] = 0x82; // IRQ/BRK $8200
+    rom[v+0] = 0x00; rom[v+1] = 0x81;
+    rom[v+2] = 0x00; rom[v+3] = 0x80;
+    rom[v+4] = 0x00; rom[v+5] = 0x82;
     std::ofstream out(path, std::ios::binary);
     out.write(reinterpret_cast<const char*>(rom.data()), static_cast<std::streamsize>(rom.size()));
     return !!out;
@@ -65,10 +65,10 @@ bool writeIrqRom(const std::string& path) {
         size_t off = 16 + (cpuAddr - 0x8000);
         for (uint8_t b : bytes) rom[off++] = b;
     };
-    // Enable maskable IRQs, execute harmless instructions, then loop.
+
     put(0x8000, {0x58, 0xEA, 0xEA, 0x4C, 0x01, 0x80});
-    put(0x8100, {0x40}); // NMI: RTI
-    put(0x8200, {0x40}); // IRQ: RTI
+    put(0x8100, {0x40});
+    put(0x8200, {0x40});
     const size_t v = 16 + 0x3FFA;
     rom[v+0] = 0x00; rom[v+1] = 0x81;
     rom[v+2] = 0x00; rom[v+3] = 0x80;
@@ -83,9 +83,6 @@ int runInterruptHijackProbe() {
     const std::string brkPath = (std::filesystem::temp_directory_path() / "nesultimate_interrupt_hijack_probe.nes").string();
     if (!writeRom(brkPath)) return 2;
 
-    // Case 1a: NMI arriving before BRK's status-push/vector-selection
-    // boundary hijacks the in-flight BRK. The origin is still BRK, so B=1
-    // remains in the pushed status even though the NMI vector is selected.
     Machine brk;
     if (!brk.cart.loadFromFile(brkPath) || !brk.cart.mapperSupported()) return 2;
     brk.bus.powerOn();
@@ -95,8 +92,7 @@ int runInterruptHijackProbe() {
     bool brkPushedBreak = false;
     for (uint64_t i = 0; i < 2000; ++i) {
         const CPU::BusCycle before = brk.cpu.nextBusCycle();
-        // BRK cycle 5 is the status push. Inject before that cycle so vector
-        // selection must resolve to NMI.
+
         if (!brkInjected && before.type == CPU::BusCycleType::Write &&
             before.address == 0x01FB && (before.data & 0x10) != 0) {
             brk.cpu.nmi();
@@ -114,8 +110,6 @@ int runInterruptHijackProbe() {
         brk.bus.clock();
     }
 
-    // Case 1b: once BRK reaches its low-vector fetch, vector selection is
-    // committed. A new NMI edge here must not half/full-hijack this BRK.
     Machine brkLate;
     if (!brkLate.cart.loadFromFile(brkPath) || !brkLate.cart.mapperSupported()) return 2;
     brkLate.bus.powerOn();
@@ -138,9 +132,6 @@ int runInterruptHijackProbe() {
         brkLate.bus.clock();
     }
 
-    // Case 2: hardware IRQ has an earlier vector-commit point. An NMI edge
-    // arriving at IRQ's $FFFE low-vector boundary must not redirect that
-    // in-flight IRQ; it remains pending for the following instruction boundary.
     const std::string irqPath = (std::filesystem::temp_directory_path() / "nesultimate_irq_commit_probe.nes").string();
     if (!writeIrqRom(irqPath)) return 2;
     Machine irq;

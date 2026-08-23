@@ -4,10 +4,6 @@
 #include "Mapper.hpp"
 #include "Timing.hpp"
 
-// Small, hash-driven cartridge override layer. Entries are intentionally
-// conservative: only verified payload signatures belong here. The database
-// works on PRG+CHR payload bytes (header/trainer excluded), so incorrect or
-// archaic iNES metadata cannot prevent a known cartridge from being resolved.
 namespace RomDatabase {
 
 inline uint32_t crc32Update(uint32_t state, const uint8_t* data, std::size_t size)
@@ -57,8 +53,6 @@ struct Resolution {
     bool overrideChrNvRam = false;
     std::size_t chrNvRamSize = 0;
 
-    // Mapper-specific physical-layout selector passed through MapperConfig.
-    // 0 means the ordinary/default board wiring.
     uint8_t boardVariant = 0;
 };
 
@@ -67,8 +61,6 @@ inline Resolution resolveByCrc(uint16_t headerMapper, uint32_t payloadCrc,
 {
     Resolution r{};
 
-    // Supervision 16-in-1 / mapper 53 exists in two incompatible dump orders.
-    // Nestopia identifies the EPROM-first ordering from the first 32 KiB PRG.
     if (headerMapper == 53 && first32kPrgCrc == 0x63794E25u) {
         r.matched = true;
         r.boardVariant = 1;
@@ -76,34 +68,34 @@ inline Resolution resolveByCrc(uint16_t headerMapper, uint32_t payloadCrc,
     }
 
     switch (payloadCrc) {
-    case 0xBA51AC6Fu: // Holy Diver (J), IREM-HOLYDIVER
+    case 0xBA51AC6Fu:
         r.matched = true;
         r.overrideMapper = true; r.mapper = 78;
-        r.overrideSubmapper = true; r.submapper = 3; // H/V mirroring board
+        r.overrideSubmapper = true; r.submapper = 3;
         r.overrideMirror = true; r.mirror = Mirror::Horizontal;
         r.overrideTiming = true; r.timing = ConsoleTiming::NTSC;
         r.overridePrgRam = true; r.prgRamSize = 0;
         r.overridePrgNvRam = true; r.prgNvRamSize = 0;
         return r;
 
-    case 0x3D1C3137u: // Uchuusen: Cosmo Carrier (J), JALECO-JF-16
+    case 0x3D1C3137u:
         r.matched = true;
         r.overrideMapper = true; r.mapper = 78;
-        r.overrideSubmapper = true; r.submapper = 1; // one-screen A/B board
+        r.overrideSubmapper = true; r.submapper = 1;
         r.overrideMirror = true; r.mirror = Mirror::Horizontal;
         r.overrideTiming = true; r.timing = ConsoleTiming::NTSC;
         r.overridePrgRam = true; r.prgRamSize = 0;
         r.overridePrgNvRam = true; r.prgNvRamSize = 0;
         return r;
 
-    case 0xC247CC80u: // Family Circuit '91 (J), NAMCOT-175
+    case 0xC247CC80u:
         r.matched = true;
         r.overrideMapper = true; r.mapper = 210;
-        r.overrideSubmapper = true; r.submapper = 1; // Namco 175
+        r.overrideSubmapper = true; r.submapper = 1;
         r.overrideMirror = true; r.mirror = Mirror::Vertical;
         r.overrideTiming = true; r.timing = ConsoleTiming::NTSC;
         r.overridePrgRam = true; r.prgRamSize = 0;
-        r.overridePrgNvRam = true; r.prgNvRamSize = 0x0800; // 2 KiB battery RAM
+        r.overridePrgNvRam = true; r.prgNvRamSize = 0x0800;
         return r;
 
     default:
@@ -119,4 +111,4 @@ inline Resolution resolve(uint16_t mapper, const uint8_t* prg, std::size_t prgSi
     return resolveByCrc(mapper, payload, first32);
 }
 
-} // namespace RomDatabase
+}

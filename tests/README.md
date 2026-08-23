@@ -16,7 +16,6 @@ ctest --test-dir build -C Release --output-on-failure
 
 `ctest` runs `NESUltimateEmu.Tests --self-test` and succeeds only when every built-in probe passes. CMake copies the three bundled DMC probe ROMs beside the runner. The runner also searches `tests/probes` through the executable/current-directory ancestry, so direct source-tree builds are not dependent on one exact output folder.
 
-
 ## Phase 55 external conformance support
 
 The runner supports both the built-in probe gate and Blargg-style external ROMs that publish the `$6000-$6003` status/signature protocol. `HeadlessRunner` accepts `--timing auto|ntsc|pal|dendy`; this is important for hardware-test corpora whose manifest declares PAL/NTSC separately from the ROM header.
@@ -34,7 +33,6 @@ python3 tests/run_suite.py ./NESUltimateEmu.Tests /path/to/one-test.nes --timing
 ```
 
 Exit classification used by the dashboard: 0=pass, 1=test failure, 2=load error, 3=timeout after protocol detection, 4=unsupported/no `$6000` protocol.
-
 
 `NESUltimateEmu.Tests` is a windowless console target that runs the normal CPU/Bus/PPU/APU/Cartridge/Mapper core without SDL or ImGui host I/O.
 
@@ -113,7 +111,6 @@ Phase 27D4A adds `probes/DmcApuConflictProbe.cpp` and `probes/dmc_apu_conflict.n
 
 `DmcLoadStartProbe.cpp` verifies that a `$4015`-initiated DMC load begins 3 or 4 CPU clocks after the write depending on CPU/APU phase. The load remains GET-scheduled so its transfer sequence is halt/dummy/get rather than a reload-style aligned transfer.
 
-
 ## BRK/NMI boundary regression
 
 `tests/probes/InterruptHijackProbe.cpp` verifies the fetched-BRK late-hijack boundary: an NMI arriving as the BRK low-vector cycle begins must redirect the vector to `$FFFA/$FFFB` while the already-pushed status remains BRK-originated. Hardware IRQ uses the stricter vector-commit boundary validated by `cpu_interrupts_v2/3-nmi_and_irq`.
@@ -132,7 +129,6 @@ The implied/accumulator family is now scheduled explicitly in `CPU.cpp`, so DMC 
 - NTSC odd-frame shortening skips the final pre-render idle dot: an odd pre-render contains 340 clocks and advances from dot 339 directly to visible scanline 0 dot 0; an even pre-render contains all 341 clocks.
 
 These checks are part of `--self-test` and therefore run before any optional external ROM suite.
-
 
 ## Phase 5 APU/frame-counter conformance probe
 
@@ -162,7 +158,6 @@ DMA timing.
 - Mapper 116 Huang-1/Huang-2 composite mode switching (MMC1/MMC3/VRC2b), state preservation, CHR A18, VRC2 power-up CHR state, and submapper-specific MMC1 behavior.
 - Mapper 215 UNL-8237/8237A outer PRG/CHR banking, NROM override, selectable MMC3 register/index scrambling, reset-sensitive outer bank state, and NES 2.0 submapper gating.
 
-
 ### Cartridge conformance
 
 The built-in suite validates archaic iNES header cleanup, trainer preload, NES 2.0 save-state identity metadata, PRG/CHR NVRAM battery round-trips, and transactional cartridge state loading.
@@ -188,7 +183,6 @@ The cartridge and mapper probes now verify that the console Reset button is prop
 
 The mapper conformance probe now also checks mappers 35/90/209/211: outer PRG/CHR banking, reversed PRG-bit mode, delayed multiplier completion, CPU-source IRQ and acknowledge, mapper-90 nametable suppression, mapper-209 extended/ROM nametables with CIRAM write-through, MMC4-like CHR latches, and mapper-35 WRAM mapping.
 
-
 ## Mapper 176 / FK23C regression coverage
 
 The mapper conformance probe now validates the foundational 8025/FK23C variants:
@@ -209,11 +203,9 @@ The mapper conformance probe now covers NES 2.0 mapper 12 submapper 0 (Gouder SL
 
 The mapper regression now covers the shared Front Fareast Magic/Super Magic Card implementation: mapper 6 latch banking, mapper 8's mapper-6 mode-4 alias, mapper 12.1 4M startup, mapper 17 1 KiB CHR banking and signed 16-bit overflow IRQ, plus support gating. Cartridge conformance additionally verifies writable RAM-image allocation, no battery persistence, mapper-6 implicit JSR $7003 trainer boot metadata, and mapper-17 submapper-selected trainer entry addresses.
 
-
 ## Phase 25 - legacy mapper 40-43 compatibility
 
 Added mapper 40 (NTDEC 2722 base board), mapper 41 (Caltron 6-in-1), mapper 42 FDS conversions, and mapper 43 TONY-I/YS-612. Regression coverage verifies banking, mirroring, reset behavior, and M2 IRQ timing. Cartridge ROM mapping can now extend into $4020-$5FFF after mapper-register/RAM priority, which is required by mapper 43's $5000 expansion ROM. Mapper 40 submapper 1 remains deliberately unsupported pending fuller NTDEC 2752 outer-board validation.
-
 
 ## Phase 26 - Action 53 and conventional mapper expansion
 
@@ -222,7 +214,6 @@ Added mapper 28 (Action 53), mapper 36 (TXC 01-22000-400), mapper 44 (Super Big 
 ### Phase 28 mapper coverage
 
 The mapper conformance probe now also checks mappers 51, 52, 61, and 63, including mapper 52 outer-bank locking and mapper 63 open-bus behavior.
-
 
 ### Phase 29 mapper coverage
 
@@ -235,7 +226,6 @@ The cartridge probe also validates the hash-driven metadata layer. Mapper 53's E
 ### Phase 34 mapper coverage
 
 The mapper conformance probe now includes mapper 105 / NES-EVENT: cold-boot fixed mapping, event-bank unlock, official NWC 30-bit M2 timer edge, and IRQ acknowledge/reset. Mapper 111 / GTROM remains support-gated pending complete self-flash persistence.
-
 
 ### Phase 35 GTROM regression
 `MapperConformanceProbe` validates mapper 111 PRG banking, shared pattern/nametable PPU RAM banking, SST39SF040 byte programming and sector erase, and mapper-owned persistent flash round-tripping.
@@ -283,7 +273,6 @@ are unchanged. The Linux self-test build passes 13/13 regression probes.
 ## CPU bus-cycle completeness gate
 
 Phase 2 adds an exhaustive CPU audit to the normal `--self-test` run. The CPU conformance probe executes all 256 opcode values from deterministic internal RAM and requires every non-JAM opcode bus slot reported by `CPU::nextBusCycle()` to be exact. The 12 JAM/KIL opcodes are separately checked as the intentional halted-state exception. See `docs/PHASE2_CPU_BUS_CYCLE_AUDIT.md` for the conversion matrix and audit result.
-
 
 ### Phase 8 - Mapper 40 submapper 1 / NTDEC 2752
 

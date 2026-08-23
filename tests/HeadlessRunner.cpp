@@ -6,6 +6,7 @@
 #include "probes/ProbeSuite.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <iomanip>
@@ -18,7 +19,7 @@
 
 namespace {
 constexpr uint64_t kDefaultMaxCycles = 150000000ULL;
-constexpr uint64_t kResetDelayCycles = 180000ULL; // >= 100 ms at NTSC CPU rate
+constexpr uint64_t kResetDelayCycles = 180000ULL;
 constexpr uint64_t kPollInterval = 256ULL;
 constexpr uint16_t kStatus = 0x6000;
 constexpr uint16_t kSignature = 0x6001;
@@ -42,6 +43,7 @@ struct Options {
     uint8_t expectedResult = 1;
     bool expectedResultSet = false;
     bool json = false;
+    uint64_t benchmarkCycles = 0;
     int accuracyCoinMinPass = -1;
 };
 
@@ -55,6 +57,7 @@ void usage(const char* exe)
         << "  " << exe << " <legacy-shell.nes> --legacy-shell [--expected-result N] [--max-cycles N] [--json]\n"
         << "  " << exe << " <scanline.nes> --scanline-visual [--max-cycles N] [--json]\n"
         << "  " << exe << " <rom.nes> --dump-frame PATH [--max-cycles N]\n"
+        << "  " << exe << " <rom.nes> --benchmark-cycles N [--timing auto|ntsc|pal|dendy] [--json]\n"
         << "  " << exe << " --self-test\n\n"
         << "Exit codes:\n"
         << "  0  test passed\n"
@@ -116,6 +119,9 @@ bool parseArgs(int argc, char** argv, Options& out)
             if (!parseU64(argv[++i], value) || value > 255)
                 return false;
             out.accuracyCoinMinPass = static_cast<int>(value);
+        } else if (arg == "--benchmark-cycles" && i + 1 < argc) {
+            if (!parseU64(argv[++i], out.benchmarkCycles) || out.benchmarkCycles == 0)
+                return false;
         } else if (arg == "--max-cycles" && i + 1 < argc) {
             if (!parseU64(argv[++i], out.maxCycles) || out.maxCycles == 0)
                 return false;
@@ -192,7 +198,6 @@ struct Machine {
     }
 };
 
-
 struct AccuracyCoinFailure {
     uint16_t address = 0;
     uint8_t raw = 0;
@@ -231,10 +236,7 @@ int dumpFrame(Machine& m, const Options& options)
 
 int runScanlineVisual(Machine& m, const Options& options)
 {
-    // Quietust's scanline test starts with six '*' tiles in columns 25-30 of
-    // each test row. Correct mid-scanline register timing erases those stars;
-    // any surviving lit pixel in those cells denotes an error. Let the ROM
-    // run for many frames, then inspect only the documented error cells.
+
     const uint64_t targetCycles = std::min<uint64_t>(options.maxCycles, 5000000ULL);
     while (m.bus->cpuCycleCounter() < targetCycles)
         m.bus->clock();
@@ -266,16 +268,9 @@ int runScanlineVisual(Machine& m, const Options& options)
 
 int runLegacyApu(Machine& m, const Options& options)
 {
-    // blargg_apu_2005.07.30 predates the later $6000 protocol. The suite
-    // stores its current result code in zero-page $F0; success is 1. Each ROM
-    // calls report_final_result and then enters a permanent one-instruction
-    // loop. Detect that terminal state from repeated instruction-boundary
-    // opcode fetches before observing $F0, so a long intermediate test cannot
-    // be mistaken for completion.
+
     const uint16_t kResult = options.legacyResultAddress;
-    // Some legacy ROMs intentionally spin in a one-instruction loop while
-    // waiting for the next NMI. Require a repeat run longer than one NTSC
-    // frame so those wait loops cannot be mistaken for the final report loop.
+
     constexpr uint32_t kTerminalBoundaryRepeats = 50000;
 
     uint16_t lastFetch = 0xFFFF;
@@ -328,15 +323,9 @@ int runLegacyApu(Machine& m, const Options& options)
     return 6;
 }
 
-
 int runLegacyShell(Machine& m, const Options& options)
 {
-    // Older blargg shells predate the $6000 protocol. Their common exit
-    // routine begins with the distinctive sequence:
-    //   LDX #$FF / TXS / SEI / PHA / JSR nmi_off / PLA / JMP exit_
-    // A contains the final result code on entry (0 = pass). Locate that
-    // routine in PRG and observe A at the instruction boundary before LDX
-    // executes, so later printing/beeping/idle code cannot destroy it.
+
     std::ifstream f(options.romPath, std::ios::binary);
     std::vector<uint8_t> image((std::istreambuf_iterator<char>(f)), {});
     if (image.size() < 16 || image[0] != 'N' || image[1] != 'E' || image[2] != 'S' || image[3] != 0x1A) {
@@ -358,8 +347,7 @@ int runLegacyShell(Machine& m, const Options& options)
         if (q[0] != 0xA2 || q[1] != 0xFF || q[2] != 0x9A || q[3] != 0x78 ||
             q[4] != 0x48 || q[5] != 0x20 || q[8] != 0x68 || q[9] != 0x4C)
             continue;
-        // NROM-128 is mirrored at $8000/$C000; the shell links at $E000, so
-        // use the upper mapping for 16 KiB PRG. NROM-256 maps linearly at $8000.
+
         const uint16_t mapped = static_cast<uint16_t>((prgSize == 16384 ? 0xC000 : 0x8000) + i);
         exitPc = mapped;
         ++matches;
@@ -397,10 +385,7 @@ int runLegacyShell(Machine& m, const Options& options)
 
 int runAccuracyCoin(Machine& m, const Options& options)
 {
-    // AccuracyCoin's own engine uses these RAM locations:
-    // $35 RunningAllTests, $37 total tally, $38 pass tally, and page $04 for
-    // encoded results.  Passing results have bit 0 set; failures are encoded
-    // as (errorCode << 2) | 2.  Reads here must be observational only.
+
     constexpr uint16_t kMenuTabX = 0x0014;
     constexpr uint16_t kMenuCursorY = 0x0016;
     constexpr uint16_t kRunningAll = 0x0035;
@@ -408,7 +393,7 @@ int runAccuracyCoin(Machine& m, const Options& options)
     constexpr uint16_t kPassTally = 0x0038;
     constexpr uint64_t kStartupGuardCycles = 250000;
     constexpr uint64_t kButtonHoldCycles = 60000;
-    constexpr uint8_t kStartButton = 0x08; // Bus representation: bit3 = Start.
+    constexpr uint8_t kStartButton = 0x08;
 
     bool startPressed = false;
     bool startReleased = false;
@@ -487,6 +472,37 @@ int runAccuracyCoin(Machine& m, const Options& options)
 }
 }
 
+int runBenchmark(Machine& m, const Options& options)
+{
+    using Clock = std::chrono::steady_clock;
+    const uint64_t startCycles = m.bus->cpuCycleCounter();
+    const uint64_t targetCycles = startCycles + options.benchmarkCycles;
+    const auto start = Clock::now();
+    while (m.bus->cpuCycleCounter() < targetCycles)
+        m.bus->clock();
+    const auto stop = Clock::now();
+
+    const double seconds = std::chrono::duration<double>(stop - start).count();
+    const double cps = seconds > 0.0 ? double(options.benchmarkCycles) / seconds : 0.0;
+    const double realtime = cps / double(consoleCpuClockHz(m.bus->timing()));
+    const double fps = realtime * consoleFrameRate(m.bus->timing());
+
+    if (options.json) {
+        std::cout << "{\"cycles\":" << options.benchmarkCycles
+                  << ",\"seconds\":" << std::fixed << std::setprecision(6) << seconds
+                  << ",\"cycles_per_second\":" << std::setprecision(2) << cps
+                  << ",\"realtime_multiple\":" << std::setprecision(4) << realtime
+                  << ",\"equivalent_fps\":" << std::setprecision(2) << fps << "}\n";
+    } else {
+        std::cout << std::fixed << std::setprecision(2)
+                  << "BENCHMARK: " << options.benchmarkCycles << " CPU cycles in " << seconds << " s\n"
+                  << "  throughput: " << cps << " cycles/s\n"
+                  << "  realtime:   " << realtime << "x\n"
+                  << "  equivalent: " << fps << " fps\n";
+    }
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     if (argc == 2 && std::string(argv[1]) == "--self-test")
@@ -522,6 +538,9 @@ int main(int argc, char** argv)
                   << " | timing " << consoleTimingName(selectedTiming)
                   << (options.forceTiming ? " (forced)" : " (ROM)") << "\n";
     }
+
+    if (options.benchmarkCycles != 0)
+        return runBenchmark(m, options);
 
     if (options.accuracyCoin)
         return runAccuracyCoin(m, options);
@@ -571,11 +590,7 @@ int main(int argc, char** argv)
             continue;
         }
         if (status == 0x81) {
-            // A reset-test ROM can leave $6000 at $81 for a short time after
-            // RESET has been asserted. Treat the entire contiguous $81 period
-            // as one request; otherwise the polling loop can schedule a second
-            // reset before the ROM's reset handler has a chance to update the
-            // status byte.
+
             if (!resetPending && !resetRequestServiced) {
                 resetPending = true;
                 resetRequestServiced = true;

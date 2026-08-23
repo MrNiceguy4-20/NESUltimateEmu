@@ -14,12 +14,12 @@ bool writeTimingRom(const std::filesystem::path& path, uint8_t timingBits)
 {
     std::vector<uint8_t> image(16 + 0x4000, 0);
     image[0] = 'N'; image[1] = 'E'; image[2] = 'S'; image[3] = 0x1A;
-    image[4] = 1; // 16 KiB PRG
-    image[5] = 0; // CHR RAM declared below
-    image[7] = 0x08; // NES 2.0
-    image[11] = 0x07; // 8 KiB volatile CHR RAM
+    image[4] = 1;
+    image[5] = 0;
+    image[7] = 0x08;
+    image[11] = 0x07;
     image[12] = timingBits & 3;
-    // Reset vector in mirrored 16 KiB PRG.
+
     image[16 + 0x3FFC] = 0x00;
     image[16 + 0x3FFD] = 0x80;
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
@@ -29,7 +29,7 @@ bool writeTimingRom(const std::filesystem::path& path, uint8_t timingBits)
 
 uint64_t measureFullFrame(PPU& ppu)
 {
-    // Synchronize to a frame boundary first because power-on begins at scanline 0.
+
     while (!ppu.frameComplete()) ppu.clock();
     ppu.clearFrameComplete();
     uint64_t clocks = 0;
@@ -74,7 +74,6 @@ int runTimingConformanceProbe()
               << " dendy=" << dendyFrame << " " << (framePass ? "PASS" : "FAIL") << "\n";
     pass &= framePass;
 
-    // Dendy keeps the long 312-line frame but moves VBlank/NMI start to 291.
     PPU dendyVblank;
     dendyVblank.setTiming(ConsoleTiming::Dendy);
     dendyVblank.powerOn();
@@ -86,7 +85,6 @@ int runTimingConformanceProbe()
     std::cout << "dendy_vblank_291=" << (dendyVblankPass ? "PASS" : "FAIL") << "\n";
     pass &= dendyVblankPass;
 
-    // PAL divider must emit exactly 16 PPU dots per five CPU clocks.
     Bus bus;
     PPU ratioPpu;
     APU ratioApu;
@@ -111,8 +109,6 @@ int runTimingConformanceProbe()
     std::cout << "apu_region_tables=" << ((palTables && dendyTables) ? "PASS" : "FAIL") << "\n";
     pass &= palTables && dendyTables;
 
-    // PAL uses the longer 2A07 frame-sequencer cadence; Dendy keeps the
-    // NTSC CPU-cycle decode, merely running it at the Dendy CPU frequency.
     APU palFrameApu;
     palFrameApu.setTiming(ConsoleTiming::PAL);
     palFrameApu.powerOn();

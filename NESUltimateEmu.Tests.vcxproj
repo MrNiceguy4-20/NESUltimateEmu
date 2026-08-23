@@ -50,6 +50,14 @@
     <ClCompile Include="src\core\Cartridge.cpp" />
     <ClCompile Include="src\core\CheatSystem.cpp" />
     <ClCompile Include="src\core\Mapper.cpp" />
+    <ClCompile Include="src\core\MapperNintendoDiscrete.cpp" />
+    <ClCompile Include="src\core\MapperMmc1.cpp" />
+    <ClCompile Include="src\core\MapperMmc3.cpp" />
+    <ClCompile Include="src\core\MapperMmc5.cpp" />
+    <ClCompile Include="src\core\MapperNamco.cpp" />
+    <ClCompile Include="src\core\MapperVrc.cpp" />
+    <ClCompile Include="src\core\MapperSunsoft.cpp" />
+    <ClCompile Include="src\core\MapperUnlicensed.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\core\CPU.hpp" /><ClInclude Include="src\core\Bus.hpp" /><ClInclude Include="src\core\PPU.hpp" />

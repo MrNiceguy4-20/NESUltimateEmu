@@ -38,6 +38,14 @@ if(NES_BUILD_HEADLESS_TESTS)
         src/core/Cartridge.cpp
         src/core/CheatSystem.cpp
         src/core/Mapper.cpp
+        src/core/MapperNintendoDiscrete.cpp
+        src/core/MapperMmc1.cpp
+        src/core/MapperMmc3.cpp
+        src/core/MapperMmc5.cpp
+        src/core/MapperNamco.cpp
+        src/core/MapperVrc.cpp
+        src/core/MapperSunsoft.cpp
+        src/core/MapperUnlicensed.cpp
     )
 
     target_compile_features(NESUltimateEmu.Tests PRIVATE cxx_std_17)
@@ -249,7 +257,6 @@ if(NES_BUILD_HEADLESS_TESTS)
                 endif()
             endfunction()
 
-            # CPU bus/interrupt/reset/instruction coverage.
             nes_add_blargg_test(cpu-dummy-writes-oam "cpu_dummy_writes/cpu_dummy_writes_oam.nes")
             nes_add_blargg_test(cpu-dummy-writes-ppumem "cpu_dummy_writes/cpu_dummy_writes_ppumem.nes")
             nes_add_blargg_test(cpu-int-cli-latency "cpu_interrupts_v2/rom_singles/1-cli_latency.nes")
@@ -263,7 +270,6 @@ if(NES_BUILD_HEADLESS_TESTS)
             nes_add_blargg_test(instr-official "instr_test-v5/official_only.nes")
             nes_add_blargg_test(instr-timing "instr_timing/instr_timing.nes")
 
-            # DMC DMA read-conflict and sprite-DMA arbitration coverage.
             nes_add_legacy_shell_test(dmc-2007-read "dmc_dma_during_read4/dma_2007_read.nes")
             nes_add_legacy_shell_test(dmc-2007-write "dmc_dma_during_read4/dma_2007_write.nes")
             nes_add_legacy_shell_test(dmc-4016-read "dmc_dma_during_read4/dma_4016_read.nes")
@@ -272,7 +278,6 @@ if(NES_BUILD_HEADLESS_TESTS)
             nes_add_blargg_test(sprdma-dmc "sprdma_and_dmc_dma/sprdma_and_dmc_dma.nes")
             nes_add_blargg_test(sprdma-dmc-512 "sprdma_and_dmc_dma/sprdma_and_dmc_dma_512.nes")
 
-            # PPU open-bus/read-buffer and detailed VBlank/NMI timing.
             nes_add_blargg_test(ppu-open-bus "ppu_open_bus/ppu_open_bus.nes")
             nes_add_blargg_test(ppu-read-buffer "ppu_read_buffer/test_ppu_read_buffer.nes")
             nes_add_blargg_test(ppu-vbl-basics "ppu_vbl_nmi/rom_singles/01-vbl_basics.nes")

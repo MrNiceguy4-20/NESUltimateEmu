@@ -30,7 +30,6 @@ bool decodeNes20RomSize(uint8_t lsb, uint8_t msbNibble, std::size_t linearUnit, 
         return true;
     }
 
-    // NES 2.0 exponent-multiplier notation: 2^E * (2*M + 1).
     const uint8_t exponent = lsb >> 2;
     const uint8_t multiplier = ((lsb & 3) << 1) | 1;
     if (exponent >= 64) return false;
@@ -44,7 +43,7 @@ bool decodeNes20RomSize(uint8_t lsb, uint8_t msbNibble, std::size_t linearUnit, 
 
 std::size_t decodeNes20RamSize(uint8_t shift)
 {
-    // A zero nibble means no memory; otherwise capacity is 64 << shift.
+
     return shift == 0 ? 0 : (std::size_t(64) << shift);
 }
 
@@ -94,7 +93,7 @@ void writeLe32(std::ostream& out, uint32_t value)
     out.write(reinterpret_cast<const char*>(bytes), 4);
 }
 
-} // namespace
+}
 
 Cartridge::Cartridge() = default;
 Cartridge::~Cartridge() = default;
@@ -173,9 +172,6 @@ void Cartridge::loadBattery()
         }
     }
 
-    // Legacy/raw .sav compatibility. N163-style boards commonly append their
-    // 128-byte mapper RAM after ordinary PRG NVRAM, while old builds wrote
-    // only PRG NVRAM.
     if (m_prgNvRamSize > 0 && !m_prgRam.empty()) {
         const std::size_t amount = std::min({ data.size(), m_prgNvRamSize, m_prgRam.size() });
         if (amount) std::memcpy(m_prgRam.data(), data.data(), amount);
@@ -202,9 +198,6 @@ void Cartridge::saveBattery() const
         if (mapperData.size() != mapperSize) mapperData.clear();
     }
 
-    // Preserve the historical/raw layout whenever there is no CHR NVRAM.
-    // For mapper-owned persistent RAM (e.g. N163 audio RAM), append it after
-    // PRG NVRAM, matching the common cartridge-save layout.
     if (chrAmount == 0) {
         if (prgAmount)
             f.write(reinterpret_cast<const char*>(m_prgRam.data()), static_cast<std::streamsize>(prgAmount));
@@ -248,8 +241,6 @@ bool Cartridge::loadFromMemory(const std::vector<uint8_t>& raw, const std::strin
     saveBattery();
     resetImage();
 
-    // Famicom Disk System images are not iNES cartridges.  They use the
-    // external 8 KiB Disk System BIOS plus 32 KiB work RAM and 8 KiB CHR RAM.
     std::string ext;
     try {
         ext = std::filesystem::path(path).extension().string();
@@ -304,7 +295,7 @@ bool Cartridge::loadFromMemory(const std::vector<uint8_t>& raw, const std::strin
                 : (rp.stem().string() + "." + std::filesystem::path(logicalPath).stem().string());
             m_batteryPath = (rp.parent_path() / (stem + ".sav")).string();
         } catch (...) { m_batteryPath = backingPath + ".sav"; }
-        // FDS media are writable; persist the expanded disk-side contents.
+
         m_battery = true;
         loadBattery();
         m_loaded = true;
@@ -324,12 +315,6 @@ bool Cartridge::loadFromMemory(const std::vector<uint8_t>& raw, const std::strin
     const bool hasTrainer = (flags6 & 0x04) != 0;
     m_nes20 = (flags7 & 0x0C) == 0x08;
 
-    // Archaic iNES dumps predate the upper mapper nibble and byte-8 PRG-RAM
-    // extension. ROM tools commonly wrote signatures such as "DiskDude!"
-    // across bytes 7-15; interpreting those bytes as modern metadata turns
-    // otherwise valid mapper 0-15 images into unrelated mapper IDs and can
-    // allocate hundreds of KiB of bogus RAM. For non-NES-2.0 images, the
-    // explicit archaic marker or nonzero tail padding selects legacy rules.
     const bool dirtyLegacyTail = !m_nes20 &&
         (header[12] != 0 || header[13] != 0 || header[14] != 0 || header[15] != 0);
     const bool archaicINes = !m_nes20 && (((flags7 & 0x0C) == 0x04) || dirtyLegacyTail);
@@ -358,9 +343,6 @@ bool Cartridge::loadFromMemory(const std::vector<uint8_t>& raw, const std::strin
         chrRamVolatile = decodeNes20RamSize(header[11] & 0x0F);
         m_chrNvRamSize = decodeNes20RamSize(header[11] >> 4);
 
-        // NES 2.0 byte 12 selects the console CPU/PPU timing. Multi-region
-        // images are intentionally started in NTSC mode; a future/manual
-        // override can select PAL without changing the cartridge identity.
         switch (header[12] & 0x03) {
         case 1: m_timing = ConsoleTiming::PAL; break;
         case 3: m_timing = ConsoleTiming::Dendy; break;
@@ -372,9 +354,6 @@ bool Cartridge::loadFromMemory(const std::vector<uint8_t>& raw, const std::strin
         prgSize = std::size_t(header[4]) * 0x4000;
         chrSize = std::size_t(header[5]) * 0x2000;
 
-        // iNES 1.0 byte 8 describes PRG RAM in 8 KiB units; zero historically
-        // means one 8 KiB bank. Mapper 30 uses the battery flag for flash
-        // persistence rather than conventional $6000-$7FFF PRG RAM.
         if (m_mapperId != 30) {
             const uint8_t ramBanks = archaicINes ? 1 : (header[8] ? header[8] : 1);
             const std::size_t iNesRam = std::size_t(ramBanks) * 0x2000;
@@ -386,9 +365,7 @@ bool Cartridge::loadFromMemory(const std::vector<uint8_t>& raw, const std::strin
     if (prgSize == 0) return false;
 
     if (m_mapperId == 30 && (flags6 & 0x08)) {
-        // UNROM-512 repurposes the iNES four-screen bit. With bit 0 clear
-        // it denotes mapper-controlled one-screen mirroring; with bit 0 set
-        // it remains true four-screen mirroring.
+
         m_headerMirror = (flags6 & 0x01) ? Mirror::FourScreen : Mirror::OnescreenLo;
     }
     else if (flags6 & 0x08) m_headerMirror = Mirror::FourScreen;
@@ -408,8 +385,7 @@ bool Cartridge::loadFromMemory(const std::vector<uint8_t>& raw, const std::strin
     std::vector<uint8_t> trainer;
     if (hasTrainer) {
         trainer.assign(raw.begin() + kINesHeaderSize, raw.begin() + kINesHeaderSize + kTrainerSize);
-        // Trainer bytes affect initial machine state and therefore belong in
-        // the ROM identity used to validate save states.
+
         m_identityData = trainer;
     }
 
@@ -422,9 +398,6 @@ bool Cartridge::loadFromMemory(const std::vector<uint8_t>& raw, const std::strin
         m_prgRom.empty() ? nullptr : m_prgRom.data(), m_prgRom.size(),
         m_chrRom.empty() ? nullptr : m_chrRom.data(), m_chrRom.size());
 
-    // Database corrections are applied before board-specific RAM fallbacks and
-    // mapper construction. This is important for legacy images whose header
-    // names the wrong mapper or cannot express the physical RAM capacity.
     if (dbResolution.matched) {
         if (dbResolution.overrideMapper) m_mapperId = dbResolution.mapper;
         if (dbResolution.overrideSubmapper) m_submapper = dbResolution.submapper;
@@ -437,9 +410,6 @@ bool Cartridge::loadFromMemory(const std::vector<uint8_t>& raw, const std::strin
         if (dbResolution.overrideChrNvRam) m_chrNvRamSize = dbResolution.chrNvRamSize;
     }
 
-    // Bandai LZ93D50/Datach serial EEPROM capacity is carried in the NES 2.0
-    // PRG-NVRAM field, but it is not CPU-addressable PRG RAM. Apply these
-    // board-specific transformations after database mapper/submapper fixes.
     headerPrgNvRamHint = m_prgNvRamSize;
     if (m_nes20 && m_mapperId == 4 && m_submapper == 1) {
         m_prgNvRamSize = 0;
@@ -463,7 +433,6 @@ bool Cartridge::loadFromMemory(const std::vector<uint8_t>& raw, const std::strin
         return false;
     }
 
-    // iNES trainers are copied to CPU $7000-$71FF before execution starts.
     if (hasTrainer && prgRamTotal < 0x2000) prgRamTotal = 0x2000;
 
     if (m_mapperId == 111 && chrSize == 0) chrRamTotal = std::max<std::size_t>(chrRamTotal, 0x8000);
@@ -505,8 +474,7 @@ bool Cartridge::loadFromMemory(const std::vector<uint8_t>& raw, const std::strin
         const std::size_t n = std::min(m_prgRom.size(), m_prgRam.size());
         std::copy_n(m_prgRom.begin(), n, m_prgRam.begin());
         if (m_mapperId == 12 && m_submapper == 1) {
-            // Magic Card 4M dumps store CHR payload at PRG DRAM $40000 so
-            // their trainer can copy working sets into the 32 KiB CHR RAM.
+
             if (m_prgRam.size() > 0x40000) {
                 const std::size_t c = std::min(m_chrRom.size(), m_prgRam.size() - 0x40000);
                 std::copy_n(m_chrRom.begin(), c, m_prgRam.begin() + 0x40000);
@@ -547,10 +515,6 @@ bool Cartridge::loadFromMemory(const std::vector<uint8_t>& raw, const std::strin
             const uint16_t addr = static_cast<uint16_t>(m_trainerLoadAddress + i);
             uint32_t mapped = 0;
 
-            // This is cartridge initialization, not a CPU write, so mapper
-            // write-protect bits must not block the trainer preload. Prefer
-            // the mapper's current RAM mapping; if that window is disabled at
-            // power-up, initialize the conventional linear $6000-$7FFF bank.
             if (m_mapper->mapPrgRam(addr, mapped, false) && mapped < m_prgRam.size())
                 m_prgRam[mapped] = trainer[i];
             else {
@@ -618,9 +582,6 @@ bool Cartridge::cpuRead(uint16_t addr, uint8_t& data)
 {
     if (!m_loaded || !m_mapper) return false;
 
-    // `data` is seeded by Bus with the current CPU data-bus latch. Mapper
-    // registers may modify only the bits their hardware actually drives,
-    // leaving the rest as open bus.
     uint8_t regData = data;
     if (addr >= 0x4020 && m_mapper->cpuReadRegister(addr, regData)) {
         data = m_cheats.applyGameGenie(addr, regData);
@@ -634,12 +595,6 @@ bool Cartridge::cpuRead(uint16_t addr, uint8_t& data)
         return true;
     }
 
-    // Many cartridges do not decode $4020-$5FFF at all. Report that no
-    // cartridge device drove the data bus so Bus can preserve CPU open bus.
-    // Some cartridge boards map PRG-ROM into expansion space below $6000
-    // (for example mapper 43 at $5000-$5FFF). Mapper registers and cartridge
-    // RAM were already given priority above, so it is safe to ask the mapper
-    // for a ROM mapping throughout the cartridge expansion range.
     if (m_mapper->cpuMapRead(addr, mapped) && mapped < m_prgRom.size()) {
         data = m_cheats.applyGameGenie(addr, m_prgRom[mapped]);
         m_mapper->observeCpuRead(addr, data);
@@ -664,10 +619,6 @@ void Cartridge::cpuWrite(uint16_t addr, uint8_t data, uint64_t cpuCycle)
 {
     if (!m_loaded || !m_mapper || addr < 0x4020) return;
 
-    // On discrete boards without PRG-ROM output gating, a mapper-register
-    // write overlaps the ROM output. Real hardware resolves those conflicts
-    // as a wired-AND of CPU data and the byte driven by the currently mapped
-    // PRG-ROM location. The mapper must see that effective value.
     uint8_t mapperData = data;
     if (addr >= 0x8000 && m_mapper->hasBusConflicts()) {
         uint32_t mappedRom = 0;
@@ -808,9 +759,7 @@ void Cartridge::saveState(std::vector<uint8_t>& out) const
 
 bool Cartridge::loadState(const uint8_t*& p, const uint8_t* end)
 {
-    // Validate the complete cartridge payload before committing RAM or mapper
-    // state. This prevents a truncated/corrupt state from leaving a cartridge
-    // half-restored when the function reports failure.
+
     const uint8_t* q = p;
     uint16_t mapperId = 0;
     uint8_t submapper = 0;
@@ -840,9 +789,6 @@ bool Cartridge::loadState(const uint8_t*& p, const uint8_t* end)
     const uint8_t* chrData = q;
     q += chrRamSize;
 
-    // Mapper deserializers necessarily mutate their object while parsing.
-    // Keep a known-good snapshot so even a malformed mapper payload is
-    // transactional from Cartridge's caller's point of view.
     std::vector<uint8_t> mapperBackup;
     m_mapper->saveState(mapperBackup);
     const uint8_t* mapperP = mapperBegin;

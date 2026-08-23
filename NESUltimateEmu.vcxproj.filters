@@ -38,6 +38,11 @@
     <ClCompile Include="src\core\Mapper.cpp">
       <Filter>Core</Filter>
     </ClCompile>
+    <ClCompile Include="src\core\MapperNintendoDiscrete.cpp">
+      <Filter>Core</Filter>
+    </ClCompile>
+    <ClCompile Include="src\core\MapperMmc1.cpp"><Filter>Core</Filter></ClCompile>
+    <ClCompile Include="src\core\MapperMmc3.cpp"><Filter>Core</Filter></ClCompile>
     <ClCompile Include="src\frontend\Frontend.cpp">
       <Filter>Frontend</Filter>
     </ClCompile>
@@ -70,5 +75,14 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\core\Timing.hpp"><Filter>Core</Filter></ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\core\MapperMmc5.cpp"><Filter>Source Files</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\core\MapperNamco.cpp"><Filter>Source Files</Filter></ClCompile>
+<ClCompile Include="src\core\MapperVrc.cpp"><Filter>Source Files</Filter></ClCompile>
+<ClCompile Include="src\core\MapperSunsoft.cpp"><Filter>Source Files</Filter></ClCompile>
+<ClCompile Include="src\core\MapperUnlicensed.cpp"><Filter>Source Files</Filter></ClCompile>
   </ItemGroup>
 </Project>
