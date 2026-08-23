@@ -2,7 +2,6 @@
 #include <SDL.h>
 #include "imgui.h"
 #include <array>
-#include <deque>
 #include <string>
 #include <vector>
 #include "../core/Timing.hpp"
@@ -46,7 +45,7 @@ private:
     enum class NesButton : int { A, B, Select, Start, Up, Down, Left, Right, Count };
     enum class HotkeyAction : int {
         Pause, StepInstruction, Reset, Scale1, Scale2, Scale3, Scale4,
-        SaveState, LoadState, SlotNext, SlotPrevious, Aspect, ChipMod, Fullscreen, SpeedPrevious, SpeedNext, Quit, Rewind, Count
+        SaveState, LoadState, SlotNext, SlotPrevious, Aspect, ChipMod, Fullscreen, Quit, Count
     };
     enum class CaptureTarget { None, P1Keyboard, P2Keyboard, P1Gamepad, Hotkey };
 
@@ -60,18 +59,9 @@ private:
     bool m_settingsOpen = false;
     float m_masterVolume = 1.50f;
 
-    enum class EmulationSpeed : int { Normal = 0, Double = 1, Quadruple = 2, Uncapped = 3 };
-    EmulationSpeed m_emulationSpeed = EmulationSpeed::Normal;
     uint64_t m_pacingDeadline = 0;
     bool m_audioPacingPrimed = false;
     bool m_systemSleepSuppressed = false;
-
-    std::deque<std::vector<uint8_t>> m_rewindStates;
-    size_t m_rewindBytes = 0;
-    uint64_t m_rewindFrameCounter = 0;
-    uint64_t m_rewindRomIdentity = 0;
-    static constexpr size_t kMaxRewindSnapshots = 900;
-    static constexpr size_t kMaxRewindBytes = 128u * 1024u * 1024u;
 
     enum class TimingOverride : int { Auto = 0, NTSC = 1, PAL = 2, Dendy = 3 };
     TimingOverride m_timingOverride = TimingOverride::Auto;
@@ -80,19 +70,9 @@ private:
     void updateControllers();
     void drawUI();
     void runFrame();
-    int framesPerPresentation() const;
-    double emulationSpeedMultiplier() const;
-    const char* emulationSpeedName() const;
-    void setEmulationSpeed(EmulationSpeed speed);
     void resetPacing();
-    void pacePresentation(bool allowAudioSync = true);
+    void pacePresentation();
     void updateSystemSleepSuppression();
-    bool rewindHeld() const;
-    void captureRewindState();
-    bool rewindStep();
-    void clearRewindHistory();
-    std::vector<uint8_t> captureMachinePayload() const;
-    bool loadMachinePayload(const std::vector<uint8_t>& payload);
     void stepInstruction();
     bool openRomDialog();
     bool openStateLoadDialog();
