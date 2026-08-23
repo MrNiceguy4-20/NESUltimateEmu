@@ -36,6 +36,8 @@ struct Options {
     bool legacyApu = false;
     bool legacyShell = false;
     bool scanlineVisual = false;
+    std::string dumpFramePath;
+    bool pressStart = false;
     uint16_t legacyResultAddress = 0x00F0;
     uint8_t expectedResult = 1;
     bool expectedResultSet = false;
@@ -52,6 +54,7 @@ void usage(const char* exe)
         << "  " << exe << " <legacy-rom.nes> --legacy-apu [--legacy-result-address N] [--expected-result N] [--max-cycles N] [--json]\n"
         << "  " << exe << " <legacy-shell.nes> --legacy-shell [--expected-result N] [--max-cycles N] [--json]\n"
         << "  " << exe << " <scanline.nes> --scanline-visual [--max-cycles N] [--json]\n"
+        << "  " << exe << " <rom.nes> --dump-frame PATH [--max-cycles N]\n"
         << "  " << exe << " --self-test\n\n"
         << "Exit codes:\n"
         << "  0  test passed\n"
@@ -89,6 +92,10 @@ bool parseArgs(int argc, char** argv, Options& out)
             out.legacyShell = true;
         } else if (arg == "--scanline-visual") {
             out.scanlineVisual = true;
+        } else if (arg == "--dump-frame" && i + 1 < argc) {
+            out.dumpFramePath = argv[++i];
+        } else if (arg == "--press-start") {
+            out.pressStart = true;
         } else if (arg == "--json") {
             out.json = true;
         } else if (arg == "--legacy-result-address" && i + 1 < argc) {
@@ -191,6 +198,36 @@ struct AccuracyCoinFailure {
     uint8_t raw = 0;
     uint8_t errorCode = 0;
 };
+
+int dumpFrame(Machine& m, const Options& options)
+{
+    constexpr uint64_t kPressAt = 1000000ULL;
+    constexpr uint64_t kReleaseAt = 1100000ULL;
+    while (m.bus->cpuCycleCounter() < options.maxCycles) {
+        const uint64_t now = m.bus->cpuCycleCounter();
+        if (options.pressStart && now == kPressAt) m.bus->setController1(0x08);
+        if (options.pressStart && now == kReleaseAt) m.bus->setController1(0x00);
+        m.bus->clock();
+    }
+    std::ofstream out(options.dumpFramePath, std::ios::binary);
+    if (!out) {
+        std::cerr << "ERROR: unable to open frame dump: " << options.dumpFramePath << "\n";
+        return 2;
+    }
+    out << "P6\n256 240\n255\n";
+    const uint32_t* fb = m.ppu->framebuffer();
+    for (int i = 0; i < 256 * 240; ++i) {
+        const uint32_t px = fb[i];
+        const char rgb[3] = { static_cast<char>((px >> 16) & 0xFF),
+                              static_cast<char>((px >> 8) & 0xFF),
+                              static_cast<char>(px & 0xFF) };
+        out.write(rgb, 3);
+    }
+    if (!options.quiet)
+        std::cout << "Frame dumped to " << options.dumpFramePath << " after "
+                  << m.bus->cpuCycleCounter() << " CPU cycles\n";
+    return 0;
+}
 
 int runScanlineVisual(Machine& m, const Options& options)
 {
@@ -494,6 +531,8 @@ int main(int argc, char** argv)
         return runLegacyShell(m, options);
     if (options.scanlineVisual)
         return runScanlineVisual(m, options);
+    if (!options.dumpFramePath.empty())
+        return dumpFrame(m, options);
 
     bool protocolSeen = false;
     bool resetPending = false;

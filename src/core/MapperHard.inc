@@ -60,8 +60,36 @@ public:
         else if(a>=0x8000){ if(!decodePrg(a,reg,off,bankSize,forceRom)||forceRom||(reg&0x80))return false; }
         else return false;
         if(write && !(m_prot1==2 && m_prot2==1)) return false;
-        const size_t bank=reg&0x07;
-        m=static_cast<uint32_t>((bank*0x2000 + (off&0x1FFF))%m_config.prgRamSize);
+        const uint8_t bank=reg&0x0F;
+        size_t physicalBank=0;
+        const size_t ram=m_config.prgRamSize;
+        if(ram<=0x2000){
+            // One 8 KiB-or-smaller SRAM on /CE0. A13/A14 are ignored by the
+            // chip, while MMC5 bank bit 2 selects the absent /CE1 socket.
+            if(bank&0x04)return false;
+            physicalBank=0;
+        }else if(ram<=0x4000){
+            // Two 8 KiB chips: bits 0-1 are ignored, bit 2 selects the chip.
+            physicalBank=(bank&0x04)?1:0;
+        }else if(ram<=0x8000){
+            // One 32 KiB chip on /CE0: bits 0-1 select its four pages and bit
+            // 2 selects the empty second socket.
+            if(bank&0x04)return false;
+            physicalBank=bank&0x03;
+        }else if(ram<=0x10000){
+            // Two 32 KiB chips (the compatible 64 KiB superset).
+            physicalBank=bank&0x07;
+        }else{
+            // Pinout/die research shows PRG A16 is available as bank bit 3,
+            // permitting a theoretical 128 KiB single-SRAM configuration.
+            // Larger declared memories cannot be addressed by MMC5.
+            physicalBank=bank&0x0F;
+        }
+        const size_t byteOffset=physicalBank*0x2000+(off&0x1FFF);
+        // Sub-8 KiB NES 2.0 RAM sizes naturally mirror within the selected
+        // 8 KiB MMC5 window because the missing low SRAM address pins do not
+        // participate in decoding.
+        m=static_cast<uint32_t>(byteOffset%ram);
         return true;
     }
 
@@ -75,7 +103,7 @@ public:
         if(a==0x5104){m_exramMode=d&3;return true;} if(a==0x5105){m_ntMap=d;return true;}
         if(a==0x5106){m_fillTile=d;return true;} if(a==0x5107){m_fillPalette=d&3;return true;}
         if(a>=0x5113&&a<=0x5117){m_prgReg[a-0x5113]=d;if(a==0x5117)m_prgReg[4]|=0x80;return true;}
-        if(a>=0x5120&&a<=0x512B){m_chrReg[a-0x5120]=d;return true;}
+        if(a>=0x5120&&a<=0x512B){m_chrReg[a-0x5120]=d;m_chrLastSet=(a>=0x5128);return true;}
         if(a==0x5130){m_chrUpper=d&3;return true;}
         if(a==0x5200){m_splitCtrl=d;return true;} if(a==0x5201){m_splitScroll=d;return true;} if(a==0x5202){m_splitBank=d;return true;}
         if(a==0x5203){m_irqLine=d;return true;} if(a==0x5204){m_irqEnable=(d&0x80)!=0;return true;}
@@ -94,6 +122,10 @@ public:
         if(m_pcmReadMode&&a>=0x8000&&a<0xC000&&d!=0)m_pcm=d;
     }
     void observeCpuWrite(uint16_t a,uint8_t d) override {
+        // MMC5 observes PPUCTRL's sprite-size bit to decide whether the two
+        // CHR register sets are independent. In 8x8 mode set A is used for
+        // normal rendering; in 8x16 mode set A is sprites and set B is BG.
+        if((a&0xE007)==0x2000) m_sprite16=(d&0x20)!=0;
         // Rendering disable is observable by MMC5 and immediately tears down
         // its in-frame detector. OAM DMA is also believed to reset the scanline
         // detector; model it here because Bus exposes every CPU write.
@@ -108,7 +140,9 @@ public:
         if(!s)return false;
         if(kind==PpuFetchKind::Background && m_splitPatternReads){m=static_cast<uint32_t>(((uint32_t(m_splitBank)<<12)+((a&~uint16_t(7))|(m_splitFineY&7)))%s);--m_splitPatternReads;return true;}
         if(kind==PpuFetchKind::Background && m_exAttrPatternReads){m=static_cast<uint32_t>(((uint32_t(m_exAttrChrBank)<<12)+(a&0x0FFF))%s);--m_exAttrPatternReads;return true;}
-        const bool bg=(kind==PpuFetchKind::Background);uint16_t bank=chrBank(a,bg);m=mapBank(bank,0x400,s,a&0x3FF);return true;
+        const bool useBgSet=(kind==PpuFetchKind::Background)?m_sprite16:
+                            (kind==PpuFetchKind::Cpu? (m_sprite16&&m_chrLastSet):false);
+        uint16_t bank=chrBank(a,useBgSet);m=mapBank(bank,0x400,s,a&0x3FF);return true;
     }
     bool ppuMapWrite(uint16_t a,uint32_t& m) override { if(!m_config.chrRamSize)return false;return ppuMapReadEx(a,m,PpuFetchKind::Cpu); }
 
@@ -172,13 +206,13 @@ public:
     bool irqActive() const override { return m_irqEnable&&m_irqPending; }
     float expansionAudioSample(bool = false) const override { float p=(m_pulse[0].sample()+m_pulse[1].sample())*0.18f;float pcm=float(m_pcm)/255.0f*0.20f;return -(p+pcm); }
 
-    void saveState(std::vector<uint8_t>&o)const override {put8(o,m_prgMode);put8(o,m_chrMode);put8(o,m_prot1);put8(o,m_prot2);put8(o,m_exramMode);put8(o,m_ntMap);put8(o,m_fillTile);put8(o,m_fillPalette);for(auto v:m_prgReg)put8(o,v);for(auto v:m_chrReg)put8(o,v);put8(o,m_chrUpper);put8(o,m_splitCtrl);put8(o,m_splitScroll);put8(o,m_splitBank);put8(o,m_irqLine);put8(o,m_irqEnable);put8(o,m_irqPending);put8(o,m_inFrame);mapper_hard_detail::put16(o,m_scanLastNt);put8(o,m_scanMatchCount);put8(o,m_scanlineCounter);put8(o,m_ppuIdleCpu);put8(o,m_scanSyncPending);put8(o,m_ppuReadSeen);put8(o,m_mulA);put8(o,m_mulB);put8(o,m_pcmReadMode);put8(o,m_pcm);mapper_hard_detail::put16(o,m_frameAudio);mapper_hard_detail::put16(o,uint16_t(m_currentScanline));mapper_hard_detail::put16(o,m_exAttrNtOffset);mapper_hard_detail::put16(o,m_exAttrChrBank);put8(o,m_exAttrPending);put8(o,m_exAttrPatternReads);put8(o,m_specialAttrFetch);put8(o,m_specialPalette);put8(o,m_splitActive);put8(o,m_splitNtFetch);put8(o,m_splitPatternReads);put8(o,m_splitColumn);put8(o,m_splitFineY);put8(o,m_splitTileNumber);mapper_hard_detail::put16(o,m_splitTileOffset);for(auto v:m_exram)put8(o,v);m_pulse[0].save(o);m_pulse[1].save(o);}
-    bool loadState(const uint8_t*&p,const uint8_t*e)override {uint8_t b;if(!get8(p,e,m_prgMode)||!get8(p,e,m_chrMode)||!get8(p,e,m_prot1)||!get8(p,e,m_prot2)||!get8(p,e,m_exramMode)||!get8(p,e,m_ntMap)||!get8(p,e,m_fillTile)||!get8(p,e,m_fillPalette))return false;for(auto&v:m_prgReg)if(!get8(p,e,v))return false;for(auto&v:m_chrReg)if(!get8(p,e,v))return false;if(!get8(p,e,m_chrUpper)||!get8(p,e,m_splitCtrl)||!get8(p,e,m_splitScroll)||!get8(p,e,m_splitBank)||!get8(p,e,m_irqLine))return false;if(!get8(p,e,b))return false;m_irqEnable=b;if(!get8(p,e,b))return false;m_irqPending=b;if(!get8(p,e,b))return false;m_inFrame=b;if(!mapper_hard_detail::get16(p,e,m_scanLastNt)||!get8(p,e,m_scanMatchCount)||!get8(p,e,m_scanlineCounter)||!get8(p,e,m_ppuIdleCpu)||!get8(p,e,b))return false;m_scanSyncPending=b;if(!get8(p,e,b))return false;m_ppuReadSeen=b;if(!get8(p,e,m_mulA)||!get8(p,e,m_mulB)||!get8(p,e,b))return false;m_pcmReadMode=b;if(!get8(p,e,m_pcm)||!mapper_hard_detail::get16(p,e,m_frameAudio))return false;uint16_t q=0;if(!mapper_hard_detail::get16(p,e,q))return false;m_currentScanline=int16_t(q);if(!mapper_hard_detail::get16(p,e,m_exAttrNtOffset)||!mapper_hard_detail::get16(p,e,m_exAttrChrBank))return false;if(!get8(p,e,b))return false;m_exAttrPending=b;if(!get8(p,e,m_exAttrPatternReads)||!get8(p,e,b))return false;m_specialAttrFetch=b;if(!get8(p,e,m_specialPalette)||!get8(p,e,b))return false;m_splitActive=b;if(!get8(p,e,b))return false;m_splitNtFetch=b;if(!get8(p,e,m_splitPatternReads)||!get8(p,e,m_splitColumn)||!get8(p,e,m_splitFineY)||!get8(p,e,m_splitTileNumber)||!mapper_hard_detail::get16(p,e,m_splitTileOffset))return false;for(auto&v:m_exram)if(!get8(p,e,v))return false;return m_pulse[0].load(p,e)&&m_pulse[1].load(p,e);}
+    void saveState(std::vector<uint8_t>&o)const override {put8(o,m_prgMode);put8(o,m_chrMode);put8(o,m_prot1);put8(o,m_prot2);put8(o,m_exramMode);put8(o,m_ntMap);put8(o,m_fillTile);put8(o,m_fillPalette);for(auto v:m_prgReg)put8(o,v);for(auto v:m_chrReg)put8(o,v);put8(o,m_chrUpper);put8(o,m_splitCtrl);put8(o,m_splitScroll);put8(o,m_splitBank);put8(o,m_irqLine);put8(o,m_irqEnable);put8(o,m_irqPending);put8(o,m_inFrame);mapper_hard_detail::put16(o,m_scanLastNt);put8(o,m_scanMatchCount);put8(o,m_scanlineCounter);put8(o,m_ppuIdleCpu);put8(o,m_scanSyncPending);put8(o,m_ppuReadSeen);put8(o,m_mulA);put8(o,m_mulB);put8(o,m_pcmReadMode);put8(o,m_pcm);put8(o,m_sprite16);put8(o,m_chrLastSet);mapper_hard_detail::put16(o,m_frameAudio);mapper_hard_detail::put16(o,uint16_t(m_currentScanline));mapper_hard_detail::put16(o,m_exAttrNtOffset);mapper_hard_detail::put16(o,m_exAttrChrBank);put8(o,m_exAttrPending);put8(o,m_exAttrPatternReads);put8(o,m_specialAttrFetch);put8(o,m_specialPalette);put8(o,m_splitActive);put8(o,m_splitNtFetch);put8(o,m_splitPatternReads);put8(o,m_splitColumn);put8(o,m_splitFineY);put8(o,m_splitTileNumber);mapper_hard_detail::put16(o,m_splitTileOffset);for(auto v:m_exram)put8(o,v);m_pulse[0].save(o);m_pulse[1].save(o);}
+    bool loadState(const uint8_t*&p,const uint8_t*e)override {uint8_t b;if(!get8(p,e,m_prgMode)||!get8(p,e,m_chrMode)||!get8(p,e,m_prot1)||!get8(p,e,m_prot2)||!get8(p,e,m_exramMode)||!get8(p,e,m_ntMap)||!get8(p,e,m_fillTile)||!get8(p,e,m_fillPalette))return false;for(auto&v:m_prgReg)if(!get8(p,e,v))return false;for(auto&v:m_chrReg)if(!get8(p,e,v))return false;if(!get8(p,e,m_chrUpper)||!get8(p,e,m_splitCtrl)||!get8(p,e,m_splitScroll)||!get8(p,e,m_splitBank)||!get8(p,e,m_irqLine))return false;if(!get8(p,e,b))return false;m_irqEnable=b;if(!get8(p,e,b))return false;m_irqPending=b;if(!get8(p,e,b))return false;m_inFrame=b;if(!mapper_hard_detail::get16(p,e,m_scanLastNt)||!get8(p,e,m_scanMatchCount)||!get8(p,e,m_scanlineCounter)||!get8(p,e,m_ppuIdleCpu)||!get8(p,e,b))return false;m_scanSyncPending=b;if(!get8(p,e,b))return false;m_ppuReadSeen=b;if(!get8(p,e,m_mulA)||!get8(p,e,m_mulB)||!get8(p,e,b))return false;m_pcmReadMode=b;if(!get8(p,e,m_pcm)||!get8(p,e,b))return false;m_sprite16=b;if(!get8(p,e,b))return false;m_chrLastSet=b;if(!mapper_hard_detail::get16(p,e,m_frameAudio))return false;uint16_t q=0;if(!mapper_hard_detail::get16(p,e,q))return false;m_currentScanline=int16_t(q);if(!mapper_hard_detail::get16(p,e,m_exAttrNtOffset)||!mapper_hard_detail::get16(p,e,m_exAttrChrBank))return false;if(!get8(p,e,b))return false;m_exAttrPending=b;if(!get8(p,e,m_exAttrPatternReads)||!get8(p,e,b))return false;m_specialAttrFetch=b;if(!get8(p,e,m_specialPalette)||!get8(p,e,b))return false;m_splitActive=b;if(!get8(p,e,b))return false;m_splitNtFetch=b;if(!get8(p,e,m_splitPatternReads)||!get8(p,e,m_splitColumn)||!get8(p,e,m_splitFineY)||!get8(p,e,m_splitTileNumber)||!mapper_hard_detail::get16(p,e,m_splitTileOffset))return false;for(auto&v:m_exram)if(!get8(p,e,v))return false;return m_pulse[0].load(p,e)&&m_pulse[1].load(p,e);}
 private:
     uint8_t m_prgMode=3,m_chrMode=3,m_prot1=0,m_prot2=0,m_exramMode=0,m_ntMap=0,m_fillTile=0,m_fillPalette=0;
     uint8_t m_prgReg[5]={0,0,0,0,0xFF},m_chrReg[12]={},m_chrUpper=0;
     uint8_t m_splitCtrl=0,m_splitScroll=0,m_splitBank=0,m_irqLine=0,m_mulA=0,m_mulB=0,m_pcm=0;
-    bool m_irqEnable=false,m_irqPending=false,m_inFrame=false,m_pcmReadMode=false;uint16_t m_frameAudio=0;
+    bool m_irqEnable=false,m_irqPending=false,m_inFrame=false,m_pcmReadMode=false,m_sprite16=false,m_chrLastSet=false;uint16_t m_frameAudio=0;
     uint16_t m_scanLastNt=0;uint8_t m_scanMatchCount=0,m_scanlineCounter=0,m_ppuIdleCpu=0;bool m_scanSyncPending=false,m_ppuReadSeen=false;
     int m_currentScanline=-1;uint16_t m_exAttrNtOffset=0,m_exAttrChrBank=0,m_splitTileOffset=0;bool m_exAttrPending=false,m_specialAttrFetch=false,m_splitActive=false,m_splitNtFetch=false;uint8_t m_exAttrPatternReads=0,m_specialPalette=0,m_splitPatternReads=0,m_splitColumn=0,m_splitFineY=0,m_splitTileNumber=0;
     uint8_t m_exram[0x400]={};mapper_hard_detail::Mmc5Pulse m_pulse[2];
@@ -262,7 +296,7 @@ public:
     bool ppuUsesChrRam(uint16_t a)const override{return a<0x2000&&m_config.chrRomSize==0&&m_config.chrRamSize!=0;}
     bool mapPatternCiram(uint16_t a,uint32_t&m)const override{if(m_variant!=Variant::Namco163||a>=0x2000)return false;uint8_t slot=a>>10;uint8_t b=m_chr[slot];bool forceChr=(slot<4)?m_chrRamDisable[0]:m_chrRamDisable[1];if(!forceChr&&b>=0xE0){m=uint32_t(b&1)*0x400+(a&0x3FF);return true;}return false;}
     bool mapNametable(uint16_t a,NametableSource&s,uint32_t&m)const override{if(m_variant!=Variant::Namco163||a<0x2000||a>0x3EFF)return false;uint16_t n=(a-0x2000)&0xFFF;uint8_t b=m_nt[(n>>10)&3];if(b>=0xE0){s=NametableSource::Ciram;m=uint32_t(b&1)*0x400+(n&0x3FF);}else{s=m_config.chrRomSize?NametableSource::ChrRom:NametableSource::ChrRam;m=mapBank(b,0x400,m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize,n&0x3FF);}return true;}
-    bool mapPrgRam(uint16_t a,uint32_t&m,bool write)const override{if(a<0x6000||a>0x7FFF||!m_config.prgRamSize)return false;if(m_variant==Variant::Namco340)return false;if(m_variant==Variant::Namco175){if(write&&(m_ramProtect&1)==0)return false;m=(a-0x6000)%m_config.prgRamSize;return true;}uint8_t seg=(a-0x6000)>>11;if(write){if((m_ramProtect&0x40)==0)return false;if(m_ramProtect&(1u<<seg))return false;}m=(a-0x6000)%m_config.prgRamSize;return true;}
+    bool mapPrgRam(uint16_t a,uint32_t&m,bool write)const override{if(a<0x6000||a>0x7FFF||!m_config.prgRamSize)return false;if(m_variant==Variant::Namco340)return false;if(m_variant==Variant::Namco175){if(write&&(m_ramProtect&1)==0)return false;m=(a-0x6000)%m_config.prgRamSize;return true;}uint8_t seg=(a-0x6000)>>11;if(write){if((m_ramProtect&0xF0)!=0x40)return false;if(m_ramProtect&(1u<<seg))return false;}m=(a-0x6000)%m_config.prgRamSize;return true;}
     void clockCpu()override{if(m_variant!=Variant::Namco163)return;if(m_irqEnabled&&m_irqCounter<0x7FFF){++m_irqCounter;if(m_irqCounter==0x7FFF)m_irqPending=true;}if(!m_audioDisabled){clockChipAudio();if(++m_audioDiv>=15){m_audioDiv=0;clockAudioChannel();}}}
     bool irqActive()const override{return m_variant==Variant::Namco163&&m_irqEnabled&&m_irqPending;}
     float expansionAudioSample(bool chipMod = false)const override{
@@ -273,9 +307,9 @@ public:
         if(!chipMod)return std::max(-1.0f,std::min(1.0f,float(m_serialOut)/120.0f))*mixGain;
         float sum=0.0f;for(int ch=8-count;ch<8;ch++){uint8_t base=uint8_t(0x40+ch*8);uint16_t len=uint16_t(256-(m_ram[base+4]&0xFC));if(len<4)len=4;uint32_t rawPos=uint32_t(m_chipPhase[ch]/65536.0)+m_ram[base+6];uint8_t pos=uint8_t(std::min<uint32_t>(255,rawPos));uint8_t packed=m_ram[pos>>1];uint8_t sample=(pos&1)?(packed>>4):(packed&0x0F);uint8_t vol=m_ram[base+7]&0x0F;sum+=float(8-int(sample))*vol;}uint8_t divisor=std::min<uint8_t>(count,6);return std::max(-1.0f,std::min(1.0f,sum/(120.0f*divisor)))*mixGain;
     }
-    std::size_t mapperBatterySize()const override{return m_variant==Variant::Namco163?sizeof(m_ram):0;}
-    void saveMapperBattery(std::vector<uint8_t>&o)const override{if(m_variant==Variant::Namco163)o.insert(o.end(),m_ram,m_ram+sizeof(m_ram));}
-    bool loadMapperBattery(const uint8_t*d,std::size_t n)override{if(m_variant!=Variant::Namco163)return n==0;if(n!=sizeof(m_ram))return false;std::memcpy(m_ram,d,n);rebuildChipPhases();return true;}
+    std::size_t mapperBatterySize()const override{return m_variant==Variant::Namco163&&m_config.hasBattery?sizeof(m_ram):0;}
+    void saveMapperBattery(std::vector<uint8_t>&o)const override{if(mapperBatterySize())o.insert(o.end(),m_ram,m_ram+sizeof(m_ram));}
+    bool loadMapperBattery(const uint8_t*d,std::size_t n)override{if(!mapperBatterySize())return n==0;if(n!=sizeof(m_ram))return false;std::memcpy(m_ram,d,n);rebuildChipPhases();return true;}
     void saveState(std::vector<uint8_t>&o)const override{for(auto v:m_chr)put8(o,v);for(auto v:m_nt)put8(o,v);for(auto v:m_prg)put8(o,v);for(auto v:m_ram)put8(o,v);put8(o,m_portAddr);put8(o,m_ramProtect);mapper_hard_detail::put16(o,m_irqCounter);put8(o,m_irqEnabled);put8(o,m_irqPending);put8(o,m_audioDiv);put8(o,m_audioChannel);for(auto v:m_channelOut){int16_t q=int16_t(v);mapper_hard_detail::put16(o,uint16_t(q));}mapper_hard_detail::put16(o,uint16_t(m_serialOut));put8(o,m_chrRamDisable[0]);put8(o,m_chrRamDisable[1]);put8(o,m_audioDisabled);for(double v:m_chipPhase){uint64_t bits=0;static_assert(sizeof(bits)==sizeof(v),"unexpected double size");std::memcpy(&bits,&v,sizeof(bits));put64(o,bits);}}
     bool loadState(const uint8_t*&p,const uint8_t*e)override{uint8_t b;for(auto&v:m_chr)if(!get8(p,e,v))return false;for(auto&v:m_nt)if(!get8(p,e,v))return false;for(auto&v:m_prg)if(!get8(p,e,v))return false;for(auto&v:m_ram)if(!get8(p,e,v))return false;if(!get8(p,e,m_portAddr)||!get8(p,e,m_ramProtect)||!mapper_hard_detail::get16(p,e,m_irqCounter))return false;if(!get8(p,e,b))return false;m_irqEnabled=b;if(!get8(p,e,b))return false;m_irqPending=b;if(!get8(p,e,m_audioDiv)||!get8(p,e,m_audioChannel))return false;for(auto&v:m_channelOut){uint16_t q;if(!mapper_hard_detail::get16(p,e,q))return false;v=int16_t(q);}uint16_t serial;if(!mapper_hard_detail::get16(p,e,serial))return false;m_serialOut=int16_t(serial);if(!get8(p,e,b))return false;m_chrRamDisable[0]=b;if(!get8(p,e,b))return false;m_chrRamDisable[1]=b;if(!get8(p,e,b))return false;m_audioDisabled=b;for(double&v:m_chipPhase){uint64_t bits=0;if(!get64(p,e,bits))return false;std::memcpy(&v,&bits,sizeof(v));if(!std::isfinite(v))return false;}return true;}
 private:

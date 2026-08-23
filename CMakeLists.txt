@@ -30,11 +30,13 @@ if(NES_BUILD_HEADLESS_TESTS)
         tests/probes/ApuConformanceProbe.cpp
         tests/probes/MapperConformanceProbe.cpp
         tests/probes/CartridgeConformanceProbe.cpp
+        tests/probes/CheatConformanceProbe.cpp
         src/core/CPU.cpp
         src/core/Bus.cpp
         src/core/PPU.cpp
         src/core/APU.cpp
         src/core/Cartridge.cpp
+        src/core/CheatSystem.cpp
         src/core/Mapper.cpp
     )
 

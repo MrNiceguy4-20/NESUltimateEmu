@@ -6,6 +6,7 @@
 #include <vector>
 #include "Mapper.hpp"
 #include "Timing.hpp"
+#include "CheatSystem.hpp"
 
 class CPU;
 
@@ -47,6 +48,8 @@ public:
     bool irqActive() const { return m_mapper && m_mapper->irqActive(); }
     float expansionAudioSample(bool chipMod = false) const { return m_mapper ? m_mapper->expansionAudioSample(chipMod) : 0.0f; }
     uint64_t romIdentity() const;
+    CheatSystem& cheats() { return m_cheats; }
+    const CheatSystem& cheats() const { return m_cheats; }
     std::size_t diskSideCount() const { return m_mapper ? m_mapper->diskSideCount() : 0; }
     int currentDiskSide() const { return m_mapper ? m_mapper->currentDiskSide() : -1; }
     bool diskInserted() const { return m_mapper && m_mapper->diskInserted(); }
@@ -104,6 +107,7 @@ private:
     uint8_t m_submapper = 0;
     Mirror m_headerMirror = Mirror::Horizontal;
     std::unique_ptr<Mapper> m_mapper;
+    CheatSystem m_cheats;
 
     std::string m_path;
     std::string m_fileName;

@@ -42,11 +42,13 @@
     <ClCompile Include="tests\probes\ApuConformanceProbe.cpp" />
     <ClCompile Include="tests\probes\MapperConformanceProbe.cpp" />
     <ClCompile Include="tests\probes\CartridgeConformanceProbe.cpp" />
+    <ClCompile Include="tests\probes\CheatConformanceProbe.cpp" />
     <ClCompile Include="src\core\CPU.cpp" />
     <ClCompile Include="src\core\Bus.cpp" />
     <ClCompile Include="src\core\PPU.cpp" />
     <ClCompile Include="src\core\APU.cpp" />
     <ClCompile Include="src\core\Cartridge.cpp" />
+    <ClCompile Include="src\core\CheatSystem.cpp" />
     <ClCompile Include="src\core\Mapper.cpp" />
   </ItemGroup>
   <ItemGroup>

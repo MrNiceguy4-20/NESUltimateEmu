@@ -70,6 +70,7 @@ int runBuiltInProbeSuite(const char* executablePath)
         {"Timing/region conformance", runTimingConformanceProbe()},
         {"APU conformance", runApuConformanceProbe()},
         {"Cartridge conformance", runCartridgeConformanceProbe()},
+        {"Cheat/Game Genie conformance", runCheatConformanceProbe()},
         {"Interrupt hijack", runInterruptHijackProbe()},
         {"Mapper conformance", runMapperConformanceProbe()},
         {"DMC load start", runDmcLoadStartProbe()},

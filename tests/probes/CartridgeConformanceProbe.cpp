@@ -54,6 +54,30 @@ int runCartridgeConformanceProbe()
     bool ok = true;
     const auto root = tempRoot();
 
+    // Mapper 19 has 128 bytes of ASIC-internal sound RAM, but that RAM is
+    // battery-backed only when the cartridge header requests battery backup.
+    // Do not turn every N163 image into a save-bearing cartridge.
+    auto n163Header = baseHeader(2, 1);
+    n163Header[6] = 0x30; // mapper 19 low nibble, battery bit clear
+    n163Header[7] = 0x10;
+    const auto n163VolatilePath = root / "n163_volatile.nes";
+    Cartridge n163VolatileCart;
+    const bool n163VolatileLoaded = writeRom(n163VolatilePath, n163Header, 0x8000, 0x2000) &&
+        n163VolatileCart.loadFromFile(n163VolatilePath.string());
+    const bool n163NoImplicitBattery = n163VolatileLoaded && !n163VolatileCart.hasBattery();
+
+    auto n163BatteryHeader = n163Header;
+    n163BatteryHeader[6] |= 0x02;
+    const auto n163BatteryPath = root / "n163_battery.nes";
+    Cartridge n163BatteryCart;
+    const bool n163BatteryLoaded = writeRom(n163BatteryPath, n163BatteryHeader, 0x8000, 0x2000) &&
+        n163BatteryCart.loadFromFile(n163BatteryPath.string());
+    const bool n163ExplicitBattery = n163BatteryLoaded && n163BatteryCart.hasBattery();
+    std::printf("n163_battery_classification=%s volatile=%d battery=%d\n",
+        (n163NoImplicitBattery && n163ExplicitBattery) ? "PASS" : "FAIL",
+        n163VolatileCart.hasBattery() ? 1 : 0, n163BatteryCart.hasBattery() ? 1 : 0);
+    ok &= n163NoImplicitBattery && n163ExplicitBattery;
+
     // Archaic/dirty iNES: classic post-header garbage must not contribute the
     // upper mapper nibble or byte-8 RAM extension.
     auto archaic = baseHeader(2, 0);

@@ -39,6 +39,19 @@ int runMapperConformanceProbe()
 {
     bool ok = true;
 
+    // Namco 163's internal 128-byte sound RAM is mapper-owned persistent
+    // storage only when the cartridge actually supplies battery backup. A
+    // plain mapper-19 image must not acquire battery semantics merely because
+    // the ASIC contains writable internal RAM.
+    auto n163Volatile = makeMapper(19, 0x8000, 0x2000, 0, 0, 0, false, Mirror::Horizontal, false);
+    auto n163Battery = makeMapper(19, 0x8000, 0x2000, 0, 0, 0, false, Mirror::Horizontal, true);
+    const bool n163BatteryGate = n163Volatile->mapperBatterySize() == 0 &&
+        n163Battery->mapperBatterySize() == 128;
+    std::printf("n163_internal_ram_battery_gate=%s volatile=%zu battery=%zu\n",
+        n163BatteryGate ? "PASS" : "FAIL", n163Volatile->mapperBatterySize(),
+        n163Battery->mapperBatterySize());
+    ok &= n163BatteryGate;
+
     // Phase 47 bundled multicart pass: seven small, well-defined iNES boards
     // share one implementation but retain their individual address/data wiring.
     auto m202 = makeMapper(202, 0x20000, 0x10000, 0, 0, 0, false, Mirror::Vertical);
@@ -1618,19 +1631,126 @@ int runMapperConformanceProbe()
         n163MutedMix ? "PASS" : "FAIL", n163Sm3, n163Sm4, n163Sm5);
     ok &= n163MutedMix && n163MixOrder;
 
-    // FME-7: any write to IRQ control command $D acknowledges a pending IRQ,
-    // even when the write leaves both counting and IRQ generation enabled.
+    // FME-7 IRQ phase: mapper clocks precede CPU bus accesses in Bus::clock(),
+    // so a disabled->enabled control write consumes the counter edge belonging
+    // to that CPU period. Starting from 3 therefore reaches IRQ after two more
+    // mapper clocks. Counter-byte writes must not acknowledge a pending IRQ,
+    // while any control-command $D write must acknowledge it.
     auto fme7 = makeMapper(69);
-    fme7->cpuWrite(0x8000, 0x0E, 0); fme7->cpuWrite(0xA000, 0x00, 0);
+    fme7->cpuWrite(0x8000, 0x0E, 0); fme7->cpuWrite(0xA000, 0x03, 0);
     fme7->cpuWrite(0x8000, 0x0F, 0); fme7->cpuWrite(0xA000, 0x00, 0);
     fme7->cpuWrite(0x8000, 0x0D, 0); fme7->cpuWrite(0xA000, 0x81, 0);
     fme7->clockCpu();
-    const bool fmeRaised = fme7->irqActive();
+    fme7->clockCpu();
+    const bool fmeRaisedAtPollPhase = fme7->irqActive();
+    fme7->cpuWrite(0x8000, 0x0E, 0); fme7->cpuWrite(0xA000, 0xFF, 0);
+    const bool fmeLowWriteNoAck = fme7->irqActive();
+    fme7->cpuWrite(0x8000, 0x0F, 0); fme7->cpuWrite(0xA000, 0xFF, 0);
+    const bool fmeHighWriteNoAck = fme7->irqActive();
     fme7->cpuWrite(0x8000, 0x0D, 0); fme7->cpuWrite(0xA000, 0x81, 0);
     const bool fmeAckWhileEnabled = !fme7->irqActive();
-    std::printf("fme7_irq_raised=%s ack_enabled=%s\n",
-        fmeRaised ? "PASS" : "FAIL", fmeAckWhileEnabled ? "PASS" : "FAIL");
-    ok &= fmeRaised && fmeAckWhileEnabled;
+    std::printf("fme7_irq_phase=%s counter_write_no_ack=%s ack_enabled=%s\n",
+        fmeRaisedAtPollPhase ? "PASS" : "FAIL",
+        (fmeLowWriteNoAck && fmeHighWriteNoAck) ? "PASS" : "FAIL",
+        fmeAckWhileEnabled ? "PASS" : "FAIL");
+    ok &= fmeRaisedAtPollPhase && fmeLowWriteNoAck && fmeHighWriteNoAck && fmeAckWhileEnabled;
+
+
+    // FME-7 register 8 selects PRG-RAM in 8 KiB banks when bits 7/6 enable
+    // RAM. NES 2.0 images can declare 32 KiB here, and the four banks must
+    // remain distinct rather than aliasing a single $6000-$7FFF window.
+    auto fme7Ram = makeMapper(69, 0x40000, 0x20000, 0x8000, 0, 0, true);
+    bool fmeRamBanks = true;
+    for (uint8_t bank = 0; bank < 4; ++bank) {
+        fme7Ram->cpuWrite(0x8000, 0x08, 0);
+        fme7Ram->cpuWrite(0xA000, uint8_t(0xC0 | bank), 0);
+        uint32_t mapped = 0;
+        fmeRamBanks &= fme7Ram->mapPrgRam(0x6000, mapped, false) && mapped == uint32_t(bank) * 0x2000;
+    }
+    std::printf("fme7_wram_banking=%s\n", fmeRamBanks ? "PASS" : "FAIL");
+    ok &= fmeRamBanks;
+
+    // VRC6 $B003 controls both pattern-table grouping and the nametable
+    // register/A10 network. In mode 1 R4-R7 directly select four nametables;
+    // mode 3 forces the low CHR/CIRAM address bit into 2 KiB spreads. Mapper
+    // 26 must produce the same behavior after its A0/A1 register swap.
+    auto checkVrc6Ppu = [&](uint16_t id) {
+        auto v = makeMapper(id, 0x40000, 0x40000, 0x2000, 0, 0, true);
+        const uint16_t r4 = id == 26 ? 0xE000 : 0xE000;
+        const uint16_t r5 = id == 26 ? 0xE002 : 0xE001;
+        const uint16_t r6 = id == 26 ? 0xE001 : 0xE002;
+        const uint16_t r7 = 0xE003;
+        v->cpuWrite(r4, 0x10, 0); v->cpuWrite(r5, 0x11, 0);
+        v->cpuWrite(r6, 0x12, 0); v->cpuWrite(r7, 0x13, 0);
+        // B003 mode 1 + CHR-ROM nametables + A10 override network enabled.
+        v->cpuWrite(0xB003, 0x31, 0);
+        bool romNt = true;
+        for (uint8_t page = 0; page < 4; ++page) {
+            NametableSource src = NametableSource::Ciram; uint32_t mapped = 0;
+            romNt &= v->mapNametable(uint16_t(0x2000 + page * 0x400), src, mapped) &&
+                src == NametableSource::ChrRom && mapped == uint32_t(0x10 + page) * 0x400;
+        }
+        // Mode 3 / $23 forces R6-even,R7-even,R6-odd,R7-odd on the existing PCB.
+        v->cpuWrite(0xB003, 0x23, 0);
+        static constexpr uint32_t expectedCiram[4] = {0x000,0x000,0x400,0x400};
+        bool ciramNt = true;
+        for (uint8_t page = 0; page < 4; ++page) {
+            NametableSource src = NametableSource::ChrRom; uint32_t mapped = 0;
+            ciramNt &= v->mapNametable(uint16_t(0x2000 + page * 0x400), src, mapped) &&
+                src == NametableSource::Ciram && mapped == expectedCiram[page];
+        }
+        // PRG-RAM is gated by B003.7.
+        uint32_t ram = 0;
+        const bool ramOff = !v->mapPrgRam(0x6000, ram, false);
+        v->cpuWrite(0xB003, 0xA0, 0);
+        const bool ramOn = v->mapPrgRam(0x6000, ram, false) && ram == 0;
+        return romNt && ciramNt && ramOff && ramOn;
+    };
+    const bool vrc6Ppu24 = checkVrc6Ppu(24);
+    const bool vrc6Ppu26 = checkVrc6Ppu(26);
+    std::printf("vrc6_ppu_banking=%s m24=%s m26=%s\n",
+        (vrc6Ppu24 && vrc6Ppu26) ? "PASS" : "FAIL",
+        vrc6Ppu24 ? "PASS" : "FAIL", vrc6Ppu26 ? "PASS" : "FAIL");
+    ok &= vrc6Ppu24 && vrc6Ppu26;
+
+    // MMC5 CHR set selection: in 8x8 sprite mode set A ($5120-$5127)
+    // supplies normal rendering regardless of a later set-B write. In 8x16
+    // mode sprites use A, backgrounds use B, and CPU $2007 accesses follow
+    // whichever set was written most recently. Also pin the physical PRG-RAM
+    // decode instead of modulo-wrapping nonexistent banks.
+    auto mmc5Chr = makeMapper(5, 0x40000, 0x40000, 0x2000, 0, 0, true);
+    mmc5Chr->cpuWrite(0x5101, 3, 0);
+    mmc5Chr->cpuWrite(0x5120, 3, 0);
+    mmc5Chr->cpuWrite(0x5128, 7, 0);
+    mmc5Chr->observeCpuWrite(0x2000, 0x00);
+    uint32_t m5bg8=0,m5cpu8=0;
+    mmc5Chr->ppuMapReadEx(0x0000,m5bg8,PpuFetchKind::Background);
+    mmc5Chr->ppuMapReadEx(0x0000,m5cpu8,PpuFetchKind::Cpu);
+    mmc5Chr->observeCpuWrite(0x2000, 0x20);
+    uint32_t m5bg16=0,m5spr16=0,m5cpu16b=0,m5cpu16a=0;
+    mmc5Chr->ppuMapReadEx(0x0000,m5bg16,PpuFetchKind::Background);
+    mmc5Chr->ppuMapReadEx(0x0000,m5spr16,PpuFetchKind::Sprite);
+    mmc5Chr->ppuMapReadEx(0x0000,m5cpu16b,PpuFetchKind::Cpu);
+    mmc5Chr->cpuWrite(0x5120, 4, 0);
+    mmc5Chr->ppuMapReadEx(0x0000,m5cpu16a,PpuFetchKind::Cpu);
+    const bool mmc5ChrSets = m5bg8==0x0C00 && m5cpu8==0x0C00 &&
+        m5bg16==0x1C00 && m5spr16==0x0C00 && m5cpu16b==0x1C00 && m5cpu16a==0x1000;
+
+    auto checkMmc5Ram = [&](size_t bytes, uint8_t bank, bool expect, uint32_t expected) {
+        auto m = makeMapper(5, 0x40000, 0x2000, bytes, 0, 0, true);
+        m->cpuWrite(0x5113, bank, 0); uint32_t mapped=0;
+        const bool driven=m->mapPrgRam(0x6000,mapped,false);
+        return driven==expect && (!expect || mapped==expected);
+    };
+    const bool mmc5RamDecode =
+        checkMmc5Ram(0x2000,0x03,true,0x0000) && checkMmc5Ram(0x2000,0x04,false,0) &&
+        checkMmc5Ram(0x4000,0x03,true,0x0000) && checkMmc5Ram(0x4000,0x04,true,0x2000) &&
+        checkMmc5Ram(0x8000,0x03,true,0x6000) && checkMmc5Ram(0x8000,0x04,false,0) &&
+        checkMmc5Ram(0x10000,0x07,true,0xE000) &&
+        checkMmc5Ram(0x20000,0x0F,true,0x1E000);
+    std::printf("mmc5_chr_sets=%s ram_decode=%s\n",
+        mmc5ChrSets ? "PASS" : "FAIL", mmc5RamDecode ? "PASS" : "FAIL");
+    ok &= mmc5ChrSets && mmc5RamDecode;
 
     // Mapper 215 / UNL-8237: selectable MMC3 address/index scrambling,
     // NROM override, and two distinct NES 2.0 outer-bank wirings.
@@ -3030,6 +3150,72 @@ int runMapperConformanceProbe()
     const bool phase49=p49_212&&p49_179&&p49_182&&p49_255;
     std::printf("phase49_mapper_bundle 212=%s 179=%s 182=%s 255=%s\n",p49_212?"PASS":"FAIL",p49_179?"PASS":"FAIL",p49_182?"PASS":"FAIL",p49_255?"PASS":"FAIL");
     ok &= phase49;
+
+
+    // Action 53 / mapper 28 PRG decoder: exhaustively compare the mapper
+    // implementation against the published reference formula for all 64
+    // mode values, 256 outer-bank values, 16 inner-bank values, and both
+    // CPU A14 states. Use an 8 MiB PRG size so no decoded address aliases.
+    auto m28ref = makeMapper(28, 0x800000, 0, 0, 0);
+    auto calcM28Ref = [](uint16_t address, uint8_t bankMode, uint8_t outerBank, uint8_t currentBank) -> uint16_t {
+        static constexpr uint8_t masks[4] = {0x01, 0x03, 0x07, 0x0F};
+        const uint8_t cpuA14 = uint8_t((address >> 14) & 1);
+        uint16_t outer = uint16_t(outerBank) << 1;
+        uint8_t mode = uint8_t(bankMode >> 2);
+        if (((mode ^ cpuA14) & 0x03) == 0x02) mode = 0;
+        uint16_t current = currentBank;
+        if ((mode & 0x02) == 0) current = uint16_t((current << 1) | cpuA14);
+        const uint16_t mask = masks[(mode >> 2) & 3];
+        return uint16_t((current & mask) | (outer & ~mask));
+    };
+    bool m28Exact = true;
+    for (unsigned mode = 0; mode < 64 && m28Exact; ++mode) {
+        m28ref->cpuWrite(0x5000, 0x80, 0);
+        m28ref->cpuWrite(0x8000, uint8_t(mode), 0);
+        for (unsigned outer = 0; outer < 256 && m28Exact; ++outer) {
+            m28ref->cpuWrite(0x5000, 0x81, 0);
+            m28ref->cpuWrite(0x8000, uint8_t(outer), 0);
+            for (unsigned inner = 0; inner < 16 && m28Exact; ++inner) {
+                m28ref->cpuWrite(0x5000, 0x01, 0);
+                m28ref->cpuWrite(0x8000, uint8_t(inner), 0);
+                for (uint16_t address : {uint16_t(0x8000), uint16_t(0xC000)}) {
+                    uint32_t mapped = 0;
+                    const uint16_t expectedBank = calcM28Ref(address, uint8_t(mode), uint8_t(outer), uint8_t(inner));
+                    const uint32_t expected = uint32_t(expectedBank) * 0x4000u;
+                    if (!m28ref->cpuMapRead(address, mapped) || mapped != expected) {
+                        m28Exact = false;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    std::printf("mapper28_reference_exhaustive=%s combinations=%u\n",
+        m28Exact?"PASS":"FAIL", 64u*256u*16u*2u);
+    ok &= m28Exact;
+
+    // Namco 163 external WRAM write-enable decode.  The four high bits of
+    // $F800 must equal %0100 exactly; merely having bit 6 set is insufficient.
+    // Low bits A-D independently protect the four 2 KiB WRAM windows.
+    auto n163wp = makeMapper(19, 0x80000, 0x40000, 0x2000, 0);
+    uint32_t n163Ram = 0;
+    n163wp->cpuWrite(0xF800, 0x40, 0);
+    const bool n163Write40 = n163wp->mapPrgRam(0x6000, n163Ram, true) && n163Ram == 0;
+    n163wp->cpuWrite(0xF800, 0x50, 0);
+    const bool n163Reject50 = !n163wp->mapPrgRam(0x6000, n163Ram, true);
+    n163wp->cpuWrite(0xF800, 0x60, 0);
+    const bool n163Reject60 = !n163wp->mapPrgRam(0x6000, n163Ram, true);
+    n163wp->cpuWrite(0xF800, 0x70, 0);
+    const bool n163Reject70 = !n163wp->mapPrgRam(0x6000, n163Ram, true);
+    n163wp->cpuWrite(0xF800, 0x41, 0);
+    const bool n163Protect0 = !n163wp->mapPrgRam(0x6000, n163Ram, true) &&
+        n163wp->mapPrgRam(0x6800, n163Ram, true) && n163Ram == 0x0800;
+    const bool n163RamProtect = n163Write40 && n163Reject50 && n163Reject60 && n163Reject70 && n163Protect0;
+    std::printf("n163_wram_protect=%s exact_upper_nibble=%s segment_bits=%s\n",
+        n163RamProtect?"PASS":"FAIL",
+        (n163Write40&&n163Reject50&&n163Reject60&&n163Reject70)?"PASS":"FAIL",
+        n163Protect0?"PASS":"FAIL");
+    ok &= n163RamProtect;
 
     std::puts(ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;

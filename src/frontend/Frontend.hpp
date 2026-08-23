@@ -69,6 +69,8 @@ private:
     bool openRomDialog();
     bool openStateLoadDialog();
     bool openStateSaveDialog();
+    bool openCheatFileDialog();
+    void reloadCheatsForLoadedRom();
     void updateTexture();
     SDL_Rect gameDestinationRect() const;
     void openGamepad();

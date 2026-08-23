@@ -483,12 +483,94 @@ public:
         }
         if(r>=0xA000&&r<=0xA002){m_pulse[1].write(r&3,d,audioShift());return true;}
         if(r>=0xB000&&r<=0xB002){m_saw.write(r&3,d,audioShift());return true;}
-        if((r&0xF003)==0xB003){mapper_more_detail::setMirror4(m_mirror,(d>>2)&3);return true;}
+        if((r&0xF003)==0xB003){
+            m_ppuCtrl=d;
+            mapper_more_detail::setMirror4(m_mirror,(d>>2)&3);
+            return true;
+        }
         if((r&0xF003)==0xC000){m_prg8=d&0x1F;return true;}
         if(r>=0xD000&&r<=0xE003){int i=((r>>12)-0xD)*4+(r&3);if(i<8)m_chr[i]=d;return true;}
         if((r&0xF003)==0xF000){m_irq.latch=d;return true;}if((r&0xF003)==0xF001){m_irq.writeControl(d);return true;}if((r&0xF003)==0xF002){m_irq.acknowledge();return true;}return false;
     }
-    bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto s=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!s)return false;m=mapBank(m_chr[a>>10],0x400,s,a&0x3FF);return true;}bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);}
+    bool ppuMapRead(uint16_t a,uint32_t&m)override{
+        if(a>=0x2000)return false;
+        const auto size=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;
+        if(!size)return false;
+        const uint8_t slot=uint8_t(a>>10);
+        const uint8_t mode=m_ppuCtrl&3;
+        uint8_t reg=slot;
+        bool paired=false;
+        if(mode==1){reg=uint8_t(slot>>1);paired=true;}
+        else if(mode>=2&&slot>=4){reg=uint8_t(4+((slot-4)>>1));paired=true;}
+        uint8_t bank=m_chr[reg];
+        if(paired&&(m_ppuCtrl&0x20))bank=uint8_t((bank&0xFE)|(slot&1));
+        m=mapBank(bank,0x400,size,a&0x3FF);
+        return true;
+    }
+    bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);}
+    bool mapPrgRam(uint16_t a,uint32_t&m,bool)const override{
+        if(a<0x6000||a>0x7FFF||!m_config.prgRamSize||(m_ppuCtrl&0x80)==0)return false;
+        m=uint32_t(a-0x6000)%m_config.prgRamSize;
+        return true;
+    }
+    bool mapNametable(uint16_t a,NametableSource& source,uint32_t& mapped)const override{
+        if(a<0x2000||a>0x3EFF)return false;
+        const uint8_t page=uint8_t((a>>10)&3);
+        const uint16_t off=a&0x3FF;
+
+        // VRC6 nametable register selection is controlled by B003 bits 0-2,
+        // independently of whether the backing store is CIRAM or CHR-ROM.
+        // The ASIC always drives CIRAM A10 from its CHR A10 output, so the
+        // same low-bank-bit rules apply to both kinds of nametable backing.
+        const uint8_t style=m_ppuCtrl&0x07;
+        uint8_t reg=6;
+        switch(style){
+        case 0: case 6: case 7:
+            reg=uint8_t(page<2?6:7);             // R6,R6,R7,R7
+            break;
+        case 1: case 5:
+            reg=uint8_t(4+page);                 // R4,R5,R6,R7
+            break;
+        default: // 2,3,4
+            reg=uint8_t(6+(page&1));             // R6,R7,R6,R7
+            break;
+        }
+
+        uint8_t bank=m_chr[reg];
+
+        // With B003.5 set, the existing VRC6 PCB enables the ASIC's CHR-A10
+        // override network.  Modes 0 and 3 force the low bank bit to produce
+        // the documented 2 KiB spread / H / V / one-screen arrangements.
+        // Modes 1 and 2 leave each selected register's LSB intact.
+        if(m_ppuCtrl&0x20){
+            int forced=-1;
+            switch(m_ppuCtrl&0x0F){
+            case 0x0: { static constexpr uint8_t v[4]={0,1,0,1}; forced=v[page]; break; }
+            case 0x4: { static constexpr uint8_t v[4]={0,0,1,1}; forced=v[page]; break; }
+            case 0x8: forced=0; break;
+            case 0xC: forced=1; break;
+            case 0x3: { static constexpr uint8_t v[4]={0,0,1,1}; forced=v[page]; break; }
+            case 0x7: { static constexpr uint8_t v[4]={0,1,0,1}; forced=v[page]; break; }
+            case 0xB: forced=1; break;
+            case 0xF: forced=0; break;
+            default: break;
+            }
+            if(forced>=0)bank=uint8_t((bank&0xFE)|uint8_t(forced));
+        }
+
+        if(m_ppuCtrl&0x10){
+            // ROM nametables use exactly the CHR bank selected above.
+            const auto size=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;
+            if(!size)return false;
+            source=m_config.chrRomSize?NametableSource::ChrRom:NametableSource::ChrRam;
+            mapped=mapBank(bank,0x400,size,off);
+        }else{
+            source=NametableSource::Ciram;
+            mapped=uint32_t(bank&1)*0x400+off;
+        }
+        return true;
+    }
+    bool mapNametableWrite(uint16_t a,NametableSource& source,uint32_t& mapped)const override{return mapNametable(a,source,mapped);}
     void clockCpu() override {
         m_irq.clockCpu();
         if ((m_audioCtrl & 1) == 0) {
@@ -509,8 +591,8 @@ public:
         // expansion chip here.
         return -(raw / 61.0f) * 0.55f;
     }
-    void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg16);put8(o,m_prg8);for(auto v:m_chr)put8(o,v);m_irq.save(o);put8(o,static_cast<uint8_t>(m_mirror));put8(o,m_audioCtrl);for(auto&i:m_pulse)i.save(o);m_saw.save(o);}
-    bool loadState(const uint8_t*&p,const uint8_t*e)override{uint8_t b;if(!get8(p,e,m_prg16)||!get8(p,e,m_prg8))return false;for(auto&v:m_chr)if(!get8(p,e,v))return false;if(!m_irq.load(p,e)||!get8(p,e,b))return false;m_mirror=static_cast<Mirror>(b);if(!get8(p,e,m_audioCtrl))return false;for(auto&i:m_pulse)if(!i.load(p,e))return false;return m_saw.load(p,e);}
+    void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg16);put8(o,m_prg8);for(auto v:m_chr)put8(o,v);m_irq.save(o);put8(o,static_cast<uint8_t>(m_mirror));put8(o,m_ppuCtrl);put8(o,m_audioCtrl);for(auto&i:m_pulse)i.save(o);m_saw.save(o);}
+    bool loadState(const uint8_t*&p,const uint8_t*e)override{uint8_t b;if(!get8(p,e,m_prg16)||!get8(p,e,m_prg8))return false;for(auto&v:m_chr)if(!get8(p,e,v))return false;if(!m_irq.load(p,e)||!get8(p,e,b))return false;m_mirror=static_cast<Mirror>(b);if(!get8(p,e,m_ppuCtrl)||!get8(p,e,m_audioCtrl))return false;for(auto&i:m_pulse)if(!i.load(p,e))return false;return m_saw.load(p,e);}
 private:
     struct Pulse {
         uint8_t ctrl = 0, hi = 0, step = 0;
@@ -628,7 +710,7 @@ private:
         bool load(const uint8_t*&p,const uint8_t*e){uint8_t fl,fh,tl,th;return get8(p,e,rate)&&get8(p,e,hi)&&get8(p,e,step)&&get8(p,e,acc)&&get8(p,e,fl)&&get8(p,e,fh)&&get8(p,e,tl)&&get8(p,e,th)&&(freq=uint16_t(fl)|(uint16_t(fh)<<8),timer=uint16_t(tl)|(uint16_t(th)<<8),true);}
     };
 
-    bool m_swap;uint8_t m_prg16=0,m_prg8=0,m_chr[8]={},m_audioCtrl=0;Pulse m_pulse[2];Saw m_saw;mapper_more_detail::VrcIrq m_irq;
+    bool m_swap;uint8_t m_prg16=0,m_prg8=0,m_chr[8]={},m_ppuCtrl=0,m_audioCtrl=0;Pulse m_pulse[2];Saw m_saw;mapper_more_detail::VrcIrq m_irq;
     uint8_t audioShift() const { return (m_audioCtrl & 4) ? 8 : ((m_audioCtrl & 2) ? 4 : 0); }
     uint16_t translate(uint16_t a)const{if(!m_swap)return a;uint16_t lo=a&3;lo=((lo&1)<<1)|((lo&2)>>1);return uint16_t((a&~3)|lo);}
 };
@@ -1023,13 +1105,19 @@ public:
             case 8: m_reg8 = d; break;
             case 9: case 10: case 11: m_prg[m_cmd - 9] = d & 0x3F; break;
             case 12: mapper_more_detail::setMirror4(m_mirror, d); break;
-            case 13:
+            case 13: {
                 // Every IRQ-control write acknowledges a pending FME-7 IRQ,
-                // independently of the new enable state.
+                // independently of the new enable state. Bus::clock() advances
+                // the mapper before the CPU performs its bus access, so a 0->1
+                // counter-enable write must also account for the counter edge in
+                // this CPU period; otherwise the IRQ is one CPU poll late.
+                const bool wasCounterEnabled = m_counterEnable;
                 m_pending = false;
                 m_counterEnable = (d & 0x80) != 0;
                 m_irqEnable = (d & 1) != 0;
+                if (!wasCounterEnabled && m_counterEnable) clockIrqCounter();
                 break;
+            }
             case 14: m_counter = uint16_t((m_counter & 0xFF00) | d); break;
             case 15: m_counter = uint16_t((m_counter & 0x00FF) | (uint16_t(d) << 8)); break;
             }
@@ -1049,7 +1137,7 @@ public:
     bool mapPrgRam(uint16_t a, uint32_t& m, bool) const override {
         if (a < 0x6000 || a > 0x7FFF || !m_config.prgRamSize || (m_reg8 & 0x40) == 0 || (m_reg8 & 0x80) == 0)
             return false;
-        m = (a - 0x6000) % m_config.prgRamSize;
+        m = mapBank(m_reg8 & 0x3F, 0x2000, m_config.prgRamSize, a - 0x6000);
         return true;
     }
 
@@ -1063,14 +1151,7 @@ public:
     bool ppuMapWrite(uint16_t a, uint32_t& m) override { return m_config.chrRamSize && ppuMapRead(a, m); }
 
     void clockCpu() override {
-        if (m_counterEnable) {
-            if (m_counter == 0) {
-                m_counter = 0xFFFF;
-                if (m_irqEnable) m_pending = true;
-            } else {
-                --m_counter;
-            }
-        }
+        clockIrqCounter();
 
         // The Sunsoft 5B PSG receives one emu2149 state update per eight
         // NTSC CPU clocks. The chip itself runs at twice the CPU clock and
@@ -1171,6 +1252,23 @@ private:
     bool m_envContinue = false, m_envAttack = false, m_envAlternate = false;
     bool m_envHold = false, m_envFace = false, m_envPause = true;
     uint8_t m_psgOut[3]{};
+
+    void clockIrqCounter() {
+        if (!m_counterEnable) return;
+
+        // Keep 0000 as a real counter state for one mapper clock so the next
+        // tick naturally wraps to FFFF. The externally visible IRQ edge is
+        // asserted when the decrement reaches zero; this matches the CPU poll
+        // phase while retaining the FME-7's 65536-cycle free-running period.
+        if (m_counter == 0) {
+            m_counter = 0xFFFF;
+            if (m_irqEnable) m_pending = true;
+            return;
+        }
+
+        --m_counter;
+        if (m_counter == 0 && m_irqEnable) m_pending = true;
+    }
 
     static void put16(std::vector<uint8_t>& o, uint16_t v) {
         put8(o, uint8_t(v)); put8(o, uint8_t(v >> 8));

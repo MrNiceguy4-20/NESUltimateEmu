@@ -5,6 +5,7 @@
 int runCpuConformanceProbe();
 int runApuConformanceProbe();
 int runCartridgeConformanceProbe();
+int runCheatConformanceProbe();
 int runDmcApuConflictProbe(const std::string& romPath);
 int runDmcLoadStartProbe();
 int runDmaArbitrationProbe();

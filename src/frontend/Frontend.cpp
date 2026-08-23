@@ -577,6 +577,56 @@ void Frontend::drawUI()
     if (ImGui::Button(m_paused ? "Resume" : "Pause"))
         m_paused = !m_paused;
 
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!m_cart.isLoaded());
+    if (ImGui::Button("Cheats"))
+        ImGui::OpenPopup("CheatsMenu");
+    ImGui::EndDisabled();
+    if (ImGui::BeginPopup("CheatsMenu")) {
+        auto& cheatSystem = m_cart.cheats();
+        auto& cheats = cheatSystem.entries();
+        if (cheats.empty()) {
+            ImGui::TextDisabled("No cheats found for this game.");
+            ImGui::TextDisabled("Expected database: cheats/nes/*.cht");
+        } else {
+            ImGui::Text("%s", cheatSystem.gameTitle().empty() ? m_cart.fileName().c_str() : cheatSystem.gameTitle().c_str());
+            ImGui::TextDisabled("%zu available, %zu enabled", cheats.size(), cheatSystem.enabledCount());
+            ImGui::Separator();
+            for (std::size_t i = 0; i < cheats.size(); ++i) {
+                const CheatEntry& cheat = cheats[i];
+                std::string label = cheat.description + "##cheat" + std::to_string(i);
+                bool enabled = cheat.enabled;
+                if (ImGui::Checkbox(label.c_str(), &enabled))
+                    cheatSystem.setEntryEnabled(i, enabled);
+                if (ImGui::IsItemHovered()) {
+                    std::string codes;
+                    for (std::size_t c = 0; c < cheat.codes.size(); ++c) {
+                        if (c) codes += " + ";
+                        codes += cheat.codes[c].text;
+                    }
+                    ImGui::SetTooltip("%s", codes.c_str());
+                }
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Disable All"))
+                cheatSystem.disableAll();
+        }
+        if (ImGui::MenuItem("Reload Game Database")) {
+            reloadCheatsForLoadedRom();
+            m_statusMessage = m_cart.cheats().entries().empty()
+                ? "No cheat database entry found for " + m_cart.fileName() + "."
+                : "Reloaded " + std::to_string(m_cart.cheats().entries().size()) + " cheats for " + m_cart.fileName() + ".";
+            m_statusIsError = m_cart.cheats().entries().empty();
+        }
+        if (ImGui::MenuItem("Load Cheat File..."))
+            openCheatFileDialog();
+        if (!cheatSystem.databasePath().empty()) {
+            ImGui::Separator();
+            ImGui::TextDisabled("Source: %s", cheatSystem.databasePath().c_str());
+        }
+        ImGui::EndPopup();
+    }
+
     if (ImGui::Button("Settings"))
         ImGui::OpenPopup("SettingsMenu");
     if (ImGui::BeginPopup("SettingsMenu")) {
@@ -809,6 +859,7 @@ bool Frontend::openRomDialog()
     // files still load even when they have a nonstandard extension.
     if (!isArchivePath(filename) && m_cart.loadFromFile(filename)) {
         applyTimingOverride(true);
+        reloadCheatsForLoadedRom();
         m_statusMessage = "Loaded: " + m_cart.fileName();
         m_statusIsError = false;
         m_paused = false;
@@ -844,6 +895,7 @@ bool Frontend::openRomDialog()
             if (!m_cart.loadFromMemory(image, entries[index], filename)) continue;
 
             applyTimingOverride(true);
+            reloadCheatsForLoadedRom();
             m_statusMessage = "Loaded from archive: " + m_cart.fileName();
             m_statusIsError = false;
             m_paused = false;
@@ -866,6 +918,45 @@ bool Frontend::openRomDialog()
     return false;
 #else
     m_statusMessage = "Native file dialog only on Windows.";
+    m_statusIsError = true;
+    return false;
+#endif
+}
+
+void Frontend::reloadCheatsForLoadedRom()
+{
+    if (!m_cart.isLoaded()) {
+        m_cart.cheats().clear();
+        return;
+    }
+    (void)m_cart.cheats().loadForRom(m_cart.path(), m_cart.fileName());
+}
+
+bool Frontend::openCheatFileDialog()
+{
+#ifdef _WIN32
+    if (!m_cart.isLoaded()) return false;
+    char filename[MAX_PATH] = {};
+    OPENFILENAMEA ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = nullptr;
+    ofn.lpstrFilter = "NES Cheat Files (*.cht)\0*.cht\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFile = filename;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.lpstrTitle = "Load NES Cheat File";
+    if (!GetOpenFileNameA(&ofn)) return false;
+
+    if (!m_cart.cheats().loadFromFile(filename)) {
+        m_statusMessage = "Failed to load cheat file: " + m_cart.cheats().lastError();
+        m_statusIsError = true;
+        return false;
+    }
+    m_statusMessage = "Loaded " + std::to_string(m_cart.cheats().entries().size()) + " cheats for " + m_cart.fileName() + ".";
+    m_statusIsError = false;
+    return true;
+#else
+    m_statusMessage = "Native cheat-file dialog is only available on Windows.";
     m_statusIsError = true;
     return false;
 #endif
@@ -937,7 +1028,7 @@ std::string Frontend::statePath(int slot) const
 }
 
 namespace {
-constexpr uint8_t kSaveStateVersion = 71;
+constexpr uint8_t kSaveStateVersion = 74;
 
 void appendU32(std::vector<uint8_t>& out, uint32_t value)
 {

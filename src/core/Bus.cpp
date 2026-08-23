@@ -724,20 +724,31 @@ uint8_t Bus::readControllerPort(uint8_t port) const
 
 uint8_t Bus::read(uint16_t addr) const
 {
-    if (addr == 0x4016)
-        return readControllerPort(1);
-    if (addr == 0x4017)
-        return readControllerPort(2);
+    if (addr == 0x4016) {
+        const uint8_t value = readControllerPort(1);
+        return m_cart ? driveCpuDataBus(m_cart->cheats().applyRawCpuRead(addr, value)) : value;
+    }
+    if (addr == 0x4017) {
+        const uint8_t value = readControllerPort(2);
+        return m_cart ? driveCpuDataBus(m_cart->cheats().applyRawCpuRead(addr, value)) : value;
+    }
 
     // Any other bus access deasserts the controller read-select line. A later
     // $4016/$4017 read can then generate a fresh clock edge.
     releaseControllerReadLine();
 
-    if (addr <= 0x1FFF)
-        return driveCpuDataBus(m_ram[addr & 0x07FF]);
+    if (addr <= 0x1FFF) {
+        uint8_t value = m_ram[addr & 0x07FF];
+        if (m_cart) value = m_cart->cheats().applyRawCpuRead(addr, value);
+        return driveCpuDataBus(value);
+    }
 
     if (addr >= 0x2000 && addr <= 0x3FFF) {
-        if (m_ppu) return driveCpuDataBus(m_ppu->cpuRead(addr));
+        if (m_ppu) {
+            uint8_t value = m_ppu->cpuRead(addr);
+            if (m_cart) value = m_cart->cheats().applyRawCpuRead(addr, value);
+            return driveCpuDataBus(value);
+        }
         return m_cpuDataBus;
     }
 
@@ -765,8 +776,10 @@ uint8_t Bus::read(uint16_t addr) const
         // Some mapper registers drive only a subset of D0-D7 and deliberately
         // preserve the remaining open-bus bits.
         uint8_t data = m_cpuDataBus;
-        if (m_cart->cpuRead(addr, data))
+        if (m_cart->cpuRead(addr, data)) {
+            data = m_cart->cheats().applyRawCpuRead(addr, data);
             return driveCpuDataBus(data);
+        }
     }
 
     // $4000-$4014, $4018-$401F, and any unhandled cartridge expansion

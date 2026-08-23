@@ -63,6 +63,7 @@
     <ClCompile Include="src\core\PPU.cpp" />
     <ClCompile Include="src\core\APU.cpp" />
     <ClCompile Include="src\core\Cartridge.cpp" />
+    <ClCompile Include="src\core\CheatSystem.cpp" />
     <ClCompile Include="src\core\Mapper.cpp" />
     <ClCompile Include="src\frontend\Frontend.cpp" />
   </ItemGroup>
@@ -73,6 +74,7 @@
     <ClInclude Include="src\core\PPU.hpp" />
     <ClInclude Include="src\core\APU.hpp" />
     <ClInclude Include="src\core\Cartridge.hpp" />
+    <ClInclude Include="src\core\CheatSystem.hpp" />
     <ClInclude Include="src\core\Mapper.hpp" />
     <ClInclude Include="src\core\RomDatabase.hpp" />
     <ClInclude Include="src\frontend\Frontend.hpp" />

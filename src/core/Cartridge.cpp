@@ -101,6 +101,7 @@ Cartridge::~Cartridge() = default;
 
 void Cartridge::resetImage()
 {
+    m_cheats.clear();
     m_loaded = false;
     m_battery = false;
     m_nes20 = false;
@@ -622,13 +623,13 @@ bool Cartridge::cpuRead(uint16_t addr, uint8_t& data)
     // leaving the rest as open bus.
     uint8_t regData = data;
     if (addr >= 0x4020 && m_mapper->cpuReadRegister(addr, regData)) {
-        data = regData;
+        data = m_cheats.applyGameGenie(addr, regData);
         return true;
     }
 
     uint32_t mapped = 0;
     if (addr >= 0x4020 && m_mapper->mapPrgRam(addr, mapped, false) && mapped < m_prgRam.size()) {
-        data = m_prgRam[mapped];
+        data = m_cheats.applyGameGenie(addr, m_prgRam[mapped]);
         m_mapper->observeCpuRead(addr, data);
         return true;
     }
@@ -640,7 +641,7 @@ bool Cartridge::cpuRead(uint16_t addr, uint8_t& data)
     // RAM were already given priority above, so it is safe to ask the mapper
     // for a ROM mapping throughout the cartridge expansion range.
     if (m_mapper->cpuMapRead(addr, mapped) && mapped < m_prgRom.size()) {
-        data = m_prgRom[mapped];
+        data = m_cheats.applyGameGenie(addr, m_prgRom[mapped]);
         m_mapper->observeCpuRead(addr, data);
         return true;
     }
