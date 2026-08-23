@@ -1,7 +1,0 @@
-﻿  main.cpp
-  Bus.cpp
-  PPU.cpp
-  Cartridge.cpp
-  Frontend.cpp
-  Generating Code...
-  NESUltimateEmu.vcxproj -> C:\kevin\NESUltimateEmu\x64\Debug\NESUltimateEmu.exe
