@@ -1,5 +1,7 @@
 # NES Ultimate Emulator
 
+> **Project history / modernization:** Development on this project originally began in **2017**. The current modernization effort is updating the codebase toward the newest practical **C++** standard and **SDL** release, while preserving emulator accuracy and compatibility. The **Dear ImGui** integration has already been updated.
+
 A cycle-focused Nintendo Entertainment System / Famicom emulator written in C++17, with an SDL2 + Dear ImGui desktop frontend and a headless hardware-conformance test runner.
 
 This project goes beyond basic NROM-era emulation: it includes iNES and NES 2.0 parsing, Famicom Disk System support, region-aware timing, save states, battery persistence, controller remapping, Game Genie/raw CPU cheats, expansion audio, a ROM metadata database, and a large mapper implementation set.
