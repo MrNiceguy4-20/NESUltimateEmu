@@ -390,6 +390,32 @@ Dear ImGui may also write `imgui.ini` for UI layout state.
 
 This emulator does not need commercial ROMs in the source tree. Use ROM and disk images that you are legally permitted to possess and use. The Famicom Disk System BIOS is copyrighted software and is not included by this project.
 
+## Acknowledgements
+
+This project owes a significant debt to the wider NES development and emulation community. In particular, sincere thanks go to **NESdev.org**, its wiki, forums, hardware researchers, emulator authors, test-ROM developers, and contributors who have spent decades documenting the behavior of the NES and Famicom. That body of shared technical knowledge has been invaluable when investigating difficult CPU, PPU, APU, DMA, mapper, timing, and hardware-compatibility problems.
+
+I would also like to recognize the developers and maintainers of the many **open-source NES/Famicom emulators** that helped pioneer accurate software emulation and made high-quality reference implementations available to the community. Studying established approaches, comparing behavior, and learning from prior implementations has been extremely valuable while tracking down bugs, correcting inaccurate behavior, resolving performance bottlenecks, and improving this emulator's architecture and compatibility.
+
+Notable projects and emulator lineages that have contributed to the broader body of open NES emulation knowledge include:
+
+- **Mesen / Mesen2 / Mesen Community Edition**
+- **FCE Ultra / FCEUX**
+- **Nestopia / Nestopia UE / Nestopia JG**
+- **Nintendulator**
+- **puNES**
+- **BizHawk** and its NES-related cores
+- **QuickNES**
+- **higan / ares**
+- **FCE Ultra GX**
+- **Nesalizer**
+- **Fergulator**
+- **Nintengo**
+- **NESICIDE** and the many other research, debugging, and emulator projects catalogued by the NESdev community
+
+This acknowledgement is intended as recognition of the community's collective research, documentation, testing, and open-source work. It does **not** imply that code from every project listed above is incorporated into this repository. Where third-party code is directly incorporated, its original license and attribution requirements should be preserved in the source tree.
+
+Most importantly, thank you to the developers, reverse engineers, hardware testers, documentation authors, and enthusiasts who pioneered NES emulation and continue to publish their findings openly. Their work has greatly reduced the amount of duplicated research required to understand the platform and has helped make difficult accuracy and performance problems far more approachable.
+
 ## Contributing
 
 Accuracy regressions are easiest to review when accompanied by a focused probe. A useful contribution flow is:
