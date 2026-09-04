@@ -681,7 +681,6 @@ void Frontend::drawUI()
     if (ImGui::Button(m_paused ? "Resume" : "Pause"))
         m_paused = !m_paused;
 
-
     ImGui::SameLine();
     ImGui::BeginDisabled(!m_cart.isLoaded());
     if (ImGui::Button("Cheats"))

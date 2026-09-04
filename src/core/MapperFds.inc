@@ -1,6 +1,4 @@
- 
- 
- 
+
 namespace fds_detail {
 inline void put16(std::vector<uint8_t>& o, uint16_t v){put8(o,uint8_t(v));put8(o,uint8_t(v>>8));}
 inline void put32(std::vector<uint8_t>& o, uint32_t v){for(int i=0;i<4;i++)put8(o,uint8_t(v>>(i*8)));}

@@ -1,5 +1,4 @@
- 
- 
+
 namespace mapper_hard_detail {
 inline void put16(std::vector<uint8_t>& o, uint16_t v) { put8(o, uint8_t(v)); put8(o, uint8_t(v >> 8)); }
 inline bool get16(const uint8_t*& p, const uint8_t* e, uint16_t& v) { uint8_t l,h; if(!get8(p,e,l)||!get8(p,e,h)) return false; v=uint16_t(l)|(uint16_t(h)<<8); return true; }
@@ -85,7 +84,7 @@ public:
     }
 
     void notifyPpuAddress(uint16_t a,uint64_t) override {
-         
+
         uint16_t x=a&0x1FFF;
         if((x>=0x0FD8&&x<=0x0FDF))m_latch[0]=0; else if(x>=0x0FE8&&x<=0x0FEF)m_latch[0]=1;
         if((x>=0x1FD8&&x<=0x1FDF))m_latch[1]=0; else if(x>=0x1FE8&&x<=0x1FEF)m_latch[1]=1;
@@ -105,7 +104,7 @@ public:
         for(auto&v:m_nt)v=0;
         for(auto&v:m_mode)v=0;
         m_mode[0]=2;
-         
+
         m_irqMode=m_irqXor=m_irqExtra=m_prescaler=m_irqCounter=0;m_irqEnabled=m_irqPending=false;
         m_mulA=m_mulB=m_accum=m_test=0;m_mulResult=m_mulTarget=0;m_mulCycles=0;m_latch[0]=m_latch[1]=0;m_lastA12=false;updateMirror();
     }
@@ -171,16 +170,6 @@ private:
     void irqClock(){if(!m_irqEnabled)return;uint8_t dir=(m_irqMode>>6)&3;if(dir!=1&&dir!=2)return;uint8_t mask=(m_irqMode&4)?7:0xFF;bool wrap=false;if(dir==1){++m_prescaler;wrap=(m_prescaler&mask)==0;}else{--m_prescaler;wrap=(m_prescaler&mask)==mask;}if(!wrap)return;if(dir==1){++m_irqCounter;if(m_irqCounter==0)m_irqPending=true;}else{--m_irqCounter;if(m_irqCounter==0xFF)m_irqPending=true;}}
 };
 
- 
- 
- 
- 
- 
-
- 
- 
- 
- 
 class Mapper268 final : public Mapper {
 public:
     explicit Mapper268(const MapperConfig& c) : Mapper(c) { hardReset(); }
@@ -198,19 +187,17 @@ public:
 
         const uint8_t mode = m_outer[3] & 0x50;
         std::size_t bank = 0;
-        if (mode & 0x10) {  
+        if (mode & 0x10) {
             const bool bank32 = gnrom32k();
             const unsigned a13 = (a >> 13) & 1;
             const unsigned a14 = bank32 ? ((a >> 14) & 1) : ((m_outer[3] >> 1) & 1);
             const unsigned a15 = (m_outer[3] >> 2) & 1;
             const unsigned a16 = (m_outer[3] >> 3) & 1;
             bank = std::size_t(a13) | (std::size_t(a14)<<1) | (std::size_t(a15)<<2) | (std::size_t(a16)<<3);
-             
+
             bank = applyPrgOuter(bank | (inner & ~std::size_t(0x0F)));
         } else {
-             
-             
-             
+
             if ((mode & 0x40) && !m_prgMode && slot >= 2) inner = 0;
             bank = applyPrgOuter(inner);
         }
@@ -221,8 +208,7 @@ public:
     bool cpuWrite(uint16_t a, uint8_t d, uint64_t) override {
         if (isOuterAddress(a)) {
             writeOuter(a, d);
-             
-             
+
             return outerBase() == 0x5000;
         }
         if (a < 0x8000) return false;
@@ -231,9 +217,7 @@ public:
         case 0x8001: m_bank[m_select&7]=d; return true;
         case 0xA000:
             if(!m_config.fourScreen) {
-                 
-                 
-                 
+
                 if (!isOneScreen268()) m_mirror=(d&1)?Mirror::Horizontal:Mirror::Vertical;
             }
             return true;
@@ -254,8 +238,7 @@ public:
     bool ppuUsesChrRam(uint16_t a) const override {
         if (a >= 0x2000 || !m_config.chrRamSize) return false;
         if (!m_config.chrRomSize) return true;
-         
-         
+
         if (!(m_outer[4] & 1)) return false;
         const std::size_t b = chrBank1k(a);
         return (uint8_t(b) & 0xFE) == (m_outer[4] & 0xFE);
@@ -272,7 +255,7 @@ public:
         if (a >= 0x6000 && a <= 0x7FFF) {
             m = uint32_t(a - 0x6000) % uint32_t(m_config.prgRamSize); return true;
         }
-         
+
         if (a >= 0x5000 && a <= 0x5FFF && (m_outer[3] & 0x20)) {
             m = uint32_t(a - 0x5000) % uint32_t(m_config.prgRamSize); return true;
         }
@@ -336,29 +319,28 @@ private:
     bool isOuterAddress(uint16_t a) const { return (a & 0xF000) == outerBase() && (a & 7) <= 5; }
     void writeOuter(uint16_t a,uint8_t d) {
         const unsigned r=a&7;
-        if(r==2){  
+        if(r==2){
             if(m_outer[2]&0x80) d=uint8_t((m_outer[2]&0xF0)|(d&0x0F));
             m_outer[2]=d;return;
         }
         const bool gnrom=(m_outer[3]&0x10)!=0;
-        if((m_outer[3]&0x80) && !gnrom) return;  
+        if((m_outer[3]&0x80) && !gnrom) return;
         m_outer[r]=d;
         if(r==0 && isOneScreen268()) m_mirror=(d&0x10)?Mirror::OnescreenHi:Mirror::OnescreenLo;
     }
     bool gnrom32k() const {
-         
+
         if(m_config.submapper>=2) return (m_outer[1]&0x10)==0;
         return (m_outer[1]&0x02)!=0;
     }
     std::size_t applyPrgOuter(std::size_t bank) const {
         const uint8_t r0=m_outer[0],r1=m_outer[1];
         auto setbit=[&](unsigned bit,bool v){const std::size_t mask=std::size_t(1)<<bit;bank=v?(bank|mask):(bank&~mask);};
-         
+
         setbit(4,(r0&0x40)?((r0>>0)&1):((bank>>4)&1));
 
         if (m_config.submapper==4 || m_config.submapper==5) {
-             
-             
+
             setbit(5,(r1&0x80)?((r0>>1)&1):((bank>>5)&1));
             setbit(6,(r1&0x40)?((bank>>6)&1):((r0>>2)&1));
             setbit(7,(r1&0x20)?((bank>>7)&1):false);
@@ -366,7 +348,7 @@ private:
             return bank & 0x1FFu;
         }
         if (m_config.submapper==8 || m_config.submapper==9) {
-             
+
             setbit(5,(r1&0x80)?((r0>>1)&1):((bank>>5)&1));
             setbit(6,(r1&0x40)?((bank>>6)&1):((r0>>2)&1));
             setbit(7,(r1&0x20)?((bank>>7)&1):false);
@@ -380,13 +362,12 @@ private:
         else {offA20=(r1>>4)&1;offA21=(r1>>3)&1;offA22=(r1>>2)&1;}
         setbit(7,(r1&0x20)?((bank>>7)&1):offA20);
         setbit(8,offA21); setbit(9,offA22);
-        if (m_config.submapper==10 || m_config.submapper==11) return bank & 0x3FFu;  
-        setbit(10,(r0>>4)&1);  
-        setbit(11,(r0>>5)&1);  
+        if (m_config.submapper==10 || m_config.submapper==11) return bank & 0x3FFu;
+        setbit(10,(r0>>4)&1);
+        setbit(11,(r0>>5)&1);
 
         if (m_config.submapper==6 || m_config.submapper==7) {
-             
-             
+
             const bool chip=(r0&0x80)?((r0&0x08)!=0):m_chrA17;
             const std::size_t halfBanks=(m_config.prgRomSize/2)/0x2000;
             if(halfBanks){bank%=halfBanks;if(chip)bank+=halfBanks;}
@@ -404,15 +385,14 @@ private:
         }
         const uint8_t o=m_outer[0];
         if(m_config.submapper==6 || m_config.submapper==7){
-             
-             
+
             inner &= 0x7Fu;
         } else {
             const bool a17=(o&0x80)?((o>>3)&1):((inner>>7)&1);
             inner=(inner&0x7F)|(std::size_t(a17)<<7);
-            inner=(inner&0xFF)|(std::size_t((o>>4)&3)<<8);  
+            inner=(inner&0xFF)|(std::size_t((o>>4)&3)<<8);
             if(m_config.submapper==4 || m_config.submapper==5)
-                inner=(inner&0x3FFu)|(std::size_t(o&0x06)<<9);  
+                inner=(inner&0x3FFu)|(std::size_t(o&0x06)<<9);
         }
         return inner;
     }
@@ -463,15 +443,15 @@ public:
             const std::size_t bank=(baseBank&~lowMask)|(inner&lowMask);
             m=mapBank(bank,0x2000,m_config.prgRomSize,a&0x1FFF); return true;
         }
-        if (mode == 3) {  
+        if (mode == 3) {
             const std::size_t bank=(baseBank&~std::size_t(1))|((a>>13)&1);
             m=mapBank(bank,0x2000,m_config.prgRomSize,a&0x1FFF); return true;
         }
-        if (mode == 4) {  
+        if (mode == 4) {
             const std::size_t bank=(baseBank&~std::size_t(3))|((a>>13)&3);
             m=mapBank(bank,0x2000,m_config.prgRomSize,a&0x1FFF); return true;
         }
-        if (mode == 5) {  
+        if (mode == 5) {
             const std::size_t inner16=(a<0xC000)?(m_unrom&7):7;
             const std::size_t bank=(baseBank&~std::size_t(0x0F))|(inner16<<1)|((a>>13)&1);
             m=mapBank(bank,0x2000,m_config.prgRomSize,a&0x1FFF); return true;
@@ -480,12 +460,11 @@ public:
     }
 
     bool cpuWrite(uint16_t a,uint8_t d,uint64_t) override {
-         
-         
+
         if(m_config.submapper==5 && a>=0x4800 && a<=0x4FFF){m_prgMsb=d&0x3F;return true;}
 
         if(a>=0x5000 && a<0x6000){
-            if(m_config.submapper==2 && !outerRegsEnabled()) return false;  
+            if(m_config.submapper==2 && !outerRegsEnabled()) return false;
             const unsigned r=(m_config.submapper==3)?(a&7):(a&3);
             switch(r){
             case 0:m_mode=d;break;
@@ -510,7 +489,7 @@ public:
             return true;
         case 0x8001:{
             unsigned r=m_select&(m_extended?0x0F:7);
-             
+
             if(m_config.submapper==2 && !m_extended){if(r==6)r=7;else if(r==7)r=6;}
             if(r<12)m_bank[r]=d;
             return true;
@@ -555,7 +534,7 @@ public:
         if(!m_config.prgRamSize||!m_wramEnable)return false;
         if(m_config.submapper==2&&ramConfigEnabled()){
             if(a>=0x5000&&a<=0x5FFF&&!outerRegsEnabled()){
-                 
+
                 m=0x5000u+(a-0x5000u);return m<m_config.prgRamSize;
             }
             if(a>=0x6000&&a<=0x7FFF){
@@ -621,17 +600,17 @@ private:
         std::size_t low=std::size_t(m_prgBase)<<1;
         switch(m_config.submapper){
         case 2:
-            low|=std::size_t((m_mode>>3)&1)<<8;    
-            low|=std::size_t((m_mode>>7)&1)<<9;    
-            low|=std::size_t((m_chrBase>>6)&1)<<10;  
-            low|=std::size_t((m_chrBase>>7)&1)<<11;  
-            low|=std::size_t((m_chrBase>>5)&1)<<12;  
+            low|=std::size_t((m_mode>>3)&1)<<8;
+            low|=std::size_t((m_mode>>7)&1)<<9;
+            low|=std::size_t((m_chrBase>>6)&1)<<10;
+            low|=std::size_t((m_chrBase>>7)&1)<<11;
+            low|=std::size_t((m_chrBase>>5)&1)<<12;
             break;
-        case 3: low|=std::size_t(m_prgMsb&0x0F)<<8;break;  
-        case 4: low|=std::size_t((m_chrBase>>7)&1)<<8;break;  
+        case 3: low|=std::size_t(m_prgMsb&0x0F)<<8;break;
+        case 4: low|=std::size_t((m_chrBase>>7)&1)<<8;break;
         case 5:
-            low=std::size_t(m_prgBase&0x1F)<<1;  
-            low|=std::size_t(m_prgMsb&0x3F)<<6;  
+            low=std::size_t(m_prgBase&0x1F)<<1;
+            low|=std::size_t(m_prgMsb&0x3F)<<6;
             break;
         default:break;
         }
@@ -652,7 +631,7 @@ private:
                 const unsigned latchBits=(m_mode&0x10)?1:2;
                 return (base&~((std::size_t(1)<<(3+latchBits))-1))|(std::size_t(m_cnrom&((1u<<latchBits)-1))<<3)|(slot&7);
             }
-            return base|(slot&7);  
+            return base|(slot&7);
         }
         std::size_t inner=0;
         if(m_extended){
@@ -728,8 +707,7 @@ public:
 
         if (a >= 0x8000) {
             const unsigned slot = (a - 0x8000) >> 13;
-             
-             
+
             m_prg2[slot & 3] = uint8_t((d >> 2) & 0x3F);
             m_commonChr = d & 3;
             if (prgWriteProtected()) m_latch = d;

@@ -1,5 +1,4 @@
- 
- 
+
 namespace mapper_more_detail {
 inline void setMirror4(Mirror& m, uint8_t v) {
     switch(v & 3) { case 0: m=Mirror::Vertical; break; case 1: m=Mirror::Horizontal; break;
@@ -32,7 +31,6 @@ struct SerialEeprom {
 };
 }
 
-
 class Mapper15 final : public Mapper {
 public:
     explicit Mapper15(const MapperConfig& c) : Mapper(c) {}
@@ -42,17 +40,17 @@ public:
         const uint8_t cpuA13 = (a >> 13) & 1;
         uint8_t bank8 = 0;
         switch (m_mode & 3) {
-        case 0:  
+        case 0:
             bank8 = uint8_t(((m_prg & 0x3E) << 1) | ((a >> 13) & 3));
             break;
-        case 1:  
+        case 1:
             if (a < 0xC000) bank8 = uint8_t((m_prg << 1) | cpuA13);
             else bank8 = uint8_t((((m_prg & 0x38) | 0x07) << 1) | cpuA13);
             break;
-        case 2:  
+        case 2:
             bank8 = uint8_t((m_prg << 1) | m_prgA13);
             break;
-        default:  
+        default:
             bank8 = uint8_t((m_prg << 1) | cpuA13);
             break;
         }
@@ -152,7 +150,7 @@ public:
 
     bool cpuMapRead(uint16_t a, uint32_t& m) const override {
         if (a < 0x8000 || !m_config.prgRomSize) return false;
-        const size_t outer = size_t(m_outer[m_ppuOuterSlot] & 1) << 4;  
+        const size_t outer = size_t(m_outer[m_ppuOuterSlot] & 1) << 4;
         const size_t bank = a < 0xC000 ? (size_t(m_prg & 0x0F) | outer) : (size_t(0x0F) | outer);
         m = mapBank(bank, 0x4000, m_config.prgRomSize, a & 0x3FFF);
         return true;
@@ -166,12 +164,12 @@ public:
 
     bool cpuWrite(uint16_t a, uint8_t d, uint64_t) override {
         if (a < 0x8000) return false;
-        const uint8_t r = uint8_t(a & 0x0F);  
+        const uint8_t r = uint8_t(a & 0x0F);
         if (r < 4) {
             m_outer[r] = d & 1;
             return true;
         }
-        if (r >= 4 && r < 8) return true;  
+        if (r >= 4 && r < 8) return true;
         if (r == 8) { m_prg = d & 0x0F; return true; }
         if (r == 9) { mapper_more_detail::setMirror4(m_mirror, d); return true; }
         if (r == 0xA) {
@@ -189,7 +187,7 @@ public:
     bool ppuMapRead(uint16_t a, uint32_t& m) override {
         if (a >= 0x2000 || !m_config.chrRamSize) return false;
         m_ppuOuterSlot = uint8_t((a >> 10) & 3);
-        m = a % m_config.chrRamSize;  
+        m = a % m_config.chrRamSize;
         return true;
     }
 
@@ -255,14 +253,11 @@ public:
 private:uint8_t m_prg[3]={},m_chr[8]={};uint16_t m_latch=0,m_counter=0;bool m_enabled=false,m_pending=false;
 };
 
-
-
 class Mapper116 final : public Mapper {
 public:
     explicit Mapper116(const MapperConfig& c) : Mapper(c) {
         MapperConfig mmc1c = c;
-         
-         
+
         m_mmc1 = createMmc1Mapper(mmc1c);
 
         MapperConfig mmc3c = c;
@@ -272,13 +267,11 @@ public:
 
         MapperConfig vrc2c = c;
         vrc2c.id = 23;
-        vrc2c.submapper = 1;  
+        vrc2c.submapper = 1;
         vrc2c.prgRamSize = 0;
         vrc2c.headerPrgNvRamSize = 0;
         m_vrc2 = createVrcMapper(vrc2c);
 
-         
-         
         m_supervisor = 0x01;
         for (uint16_t page = 0xB000; page <= 0xE000; page += 0x1000) {
             m_vrc2->cpuWrite(page + 0, 0x0F, kNoCpuCycle);
@@ -304,8 +297,7 @@ public:
             const uint8_t oldMode = mode();
             m_supervisor = d & 0x07;
             const uint8_t newMode = mode();
-             
-             
+
             if (m_config.submapper == 0 && oldMode != 2 && newMode == 2)
                 m_mmc1->cpuWrite(0x8000, 0x80, cycle);
             syncMirror();
@@ -334,7 +326,7 @@ public:
     bool ppuUsesChrRam(uint16_t a) const override { return active()->ppuUsesChrRam(a); }
 
     bool mapPrgRam(uint16_t a, uint32_t& m, bool w) const override {
-         
+
         if (mode() == 0) return false;
         return active()->mapPrgRam(a, m, w);
     }
@@ -348,9 +340,7 @@ public:
     void scanlineTick() override { active()->scanlineTick(); }
     void reset(bool hard) override {
         if (!(m_config.nes20 && m_config.submapper == 3)) return;
-         
-         
-         
+
         m_resetGame = hard ? 0 : uint8_t((m_resetGame + 1) % 5);
     }
     bool irqActive() const override { return active()->irqActive(); }
@@ -400,9 +390,7 @@ private:
     }
     void applyResetPrgWindow(uint32_t& mapped) const {
         if (!(m_config.nes20 && m_config.submapper == 3) || !m_config.prgRomSize) return;
-         
-         
-         
+
         const uint32_t base = m_resetGame == 0 ? 0u : 0x40000u + uint32_t(m_resetGame - 1) * 0x20000u;
         const uint32_t mask = m_resetGame == 0 ? 0x3FFFFu : 0x1FFFFu;
         mapped = (base + (mapped & mask)) % uint32_t(m_config.prgRomSize);
@@ -458,23 +446,14 @@ private:uint8_t m_current=0,m_regs[16]={};bool m_enabled=false,m_cycleMode=false
 
 class Mapper65 final : public Mapper {public:explicit Mapper65(const MapperConfig&c):Mapper(c){}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;size_t n=std::max<size_t>(1,m_config.prgRomSize/0x2000);size_t b=a<0xA000?m_prg[0]:a<0xC000?m_prg[1]:a<0xE000?m_prg[2]:n-1;m=mapBank(b,0x2000,m_config.prgRomSize,a&0x1FFF);return true;}bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if(a==0x8000){m_prg[0]=d;return true;}if(a==0xA000){m_prg[1]=d;return true;}if(a==0xC000){m_prg[2]=d;return true;}if(a>=0xB000&&a<=0xB007){m_chr[a&7]=d;return true;}if(a==0x9000){if(!m_config.fourScreen)m_mirror=(d&0x40)?Mirror::Horizontal:Mirror::Vertical;return true;}if(a==0x9003){m_enabled=d&0x80;m_pending=false;return true;}if(a==0x9004){m_counter=m_latch;m_pending=false;return true;}if(a==0x9005){m_latch=uint16_t((m_latch&0xFF)|(uint16_t(d)<<8));return true;}if(a==0x9006){m_latch=uint16_t((m_latch&0xFF00)|d);return true;}return false;}bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto s=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!s)return false;m=mapBank(m_chr[a>>10],0x400,s,a&0x3FF);return true;}bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);}void clockCpu()override{if(m_enabled){if(m_counter==0){m_pending=true;m_enabled=false;}else --m_counter;}}bool irqActive()const override{return m_pending;}void saveState(std::vector<uint8_t>&o)const override{for(auto v:m_prg)put8(o,v);for(auto v:m_chr)put8(o,v);put8(o,uint8_t(m_latch));put8(o,uint8_t(m_latch>>8));put8(o,uint8_t(m_counter));put8(o,uint8_t(m_counter>>8));put8(o,m_enabled);put8(o,m_pending);put8(o,static_cast<uint8_t>(m_mirror));}bool loadState(const uint8_t*&p,const uint8_t*e)override{uint8_t l,h,b;for(auto&v:m_prg)if(!get8(p,e,v))return false;for(auto&v:m_chr)if(!get8(p,e,v))return false;if(!get8(p,e,l)||!get8(p,e,h))return false;m_latch=uint16_t(l)|(uint16_t(h)<<8);if(!get8(p,e,l)||!get8(p,e,h))return false;m_counter=uint16_t(l)|(uint16_t(h)<<8);if(!get8(p,e,b))return false;m_enabled=b;if(!get8(p,e,b))return false;m_pending=b;if(!get8(p,e,b))return false;m_mirror=static_cast<Mirror>(b);return true;}private:uint8_t m_prg[3]={},m_chr[8]={};uint16_t m_latch=0,m_counter=0;bool m_enabled=false,m_pending=false;};
 
-
-
 class Mapper70 final : public Mapper {public:explicit Mapper70(const MapperConfig&c):Mapper(c){}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||m_config.prgRomSize<0x4000)return false;if(a<0xC000)m=mapBank(m_prg,0x4000,m_config.prgRomSize,a-0x8000);else m=static_cast<uint32_t>(m_config.prgRomSize-0x4000+(a-0xC000));return true;}bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if(a<0x8000)return false;m_prg=(d>>4)&7;m_chr=d&0x0F;if(m_config.id==152)m_mirror=(d&0x80)?Mirror::OnescreenHi:Mirror::OnescreenLo;return true;}bool hasBusConflicts()const override{return m_config.id==152;}bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto s=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!s)return false;m=mapBank(m_chr,0x2000,s,a);return true;}bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);}void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg);put8(o,m_chr);put8(o,static_cast<uint8_t>(m_mirror));}bool loadState(const uint8_t*&p,const uint8_t*e)override{uint8_t b;if(!get8(p,e,m_prg)||!get8(p,e,m_chr)||!get8(p,e,b))return false;m_mirror=static_cast<Mirror>(b);return true;}private:uint8_t m_prg=0,m_chr=0;};
 
 class Mapper72 final : public Mapper {public:explicit Mapper72(const MapperConfig&c):Mapper(c){}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||m_config.prgRomSize<0x4000)return false;if(a<0xC000)m=mapBank(m_prg,0x4000,m_config.prgRomSize,a-0x8000);else m=static_cast<uint32_t>(m_config.prgRomSize-0x4000+(a-0xC000));return true;}bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if(a<0x8000)return false;if(m_config.id==92){if((d&0xF0)==0xD0)m_prg=d&0x0F;else if((d&0xF0)==0xE0)m_chr=d&0x0F;}else{if(d&0x80)m_prg=d&0x0F;if(d&0x40)m_chr=d&0x0F;}return true;}bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto s=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!s)return false;m=mapBank(m_chr,0x2000,s,a);return true;}bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);}void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg);put8(o,m_chr);}bool loadState(const uint8_t*&p,const uint8_t*e)override{return get8(p,e,m_prg)&&get8(p,e,m_chr);}private:uint8_t m_prg=0,m_chr=0;};
-
-
 
 class Mapper76 final : public Mapper {public:explicit Mapper76(const MapperConfig&c):Mapper(c){}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;size_t n=std::max<size_t>(1,m_config.prgRomSize/0x2000);size_t b=a<0xA000?m_prg[0]:a<0xC000?m_prg[1]:a<0xE000?(n>1?n-2:0):n-1;m=mapBank(b,0x2000,m_config.prgRomSize,a&0x1FFF);return true;}bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if((a&0xE001)==0x8000){m_sel=d&7;return true;}if((a&0xE001)==0x8001){if(m_sel>=2&&m_sel<=5)m_chr[m_sel-2]=d;else if(m_sel>=6)m_prg[m_sel-6]=d;return true;}return false;}bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto s=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!s)return false;m=mapBank(m_chr[a>>11],0x800,s,a&0x7FF);return true;}bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);}void saveState(std::vector<uint8_t>&o)const override{put8(o,m_sel);for(auto v:m_prg)put8(o,v);for(auto v:m_chr)put8(o,v);}bool loadState(const uint8_t*&p,const uint8_t*e)override{if(!get8(p,e,m_sel))return false;for(auto&v:m_prg)if(!get8(p,e,v))return false;for(auto&v:m_chr)if(!get8(p,e,v))return false;return true;}private:uint8_t m_sel=0,m_prg[2]={},m_chr[4]={};};
 
 class Mapper77 final : public Mapper {public:explicit Mapper77(const MapperConfig&c):Mapper(c){m_mirror=Mirror::FourScreen;}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;m=mapBank(m_prg,0x8000,m_config.prgRomSize,a-0x8000);return true;}bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if(a<0x8000)return false;m_prg=d&7;m_chr=d>>4;return true;}bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;if(a<0x0800){if(!m_config.chrRomSize)return false;m=mapBank(m_chr,0x800,m_config.chrRomSize,a);return true;}if(!m_config.chrRamSize)return false;m=a-0x0800;return true;}bool ppuMapWrite(uint16_t a,uint32_t&m)override{if(a<0x0800||a>=0x2000||!m_config.chrRamSize)return false;m=a-0x0800;return true;}bool ppuUsesChrRam(uint16_t a)const override{return a>=0x0800&&a<0x2000&&m_config.chrRamSize;}void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg);put8(o,m_chr);}bool loadState(const uint8_t*&p,const uint8_t*e)override{return get8(p,e,m_prg)&&get8(p,e,m_chr);}private:uint8_t m_prg=0,m_chr=0;};
 
- 
- 
- 
- 
- 
 class Mapper78 final : public Mapper {
 public:
     explicit Mapper78(const MapperConfig& c)
@@ -524,14 +503,6 @@ private:
 
 class Mapper79 final : public Mapper {public:explicit Mapper79(const MapperConfig&c):Mapper(c){}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;m=mapBank(m_prg,0x8000,m_config.prgRomSize,a-0x8000);return true;}bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if((a&0xE100)!=0x4100)return false;m_prg=(d>>3)&1;m_chr=d&7;return true;}bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto s=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!s)return false;m=mapBank(m_chr,0x2000,s,a);return true;}bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);}bool mapPrgRam(uint16_t,uint32_t&,bool)const override{return false;}void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg);put8(o,m_chr);}bool loadState(const uint8_t*&p,const uint8_t*e)override{return get8(p,e,m_prg)&&get8(p,e,m_chr);}private:uint8_t m_prg=0,m_chr=0;};
 
- 
- 
- 
- 
- 
- 
- 
- 
 class Mapper147 final : public Mapper {
 public:
     explicit Mapper147(const MapperConfig& c) : Mapper(c) {}
@@ -629,10 +600,6 @@ private:
     uint8_t m_chr = 0;
 };
 
- 
- 
- 
- 
 class Mapper149 final : public Mapper {
 public:
     explicit Mapper149(const MapperConfig& c) : Mapper(c) {}
@@ -672,11 +639,6 @@ private:
     uint8_t m_chr = 0;
 };
 
- 
- 
- 
- 
- 
 class Mapper150 final : public Mapper {
 public:
     explicit Mapper150(const MapperConfig& c) : Mapper(c) { updateMirror(); }
@@ -727,10 +689,10 @@ public:
         const uint8_t page = uint8_t((addr & 0x0FFF) >> 10);
         uint8_t nt = 0;
         switch ((m_reg[7] >> 1) & 3) {
-        case 0: nt = uint8_t(page == 3 ? 1 : 0); break;  
-        case 1: nt = uint8_t((page >> 1) & 1); break;    
-        case 2: nt = uint8_t(page & 1); break;           
-        default: nt = 1; break;                          
+        case 0: nt = uint8_t(page == 3 ? 1 : 0); break;
+        case 1: nt = uint8_t((page >> 1) & 1); break;
+        case 2: nt = uint8_t(page & 1); break;
+        default: nt = 1; break;
         }
         source = NametableSource::Ciram;
         mapped = uint32_t(nt) * 0x400u + (addr & 0x3FFu);
@@ -764,7 +726,7 @@ private:
         case 1: m_mirror = Mirror::Horizontal; break;
         case 2: m_mirror = Mirror::Vertical; break;
         case 3: m_mirror = Mirror::OnescreenHi; break;
-        default: m_mirror = Mirror::OnescreenLo; break;  
+        default: m_mirror = Mirror::OnescreenLo; break;
         }
     }
 
@@ -772,11 +734,6 @@ private:
     uint8_t m_reg[8] = {};
 };
 
-
- 
- 
- 
- 
 class Mapper243 final : public Mapper {
 public:
     explicit Mapper243(const MapperConfig& c) : Mapper(c) { updateMirror(); }
@@ -884,19 +841,12 @@ private:uint8_t m_prg[3]={},m_chr[8]={},m_perm=0;
 
 class Mapper82 final : public Mapper {public:explicit Mapper82(const MapperConfig&c):Mapper(c){}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;size_t n=std::max<size_t>(1,m_config.prgRomSize/0x2000);size_t b=a<0xA000?m_prg[0]:a<0xC000?m_prg[1]:a<0xE000?m_prg[2]:n-1;m=mapBank(b,0x2000,m_config.prgRomSize,a&0x1FFF);return true;}bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if(a<0x7EF0||a>0x7EFF)return false;if(a<=0x7EF5){m_chr[a&0xF]=d;return true;}switch(a){case 0x7EF6:m_mirror=(d&1)?Mirror::Vertical:Mirror::Horizontal;m_mode=(d>>1)&1;break;case 0x7EF7:case 0x7EF8:case 0x7EF9:m_perm[(a&0xF)-7]=d;break;case 0x7EFA:m_prg[0]=d>>2;break;case 0x7EFB:m_prg[1]=d>>2;break;case 0x7EFC:m_prg[2]=d>>2;break;}return true;}bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto s=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!s)return false;uint8_t slot=a>>10;uint8_t b;if(!m_mode){b=slot<2?uint8_t((m_chr[0]&0xFE)+(slot&1)):slot<4?uint8_t((m_chr[1]&0xFE)+(slot&1)):m_chr[slot-2];}else{b=slot<4?m_chr[slot+2]:slot<6?uint8_t((m_chr[0]&0xFE)+(slot&1)):uint8_t((m_chr[1]&0xFE)+(slot&1));}m=mapBank(b,0x400,s,a&0x3FF);return true;}bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);}bool mapPrgRam(uint16_t a,uint32_t&m,bool)const override{if(!m_config.prgRamSize)return false;if(a>=0x6000&&a<=0x67FF&&m_perm[0]==0xCA)m=a-0x6000;else if(a>=0x6800&&a<=0x6FFF&&m_perm[1]==0x69)m=a-0x6000;else if(a>=0x7000&&a<=0x73FF&&m_perm[2]==0x84)m=a-0x6000;else return false;m%=m_config.prgRamSize;return true;}void saveState(std::vector<uint8_t>&o)const override{for(auto v:m_prg)put8(o,v);for(auto v:m_chr)put8(o,v);for(auto v:m_perm)put8(o,v);put8(o,m_mode);put8(o,static_cast<uint8_t>(m_mirror));}bool loadState(const uint8_t*&p,const uint8_t*e)override{uint8_t b;for(auto&v:m_prg)if(!get8(p,e,v))return false;for(auto&v:m_chr)if(!get8(p,e,v))return false;for(auto&v:m_perm)if(!get8(p,e,v))return false;if(!get8(p,e,m_mode)||!get8(p,e,b))return false;m_mirror=static_cast<Mirror>(b);return true;}private:uint8_t m_prg[3]={},m_chr[6]={},m_perm[3]={},m_mode=0;};
 
-
-
-
- 
 class Mapper38 final : public Mapper { public: explicit Mapper38(const MapperConfig&c):Mapper(c){} bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;m=mapBank(m_prg,0x8000,m_config.prgRomSize,a-0x8000);return true;} bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if(a<0x7000||a>0x7FFF)return false;m_prg=d&3;m_chr=(d>>2)&3;return true;} bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto z=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!z)return false;m=mapBank(m_chr,0x2000,z,a);return true;} bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);} bool mapPrgRam(uint16_t,uint32_t&,bool)const override{return false;} void reset(bool)override{m_prg=m_chr=0;} void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg);put8(o,m_chr);} bool loadState(const uint8_t*&p,const uint8_t*e)override{return get8(p,e,m_prg)&&get8(p,e,m_chr);} private:uint8_t m_prg=0,m_chr=0;};
 
 class Mapper39 final : public Mapper { public: explicit Mapper39(const MapperConfig&c):Mapper(c){} bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;m=mapBank(m_prg,0x8000,m_config.prgRomSize,a-0x8000);return true;} bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if(a<0x8000)return false;m_prg=d;return true;} void reset(bool)override{m_prg=0;} void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg);} bool loadState(const uint8_t*&p,const uint8_t*e)override{return get8(p,e,m_prg);} private:uint8_t m_prg=0;};
 
 class Mapper50 final : public Mapper { public: explicit Mapper50(const MapperConfig&c):Mapper(c){} bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x6000||!m_config.prgRomSize)return false;size_t b=a<0x8000?0x0F:a<0xA000?8:a<0xC000?9:a<0xE000?m_bank:0x0B;m=mapBank(b,0x2000,m_config.prgRomSize,a&0x1FFF);return true;} bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{switch(a&0x4120){case 0x4020:m_bank=(d&8)|((d&1)<<2)|((d&6)>>1);return true;case 0x4120:if(d&1)m_irqEnable=true;else{m_irqEnable=false;m_irq=false;m_irqCounter=0;}return true;default:return false;}} bool mapPrgRam(uint16_t,uint32_t&,bool)const override{return false;} void clockCpu()override{if(m_irqEnable&&!m_irq&&++m_irqCounter==0x1000){m_irq=true;m_irqEnable=false;}} bool irqActive()const override{return m_irq;} void reset(bool)override{m_bank=0;m_irqEnable=m_irq=false;m_irqCounter=0;} void saveState(std::vector<uint8_t>&o)const override{put8(o,m_bank);put8(o,m_irqEnable);put8(o,m_irq);put8(o,uint8_t(m_irqCounter));put8(o,uint8_t(m_irqCounter>>8));} bool loadState(const uint8_t*&p,const uint8_t*e)override{uint8_t lo,hi,b;if(!get8(p,e,m_bank)||!get8(p,e,b))return false;m_irqEnable=b;if(!get8(p,e,b))return false;m_irq=b;if(!get8(p,e,lo)||!get8(p,e,hi))return false;m_irqCounter=uint16_t(lo)|(uint16_t(hi)<<8);return true;} private:uint8_t m_bank=0;bool m_irqEnable=false,m_irq=false;uint16_t m_irqCounter=0;};
 
-
- 
- 
 class Mapper51 final : public Mapper {
 public:
     explicit Mapper51(const MapperConfig& c):Mapper(c){}
@@ -920,7 +870,6 @@ private:
     uint8_t m_bank=0,m_mode=1; void updateMirror(){m_mirror=(m_mode==3)?Mirror::Horizontal:Mirror::Vertical;}
 };
 
- 
 class Mapper61 final : public Mapper {
 public: explicit Mapper61(const MapperConfig&c):Mapper(c){}
     bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;if((m_addr&0x30)==0||(m_addr&0x30)==0x30){m=mapBank(m_addr&0x0F,0x8000,m_config.prgRomSize,a-0x8000);}else{const size_t b=((size_t(m_addr)<<1)&0x1E)|((m_addr>>4)&2);m=mapBank(b,0x4000,m_config.prgRomSize,a&0x3FFF);}return true;}
@@ -931,12 +880,6 @@ public: explicit Mapper61(const MapperConfig&c):Mapper(c){}
 private:uint16_t m_addr=0x8000;
 };
 
- 
- 
- 
- 
- 
- 
 class Mapper63 final : public Mapper {
 public:
     explicit Mapper63(const MapperConfig& c):Mapper(c){}
@@ -944,16 +887,13 @@ public:
     bool cpuMapRead(uint16_t a,uint32_t& m) const override {
         if(a<0x8000||!m_config.prgRomSize)return false;
 
-         
-         
-         
         const unsigned outerBits=(m_config.nes20&&m_config.submapper==1)?6u:7u;
         const size_t outer=(size_t(m_addr>>3)&((size_t(1)<<outerBits)-1));
         const bool nrom256=(m_addr&0x0002)!=0;
         const size_t lowBit=nrom256?size_t((a>>14)&1):size_t((m_addr>>2)&1);
         const size_t bank16=(outer<<1)|lowBit;
         const size_t mapped=bank16*0x4000u+size_t(a&0x3FFF);
-        if(mapped>=m_config.prgRomSize)return false;  
+        if(mapped>=m_config.prgRomSize)return false;
         m=uint32_t(mapped);return true;
     }
 
@@ -987,17 +927,12 @@ public:
     }
 private:
     bool chrWriteProtected() const {
-         
+
         return (m_addr&((m_config.nes20&&m_config.submapper==1)?0x0200:0x0400))!=0;
     }
     uint16_t m_addr=0x8000;
 };
 
-
- 
- 
- 
- 
 class Mapper53 final : public Mapper {
 public:
     explicit Mapper53(const MapperConfig& c):Mapper(c){m_mirror=Mirror::Vertical;}
@@ -1030,8 +965,6 @@ public:
 private:uint8_t m_reg0=0,m_reg1=0;
 };
 
- 
- 
 class Mapper54 final : public Mapper {
 public:
     explicit Mapper54(const MapperConfig& c):Mapper(c){}
@@ -1058,8 +991,6 @@ public:
 private:uint8_t m_prg=0,m_chr=0;
 };
 
- 
- 
 class Mapper55 final : public Mapper {
 public:
     explicit Mapper55(const MapperConfig& c):Mapper(c){}
@@ -1077,8 +1008,6 @@ public:
     }
 };
 
- 
- 
 class Mapper56 final : public Mapper {
 public:
     explicit Mapper56(const MapperConfig& c):Mapper(c){m_prg[3]=0xFF;}
@@ -1133,9 +1062,6 @@ private:
     uint16_t m_reload=0,m_counter=0;uint8_t m_control=0;bool m_irq=false;int m_selected=-1;bool m_useRom=false;uint8_t m_prg[4]={0,0,0,0xFF},m_chr[8]={};
 };
 
- 
- 
- 
 class Mapper57 final : public Mapper {
 public:
     explicit Mapper57(const MapperConfig& c):Mapper(c){}
@@ -1150,9 +1076,6 @@ public:
 private:uint8_t m_regs[2]={};void updateMirror(){m_mirror=(m_regs[1]&8)?Mirror::Horizontal:Mirror::Vertical;}
 };
 
- 
- 
- 
 class Mapper59 final : public Mapper {
 public:
     explicit Mapper59(const MapperConfig& c):Mapper(c){}
@@ -1169,11 +1092,6 @@ private:bool m_16k=false;uint8_t m_prg16=0,m_prg32=0,m_chr=0;bool m_dip=false;
 
 class Mapper58 final : public Mapper { public: explicit Mapper58(const MapperConfig&c):Mapper(c){} bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;size_t b=m_same?m_prg:(m_prg&~1u)+(a>=0xC000);m=mapBank(b,0x4000,m_config.prgRomSize,a&0x3FFF);return true;} bool cpuWrite(uint16_t a,uint8_t,uint64_t)override{if(a<0x8000)return false;m_prg=a&7;m_chr=(a>>3)&7;m_same=a&0x40;m_mirror=(a&0x80)?Mirror::Horizontal:Mirror::Vertical;return true;} bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto z=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!z)return false;m=mapBank(m_chr,0x2000,z,a);return true;} bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);} void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg);put8(o,m_chr);put8(o,m_same);put8(o,uint8_t(m_mirror));} bool loadState(const uint8_t*&p,const uint8_t*e)override{uint8_t b;if(!get8(p,e,m_prg)||!get8(p,e,m_chr)||!get8(p,e,b))return false;m_same=b;if(!get8(p,e,b))return false;m_mirror=Mirror(b);return true;} private:uint8_t m_prg=0,m_chr=0;bool m_same=false;};
 
-
- 
- 
- 
- 
 class Mapper171 final : public Mapper {
 public:
     explicit Mapper171(const MapperConfig& c) : Mapper(c) {}
@@ -1220,12 +1138,6 @@ private:
     uint8_t m_chr[2] = {0, 0};
 };
 
-
- 
- 
- 
- 
- 
 class Mapper174 final : public Mapper {
 public:
     explicit Mapper174(const MapperConfig& c) : Mapper(c) { m_mirror = Mirror::Vertical; }
@@ -1238,10 +1150,10 @@ public:
     bool cpuMapRead(uint16_t a, uint32_t& m) const override {
         if (a < 0x8000 || !m_config.prgRomSize) return false;
         if (m_mode32) {
-             
+
             m = mapBank(m_prg >> 1, 0x8000, m_config.prgRomSize, a & 0x7FFF);
         } else {
-             
+
             m = mapBank(m_prg, 0x4000, m_config.prgRomSize, a & 0x3FFF);
         }
         return true;
@@ -1283,16 +1195,6 @@ private:
     bool m_mode32 = false;
 };
 
-
-
- 
- 
- 
- 
- 
- 
- 
- 
 class MapperBmcBundled47 final : public Mapper {
 public:
     explicit MapperBmcBundled47(const MapperConfig& c) : Mapper(c) { reset(true); }
@@ -1312,7 +1214,7 @@ public:
         if (a < 0x8000) return false;
         const uint16_t o = uint16_t(a - 0x8000);
         switch (m_config.id) {
-        case 202: {  
+        case 202: {
             const uint8_t bank = uint8_t((o >> 1) & 0x07);
             const uint8_t mode = ((bank & 0x06) == 0x06) ? 1 : 0;
             set16(uint8_t(bank & ~mode), uint8_t(bank | mode));
@@ -1320,20 +1222,20 @@ public:
             m_mirror = (o & 1) ? Mirror::Horizontal : Mirror::Vertical;
             break;
         }
-        case 203: {  
+        case 203: {
             const uint8_t bank = uint8_t((d >> 2) & 0x03);
             set16(bank, bank);
             m_chr = uint8_t(d & 0x03);
             break;
         }
-        case 204: {  
+        case 204: {
             const uint16_t join = uint16_t(((o >> 1) & (o >> 2)) & 1);
             set16(uint8_t(o & ~join), uint8_t(o | join));
             m_chr = uint8_t(o & ~join);
             m_mirror = (d & 0x10) ? Mirror::Horizontal : Mirror::Vertical;
             break;
         }
-        case 214: {  
+        case 214: {
             const uint16_t region = uint16_t(o & 0x7000);
             if (region != 0x0000 && region != 0x7000) return true;
             const uint8_t bank = uint8_t(o >> 2);
@@ -1341,12 +1243,12 @@ public:
             m_chr = bank;
             break;
         }
-        case 217:  
+        case 217:
             m_mode32 = true;
             m_prg32 = uint8_t((o >> 2) & 0x07);
             m_chr = uint8_t(o & 0x07);
             break;
-        case 229: {  
+        case 229: {
             m_mirror = (o & 0x20) ? Mirror::Horizontal : Mirror::Vertical;
             const uint8_t bank = uint8_t(o & 0x1F);
             m_chr = bank;
@@ -1354,7 +1256,7 @@ public:
             else { m_mode32 = true; m_prg32 = 0; }
             break;
         }
-        case 231: {  
+        case 231: {
             const uint8_t base = uint8_t(o & 0x1E);
             set16(base, uint8_t(base | ((o >> 5) & 1)));
             m_mirror = (o & 0x80) ? Mirror::Horizontal : Mirror::Vertical;
@@ -1401,11 +1303,6 @@ private:
     uint8_t m_prg32 = 0, m_prgLo = 0, m_prgHi = 1, m_chr = 0;
 };
 
-
- 
- 
- 
- 
 class Mapper212 final : public Mapper {
 public:
     explicit Mapper212(const MapperConfig& c) : Mapper(c) { reset(true); }
@@ -1444,10 +1341,6 @@ private:
     bool m_mode32=false; uint8_t m_prg16=0,m_prg32=0,m_chr=0;
 };
 
- 
- 
- 
- 
 class MapperBmcBundled48 final : public Mapper {
 public:
     explicit MapperBmcBundled48(const MapperConfig& c) : Mapper(c) { reset(true); }
@@ -1475,9 +1368,7 @@ public:
         default: return false;
         }
         const std::size_t base = bank16 * 0x4000;
-         
-         
-         
+
         if (m_config.id == 235 && base >= m_config.prgRomSize) return false;
         uint32_t inBank = uint32_t(a & 0x3FFF);
         if (m_config.id == 237 && (m_latch[0] & 1)) inBank |= 0x0002;
@@ -1487,7 +1378,7 @@ public:
 
     bool cpuReadRegister(uint16_t a, uint8_t& d) override {
         if ((m_config.id != 225 && m_config.id != 255) || a < 0x5800 || a > 0x5FFF) return false;
-         
+
         d = uint8_t((d & 0xF0) | (m_ram4[a & 3] & 0x0F));
         return true;
     }
@@ -1502,7 +1393,7 @@ public:
         switch (m_config.id) {
         case 225:
         case 255: {
-             
+
             const uint8_t high = uint8_t((o >> 8) & 0x40);
             const uint8_t bank = uint8_t(high | ((o >> 6) & 0x3F));
             const uint8_t mode = uint8_t(((o & 0x1000) == 0) ? 1 : 0);
@@ -1521,9 +1412,9 @@ public:
         }
         case 227: {
             const uint8_t bank = uint8_t(((o >> 2) & 0x1F) | ((o & 0x0100) >> 3));
-            if (o & 0x0080) {  
+            if (o & 0x0080) {
                 set16(bank, uint8_t(bank + (o & 1)));
-            } else {  
+            } else {
                 const uint8_t lowMask = (o & 1) ? 0x3E : 0xFF;
                 m_prgLo = uint8_t(bank & lowMask);
                 m_prgHi = uint8_t((o & 0x0200) ? (bank | 0x07) : (bank & 0x38));
@@ -1546,8 +1437,7 @@ public:
             return true;
         }
         case 235: {
-             
-             
+
             const uint8_t bank = uint8_t((((o >> 9) & 1) << 7) |
                                          (((o >> 8) & 1) << 6) |
                                          (((o >> 4) & 1) << 5) |
@@ -1568,7 +1458,7 @@ public:
             return true;
         }
         case 237: {
-            if (m_latch[0] & 0x0002) {  
+            if (m_latch[0] & 0x0002) {
                 m_reg[0] = uint8_t((m_reg[0] & ~0x07) | (d & 0x07));
             } else {
                 m_latch[0] = o;
@@ -1659,10 +1549,10 @@ private:
         } else {
             bank = uint8_t(((lo & 0x07) << 3) | (hi & 0x07));
         }
-        if (hi & 0x20) {  
+        if (hi & 0x20) {
             const uint8_t mode = uint8_t((hi & 0x10) ? 0 : 1);
             set16(uint8_t(bank & ~mode), uint8_t(bank | mode));
-        } else {  
+        } else {
             set16(bank, uint8_t(bank | 0x07));
         }
         m_mirror = (lo & 0x20) ? Mirror::Horizontal : Mirror::Vertical;
@@ -1677,10 +1567,6 @@ private:
     uint8_t m_ram4[4]{0,0,0,0};
 };
 
- 
- 
- 
- 
 class Mapper200 final : public Mapper {
 public:
     explicit Mapper200(const MapperConfig& c) : Mapper(c) { m_mirror = Mirror::Vertical; }
@@ -1735,18 +1621,11 @@ class Mapper60 final : public Mapper { public: explicit Mapper60(const MapperCon
 
 class Mapper62 final : public Mapper { public: explicit Mapper62(const MapperConfig&c):Mapper(c){} bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;size_t b=m_same?m_prg:(m_prg&~1u)+(a>=0xC000);m=mapBank(b,0x4000,m_config.prgRomSize,a&0x3FFF);return true;} bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if(a<0x8000)return false;m_prg=((a&0x3F00)>>8)|(a&0x40);m_chr=((a&0x1F)<<2)|(d&3);m_same=a&0x20;m_mirror=(a&0x80)?Mirror::Horizontal:Mirror::Vertical;return true;} bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto z=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!z)return false;m=mapBank(m_chr,0x2000,z,a);return true;} bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);} void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg);put8(o,m_chr);put8(o,m_same);put8(o,uint8_t(m_mirror));} bool loadState(const uint8_t*&p,const uint8_t*e)override{uint8_t b;if(!get8(p,e,m_prg)||!get8(p,e,m_chr)||!get8(p,e,b))return false;m_same=b;if(!get8(p,e,b))return false;m_mirror=Mirror(b);return true;} private:uint8_t m_prg=0,m_chr=0;bool m_same=false;};
 
- 
- 
- 
-
-
- 
 class Mapper28 final : public Mapper {
 public:
     explicit Mapper28(const MapperConfig& c) : Mapper(c) {
-         
-         
-        m_mode = 0x0C;  
+
+        m_mode = 0x0C;
         const std::size_t banks32 = std::max<std::size_t>(1, c.prgRomSize / 0x8000);
         m_outer = uint8_t((banks32 - 1) & 0xFF);
     }
@@ -1862,11 +1741,7 @@ public:
 
         size_t bank = 0;
         if (m_config.submapper == 1 && m_nromMode) {
-             
-             
-             
-             
-             
+
             if (m_nrom256) {
                 bank = 8u | (size_t((m_page >> 1) & 1) << 2)
                        | (size_t((a >> 14) & 1) << 1)
@@ -1876,8 +1751,7 @@ public:
                        | size_t((a >> 13) & 1);
             }
         } else {
-             
-             
+
             if (a < 0x8000) bank = 6;
             else if (a < 0xA000) bank = 4;
             else if (a < 0xC000) bank = 5;
@@ -1892,9 +1766,7 @@ public:
         if (r == 0x8000) { m_irqEnable=false; m_irq=false; m_irqCount=0; return true; }
         if (r == 0xA000) { m_irqEnable=true; m_irq=false; m_irqCount=0; return true; }
         if (r == 0xC000 && m_config.submapper == 1) {
-             
-             
-             
+
             m_mirror = (a & 0x0001) ? Mirror::Horizontal : Mirror::Vertical;
             m_chr = uint8_t((a >> 1) & 3);
             m_nromMode = (a & 0x0008) != 0;
@@ -1920,8 +1792,6 @@ public:
 private: uint8_t m_bank=0,m_chr=0,m_page=0; bool m_irqEnable=false,m_irq=false,m_nromMode=false,m_nrom256=false; uint16_t m_irqCount=0;
 };
 
- 
- 
 class Mapper41 final : public Mapper {
 public:
     explicit Mapper41(const MapperConfig& c):Mapper(c){}
@@ -1940,8 +1810,6 @@ public:
 private:uint8_t m_prg=0,m_chrOuter=0,m_chrInner=0;bool m_innerEnable=false;
 };
 
- 
- 
 class Mapper42 final : public Mapper {
 public: explicit Mapper42(const MapperConfig&c):Mapper(c){}
     bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x6000||!m_config.prgRomSize)return false;if(a<0x8000)m=mapBank(m_prg,0x2000,m_config.prgRomSize,a-0x6000);else{size_t base=m_config.prgRomSize>0x8000?m_config.prgRomSize-0x8000:0;m=uint32_t(base+(a-0x8000));}return true;}
@@ -1956,9 +1824,6 @@ public: explicit Mapper42(const MapperConfig&c):Mapper(c){}
 private:uint8_t m_prg=0,m_chr=0;bool m_irqEnable=false;uint16_t m_irqCounter=0;
 };
 
- 
- 
- 
 class Mapper43 final : public Mapper {
 public: explicit Mapper43(const MapperConfig&c):Mapper(c){}
     bool cpuMapRead(uint16_t a,uint32_t&m)const override{
@@ -1983,14 +1848,8 @@ class Mapper86 final : public Mapper {public:explicit Mapper86(const MapperConfi
 
 class Mapper88 final : public Mapper {public:explicit Mapper88(const MapperConfig&c):Mapper(c){}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;size_t n=std::max<size_t>(1,m_config.prgRomSize/0x2000);size_t b=a<0xA000?m_prg[0]:a<0xC000?m_prg[1]:a<0xE000?(n>1?n-2:0):n-1;m=mapBank(b,0x2000,m_config.prgRomSize,a&0x1FFF);return true;}bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if(m_config.id==154)m_mirror=(d&0x40)?Mirror::OnescreenHi:Mirror::OnescreenLo;if((a&0xE001)==0x8000){m_sel=d&7;return true;}if((a&0xE001)==0x8001){if(m_sel<=1)m_chr2[m_sel]=d>>1;else if(m_sel<=5)m_chr1[m_sel-2]=(d&0x3F)|0x40;else m_prg[m_sel-6]=d&0x3F;return true;}return false;}bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto s=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!s)return false;if(a<0x1000)m=mapBank(m_chr2[a>>11],0x800,s,a&0x7FF);else m=mapBank(m_chr1[(a-0x1000)>>10],0x400,s,a&0x3FF);return true;}bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);}void saveState(std::vector<uint8_t>&o)const override{put8(o,m_sel);for(auto v:m_prg)put8(o,v);for(auto v:m_chr2)put8(o,v);for(auto v:m_chr1)put8(o,v);put8(o,static_cast<uint8_t>(m_mirror));}bool loadState(const uint8_t*&p,const uint8_t*e)override{uint8_t b;if(!get8(p,e,m_sel))return false;for(auto&v:m_prg)if(!get8(p,e,v))return false;for(auto&v:m_chr2)if(!get8(p,e,v))return false;for(auto&v:m_chr1)if(!get8(p,e,v))return false;if(!get8(p,e,b))return false;m_mirror=static_cast<Mirror>(b);return true;}private:uint8_t m_sel=0,m_prg[2]={},m_chr2[2]={},m_chr1[4]={};};
 
-
-
 class Mapper95 final : public Mapper {public:explicit Mapper95(const MapperConfig&c):Mapper(c){}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;size_t n=std::max<size_t>(1,m_config.prgRomSize/0x2000);size_t b=a<0xA000?m_r[6]:a<0xC000?m_r[7]:a<0xE000?(n>1?n-2:0):n-1;m=mapBank(b,0x2000,m_config.prgRomSize,a&0x1FFF);return true;}bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if(a<0x8000)return false;if(!(a&1))m_sel=d&7;else m_r[m_sel]=d;return true;}bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto s=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!s)return false;if(a<0x800)m=mapBank((m_r[0]&0xFE)>>1,0x800,s,a&0x7FF);else if(a<0x1000)m=mapBank((m_r[1]&0xFE)>>1,0x800,s,a&0x7FF);else m=mapBank(m_r[2+((a-0x1000)>>10)],0x400,s,a&0x3FF);return true;}bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);}bool mapNametable(uint16_t a,NametableSource&s,uint32_t&m)const override{if(a<0x2000||a>0x3EFF)return false;uint8_t p=(a&0xFFF)>>10,nt=((p<2?m_r[0]:m_r[1])>>5)&1;s=NametableSource::Ciram;m=uint32_t(nt)*0x400+(a&0x3FF);return true;}void saveState(std::vector<uint8_t>&o)const override{put8(o,m_sel);for(auto v:m_r)put8(o,v);}bool loadState(const uint8_t*&p,const uint8_t*e)override{if(!get8(p,e,m_sel))return false;for(auto&v:m_r)if(!get8(p,e,v))return false;return true;}private:uint8_t m_sel=0,m_r[8]={};};
 
- 
- 
- 
- 
 class Mapper91 final : public Mapper {
 public:
     explicit Mapper91(const MapperConfig& c) : Mapper(c) {}
@@ -2114,12 +1973,6 @@ class Mapper101 final : public Mapper {public:explicit Mapper101(const MapperCon
 
 class Mapper113 final : public Mapper {public:explicit Mapper113(const MapperConfig&c):Mapper(c){}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;m=mapBank(m_prg,0x8000,m_config.prgRomSize,a-0x8000);return true;}bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if((a&0xE100)!=0x4100&&a<0x8000)return false;m_prg=(d>>3)&7;m_chr=(d&7)|((d>>3)&8);return true;}bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto s=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!s)return false;m=mapBank(m_chr,0x2000,s,a);return true;}bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);}bool mapPrgRam(uint16_t,uint32_t&,bool)const override{return false;}void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg);put8(o,m_chr);}bool loadState(const uint8_t*&p,const uint8_t*e)override{return get8(p,e,m_prg)&&get8(p,e,m_chr);}private:uint8_t m_prg=0,m_chr=0;};
 
- 
- 
- 
- 
- 
- 
 class Mapper133 final : public Mapper {
 public:
     explicit Mapper133(const MapperConfig& c) : Mapper(c) {}
@@ -2164,15 +2017,6 @@ private:
     uint8_t m_chr = 0;
 };
 
- 
- 
- 
- 
- 
- 
- 
- 
- 
 class Mapper137 final : public Mapper {
 public:
     explicit Mapper137(const MapperConfig& c) : Mapper(c) { updateMirror(); }
@@ -2228,14 +2072,14 @@ public:
         const uint8_t page = uint8_t((a & 0x0FFF) >> 10);
         uint8_t nt = 0;
         if (m_reg[7] & 1) {
-             
+
             nt = uint8_t((page >> 1) & 1);
         } else {
             switch ((m_reg[7] >> 1) & 3) {
-            case 0: nt = uint8_t((page >> 1) & 1); break;        
-            case 1: nt = uint8_t(page & 1); break;               
-            case 2: nt = uint8_t(page == 0 ? 0 : 1); break;      
-            default: nt = 0; break;                               
+            case 0: nt = uint8_t((page >> 1) & 1); break;
+            case 1: nt = uint8_t(page & 1); break;
+            case 2: nt = uint8_t(page == 0 ? 0 : 1); break;
+            default: nt = 0; break;
             }
         }
         source = NametableSource::Ciram;
@@ -2274,7 +2118,7 @@ private:
         case 0: m_mirror = Mirror::Horizontal; break;
         case 1: m_mirror = Mirror::Vertical; break;
         case 3: m_mirror = Mirror::OnescreenLo; break;
-        default: m_mirror = Mirror::Horizontal; break;  
+        default: m_mirror = Mirror::Horizontal; break;
         }
     }
 
@@ -2311,8 +2155,6 @@ public:
         const std::size_t size = m_config.chrRomSize ? m_config.chrRomSize : m_config.chrRamSize;
         if (!size) return false;
 
-         
-         
         if (!m_config.chrRomSize && m_config.chrRamSize) {
             m = uint32_t(a % m_config.chrRamSize);
             return true;
@@ -2340,14 +2182,14 @@ public:
         const uint8_t page = uint8_t((a & 0x0FFF) >> 10);
         uint8_t nt = 0;
         if (m_reg[7] & 1) {
-             
+
             nt = uint8_t(page & 1);
         } else {
             switch ((m_reg[7] >> 1) & 3) {
-            case 0: nt = uint8_t(page & 1); break;               
-            case 1: nt = uint8_t((page >> 1) & 1); break;        
-            case 2: nt = uint8_t(page == 0 ? 0 : 1); break;      
-            default: nt = 0; break;                               
+            case 0: nt = uint8_t(page & 1); break;
+            case 1: nt = uint8_t((page >> 1) & 1); break;
+            case 2: nt = uint8_t(page == 0 ? 0 : 1); break;
+            default: nt = 0; break;
             }
         }
         source = NametableSource::Ciram;
@@ -2379,9 +2221,9 @@ public:
 private:
     unsigned chrShift() const {
         switch (m_config.id) {
-        case 135: case 141: return 1;  
-        case 139: return 2;  
-        default: return 0;   
+        case 135: case 141: return 1;
+        case 139: return 2;
+        default: return 0;
         }
     }
     void updateMirror() {
@@ -2393,7 +2235,7 @@ private:
         case 0: m_mirror = Mirror::Vertical; break;
         case 1: m_mirror = Mirror::Horizontal; break;
         case 3: m_mirror = Mirror::OnescreenLo; break;
-        default: m_mirror = Mirror::Vertical; break;  
+        default: m_mirror = Mirror::Vertical; break;
         }
     }
 
@@ -2401,12 +2243,6 @@ private:
     uint8_t m_reg[8] = {};
 };
 
- 
- 
- 
- 
- 
- 
 class Mapper132 final : public Mapper {
 public:
     explicit Mapper132(const MapperConfig& c) : Mapper(c) {}
@@ -2467,12 +2303,6 @@ private:
     uint8_t m_output = 0;
 };
 
- 
- 
- 
- 
- 
- 
 class Mapper136 final : public Mapper {
 public:
     explicit Mapper136(const MapperConfig& c) : Mapper(c) {}
@@ -2486,8 +2316,8 @@ public:
     bool cpuReadRegister(uint16_t a, uint8_t& d) override {
         if ((a & 0xE100) != 0x4100) return false;
         uint8_t value = uint8_t(m_reg & 0x3F);
-        if (m_invert) value ^= 0x30;  
-        d = uint8_t((d & 0xC0) | value);  
+        if (m_invert) value ^= 0x30;
+        d = uint8_t((d & 0xC0) | value);
         return true;
     }
 
@@ -2497,7 +2327,7 @@ public:
             case 0:
                 if (!m_mode) {
                     m_reg = uint8_t(m_input & 0x3F);
-                    if (m_invert) m_reg ^= 0x0F;  
+                    if (m_invert) m_reg ^= 0x0F;
                 } else {
                     m_reg = uint8_t((m_reg & 0x30) | ((m_reg + 1) & 0x0F));
                 }
@@ -2548,10 +2378,6 @@ private:
     bool m_mode = false;
 };
 
- 
- 
- 
- 
 class Mapper213 final : public Mapper {
 public:
     explicit Mapper213(const MapperConfig& c) : Mapper(c) {}
@@ -2591,25 +2417,6 @@ private:
 
 class Mapper140 final : public Mapper {public:explicit Mapper140(const MapperConfig&c):Mapper(c){}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;m=mapBank(m_prg,0x8000,m_config.prgRomSize,a-0x8000);return true;}bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if(a<0x6000||a>0x7FFF)return false;m_prg=(d>>4)&3;m_chr=d&0x0F;return true;}bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto s=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!s)return false;m=mapBank(m_chr,0x2000,s,a);return true;}bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);}bool mapPrgRam(uint16_t,uint32_t&,bool)const override{return false;}void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg);put8(o,m_chr);}bool loadState(const uint8_t*&p,const uint8_t*e)override{return get8(p,e,m_prg)&&get8(p,e,m_chr);}private:uint8_t m_prg=0,m_chr=0;};
 
- 
- 
- 
- 
-
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
 class Mapper125 final : public Mapper {
 public:
     explicit Mapper125(const MapperConfig& c) : Mapper(c) { reset(true); }
@@ -2832,11 +2639,6 @@ private:
     uint8_t m_chr = 0;
 };
 
-
- 
- 
- 
- 
 class Mapper206 final : public Mapper {
 public:
     explicit Mapper206(const MapperConfig& c) : Mapper(c) {}
@@ -2889,9 +2691,6 @@ class Mapper241 final : public Mapper {public:explicit Mapper241(const MapperCon
 class Mapper242 final : public Mapper {public:explicit Mapper242(const MapperConfig&c):Mapper(c){m_mirror=Mirror::Vertical;}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;m=mapBank(m_prg,0x8000,m_config.prgRomSize,a-0x8000);return true;}bool cpuWrite(uint16_t a,uint8_t,uint64_t)override{if(a<0x8000)return false;m_prg=(a>>3)&0x0F;m_mirror=(a&2)?Mirror::Horizontal:Mirror::Vertical;return true;}void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg);put8(o,static_cast<uint8_t>(m_mirror));}bool loadState(const uint8_t*&p,const uint8_t*e)override{uint8_t b;if(!get8(p,e,m_prg)||!get8(p,e,b))return false;m_mirror=static_cast<Mirror>(b);return true;}private:uint8_t m_prg=0;};
 class Mapper246 final : public Mapper {public:explicit Mapper246(const MapperConfig&c):Mapper(c){m_prg[3]=0xFF;}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;m=mapBank(m_prg[(a-0x8000)>>13],0x2000,m_config.prgRomSize,a&0x1FFF);return true;}bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if(a<0x6000||a>0x67FF)return false;uint8_t r=a&7;if(r<=3)m_prg[r]=d;else m_chr[r&3]=d;return true;}bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto s=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!s)return false;m=mapBank(m_chr[a>>11],0x800,s,a&0x7FF);return true;}bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);}bool mapPrgRam(uint16_t,uint32_t&,bool)const override{return false;}void saveState(std::vector<uint8_t>&o)const override{for(auto v:m_prg)put8(o,v);for(auto v:m_chr)put8(o,v);}bool loadState(const uint8_t*&p,const uint8_t*e)override{for(auto&v:m_prg)if(!get8(p,e,v))return false;for(auto&v:m_chr)if(!get8(p,e,v))return false;return true;}private:uint8_t m_prg[4]={0,0,0,0xFF},m_chr[4]={};};
 
- 
- 
- 
 class Mapper81 final : public Mapper {
 public:
     explicit Mapper81(const MapperConfig& c):Mapper(c){}
@@ -2919,7 +2718,6 @@ public:
 private:uint8_t m_prg=0,m_chr=0;
 };
 
- 
 class Mapper103 final : public Mapper {
 public:
     explicit Mapper103(const MapperConfig& c):Mapper(c){}
@@ -2948,7 +2746,6 @@ public:
 private:uint8_t m_bank=0;bool m_ramDisable=false;
 };
 
- 
 class Mapper107 final : public Mapper {
 public:
     explicit Mapper107(const MapperConfig& c):Mapper(c){}
@@ -2962,10 +2759,6 @@ public:
 private:uint8_t m_latch=0xFF;
 };
 
-
- 
- 
- 
 class Mapper106 final : public Mapper {
 public:
     explicit Mapper106(const MapperConfig& c):Mapper(c) { reset(true); }
@@ -3002,7 +2795,7 @@ public:
     bool irqActive() const override{return m_irq;}
     void reset(bool hard) override {
         if(!hard)return;
-         
+
         for(auto&v:m_chr)v=0x7F;
         m_prg[0]=m_prg[3]=0x1F;m_prg[1]=m_prg[2]=0x0F;
         m_irqCounter=0;m_irqEnable=false;m_irq=false;m_mirror=m_config.headerMirror;
@@ -3023,9 +2816,6 @@ private:
     uint8_t m_prg[4]={};uint8_t m_chr[8]={};uint16_t m_irqCounter=0;bool m_irqEnable=false,m_irq=false;
 };
 
- 
- 
- 
 class Mapper108 final : public Mapper {
 public:
     explicit Mapper108(const MapperConfig& c):Mapper(c){m_variant=resolveVariant();}
@@ -3072,9 +2862,6 @@ private:
     }
 };
 
- 
- 
- 
 class Mapper112 final : public Mapper {
 public:
     explicit Mapper112(const MapperConfig& c):Mapper(c){reset(true);}
@@ -3111,16 +2898,13 @@ public:
 private:uint8_t m_sel=0,m_prg[2]={},m_chr2[2]={},m_chr1[4]={};
 };
 
- 
- 
 class Mapper105 final : public Mapper {
 public:
     explicit Mapper105(const MapperConfig& c) : Mapper(c) { updateMirror(); }
 
     bool cpuMapRead(uint16_t a, uint32_t& m) const override {
         if(a < 0x8000 || !m_config.prgRomSize) return false;
-         
-         
+
         if(!m_started) { m = uint32_t(a - 0x8000) % uint32_t(m_config.prgRomSize); return true; }
 
         const uint8_t eventBank = (m_chr0 >> 1) & 7;
@@ -3129,7 +2913,6 @@ public:
             return true;
         }
 
-         
         const std::size_t base = m_config.prgRomSize > 0x20000 ? 0x20000 : 0;
         const std::size_t size = std::max<std::size_t>(0x4000, m_config.prgRomSize - base);
         const uint8_t mode = (m_ctrl >> 2) & 3;
@@ -3177,8 +2960,7 @@ public:
         if(a >= 0x2000) return false;
         const std::size_t z = m_config.chrRomSize ? m_config.chrRomSize : m_config.chrRamSize;
         if(!z) return false;
-         
-         
+
         if(z <= 0x2000) m = uint32_t(a % z);
         else if(!(m_ctrl & 0x10)) m = mapBank((m_chr0 & 0x1E) >> 1,0x2000,z,a);
         else if(a < 0x1000) m=mapBank(m_chr0,0x1000,z,a);
@@ -3224,15 +3006,12 @@ private:
     uint8_t m_shift=0x10,m_ctrl=0x0C,m_chr0=0,m_chr1=0,m_prg=0;
     uint64_t m_lastWriteCycle=kNoCpuCycle;
     uint32_t m_timer=0; bool m_timerRunning=false,m_irq=false,m_started=false;
-     
+
     uint8_t m_dip=0x04;
     uint32_t timerThreshold() const { return 0x20000000u | (uint32_t(m_dip & 0x0F) << 25); }
     void updateMirror(){switch(m_ctrl&3){case 0:m_mirror=Mirror::OnescreenLo;break;case 1:m_mirror=Mirror::OnescreenHi;break;case 2:m_mirror=Mirror::Vertical;break;default:m_mirror=Mirror::Horizontal;break;}}
 };
 
- 
- 
- 
 class Mapper156 final : public Mapper {
 public:
     explicit Mapper156(const MapperConfig& c) : Mapper(c) { m_mirror = Mirror::OnescreenLo; }
@@ -3320,10 +3099,6 @@ private:
     uint16_t m_chr[8] = {};
 };
 
- 
- 
- 
- 
 class Mapper144 final : public Mapper {
 public:
     explicit Mapper144(const MapperConfig& config) : Mapper(config) {}
@@ -3373,11 +3148,6 @@ private:
     uint8_t m_chr = 0;
 };
 
-
- 
- 
- 
- 
 class Mapper193 final : public Mapper {
 public:
     explicit Mapper193(const MapperConfig& c) : Mapper(c) { m_mirror = Mirror::Vertical; }
