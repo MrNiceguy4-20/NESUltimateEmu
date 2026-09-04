@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """Run NESUltimate built-in probes and external hardware-conformance ROMs.
 
 Supports simple recursive ROM discovery and the christopherpow/nes-test-roms
