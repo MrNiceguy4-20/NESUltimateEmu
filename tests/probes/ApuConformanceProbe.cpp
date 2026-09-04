@@ -219,6 +219,33 @@ int runApuConformanceProbe()
     ok &= earlyNoUnexpectedReload && lateUnexpectedReload && earlyAbortShared && lateAbortShared;
 
     std::puts(ok ? "PASS" : "FAIL");
+
+    APU pendingA;
+    pendingA.powerOn();
+    pendingA.cpuWrite(0x4015, 0x0F);
+    pendingA.cpuWrite(0x4003, 0x18);
+    pendingA.cpuWrite(0x4007, 0x20);
+    pendingA.cpuWrite(0x400B, 0x28);
+    pendingA.cpuWrite(0x400F, 0x30);
+    std::vector<uint8_t> pendingState;
+    pendingA.saveState(pendingState);
+    APU pendingB;
+    pendingB.powerOn();
+    const uint8_t* pendingPtr = pendingState.data();
+    const bool pendingLoad = pendingB.loadState(pendingPtr, pendingState.data() + pendingState.size()) &&
+                             pendingPtr == pendingState.data() + pendingState.size();
+    const uint8_t beforeA = pendingA.cpuRead(0x4015);
+    const uint8_t beforeB = pendingB.cpuRead(0x4015);
+    pendingA.clockFrameCounterPhase();
+    pendingB.clockFrameCounterPhase();
+    const uint8_t afterA = pendingA.cpuRead(0x4015);
+    const uint8_t afterB = pendingB.cpuRead(0x4015);
+    const bool pendingStateOk = pendingLoad && (beforeA & 0x0F) == 0 && beforeB == beforeA &&
+                                (afterA & 0x0F) == 0x0F && afterB == afterA;
+    std::printf("apu_pending_length_state=%s before=%02X/%02X after=%02X/%02X\n",
+        pendingStateOk ? "PASS" : "FAIL", beforeA, beforeB, afterA, afterB);
+    ok &= pendingStateOk;
+
     return ok ? 0 : 1;
 }
 

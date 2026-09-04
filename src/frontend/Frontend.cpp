@@ -9,13 +9,15 @@
 #include <sstream>
 #include <limits>
 #include <cmath>
+#include <ctime>
 #include "../core/CPU.hpp"
 #include "../core/Bus.hpp"
 #include "../core/Cartridge.hpp"
 #include "../core/PPU.hpp"
 #include "../core/APU.hpp"
-#include "imgui_impl_sdl2.h"
-#include "imgui_impl_sdlrenderer2.h"
+#include "../core/AtomicFile.hpp"
+#include "imgui_impl_sdl3.h"
+#include "imgui_impl_sdlrenderer3.h"
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -182,6 +184,16 @@ bool extractArchiveEntry(const std::string& archive, const std::string& entry,
 }
 #endif
 
+namespace {
+constexpr int kNesFrameWidth = 256;
+constexpr int kNesFrameHeight = 240;
+
+constexpr int kDefaultDisplayCropLeft = 8;
+constexpr int kDisplayCropRight = 0;
+constexpr int kDisplayCropTop = 0;
+constexpr int kDisplayCropBottom = 0;
+}
+
 Frontend::Frontend(SDL_Window* window, SDL_Renderer* renderer,
     CPU& cpu, Bus& bus, Cartridge& cart, PPU& ppu, APU& apu)
     : m_window(window)
@@ -200,7 +212,7 @@ Frontend::Frontend(SDL_Window* window, SDL_Renderer* renderer,
         SDL_TEXTUREACCESS_STREAMING,
         256, 240
     );
-    SDL_SetTextureScaleMode(m_nesTexture, SDL_ScaleModeNearest);
+    SDL_SetTextureScaleMode(m_nesTexture, SDL_SCALEMODE_NEAREST);
     setDefaultBindings();
     loadFrontendConfig();
     m_apu.setMasterVolume(m_masterVolume);
@@ -211,11 +223,14 @@ Frontend::Frontend(SDL_Window* window, SDL_Renderer* renderer,
 
 void Frontend::openGamepad()
 {
-    for (int i = 0; i < SDL_NumJoysticks(); i++) {
-        if (SDL_IsGameController(i)) {
-            m_gamepad = SDL_GameControllerOpen(i);
+    int count = 0;
+    SDL_JoystickID* gamepads = SDL_GetGamepads(&count);
+    if (gamepads) {
+        for (int i = 0; i < count; ++i) {
+            m_gamepad = SDL_OpenGamepad(gamepads[i]);
             if (m_gamepad) break;
         }
+        SDL_free(gamepads);
     }
 }
 
@@ -226,9 +241,10 @@ Frontend::~Frontend()
         SetThreadExecutionState(ES_CONTINUOUS);
 #endif
     saveFrontendConfig();
+    if (m_movieRecording) stopMovieRecording();
     m_cart.saveBattery();
     if (m_gamepad) {
-        SDL_GameControllerClose(m_gamepad);
+        SDL_CloseGamepad(m_gamepad);
         m_gamepad = nullptr;
     }
     if (m_nesTexture)
@@ -240,12 +256,26 @@ void Frontend::updateTexture()
     if (!m_nesTexture) return;
     void* pixels = nullptr;
     int pitch = 0;
-    if (SDL_LockTexture(m_nesTexture, nullptr, &pixels, &pitch) == 0) {
+    if (SDL_LockTexture(m_nesTexture, nullptr, &pixels, &pitch)) {
         const uint32_t* src = m_ppu.framebuffer();
         uint8_t* dst = static_cast<uint8_t*>(pixels);
         for (int y = 0; y < 240; y++) {
             memcpy(dst + y * pitch, src + y * 256, 256 * sizeof(uint32_t));
         }
+
+        if (m_hideNativeRasterArtifacts && m_cart.mapper() == 4) {
+            std::string romName = m_cart.fileName();
+            std::transform(romName.begin(), romName.end(), romName.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            if (romName.find("super mario bros. 3") != std::string::npos) {
+                constexpr int kSplitScanline = 192;
+                constexpr int kArtifactWidth = 40;
+                uint32_t* row = reinterpret_cast<uint32_t*>(dst + kSplitScanline * pitch);
+                std::fill(row, row + kArtifactWidth, 0xFF000000u);
+            }
+        }
+
         SDL_UnlockTexture(m_nesTexture);
     }
 }
@@ -255,9 +285,13 @@ SDL_Rect Frontend::gameDestinationRect() const
     int winW = 0, winH = 0;
     SDL_GetWindowSize(m_window, &winW, &winH);
 
+    const int cropLeft = m_cropLeftOverscan ? kDefaultDisplayCropLeft : 0;
+    const int displayWidth = kNesFrameWidth - cropLeft - kDisplayCropRight;
+    const int displayHeight = kNesFrameHeight - kDisplayCropTop - kDisplayCropBottom;
+
     if (m_fullscreen) {
-        const double displayW = m_ntscAspect ? (256.0 * 8.0 / 7.0) : 256.0;
-        const double displayH = 240.0;
+        const double displayW = m_ntscAspect ? (displayWidth * 8.0 / 7.0) : static_cast<double>(displayWidth);
+        const double displayH = static_cast<double>(displayHeight);
         const double aspect = displayW / displayH;
 
         int dstW = winW;
@@ -269,10 +303,10 @@ SDL_Rect Frontend::gameDestinationRect() const
         return SDL_Rect{ (winW - dstW) / 2, (winH - dstH) / 2, dstW, dstH };
     }
 
-    int dstW = 256 * m_scale;
-    const int dstH = 240 * m_scale;
+    int dstW = displayWidth * m_scale;
+    const int dstH = displayHeight * m_scale;
     if (m_ntscAspect)
-        dstW = (256 * m_scale * 8) / 7;
+        dstW = (displayWidth * m_scale * 8) / 7;
     return SDL_Rect{ (winW - dstW) / 2, (winH - dstH) / 2, dstW, dstH };
 }
 
@@ -287,6 +321,7 @@ void Frontend::runFrame()
         m_bus.clock();
         ++guard;
     }
+
 }
 
 void Frontend::stepInstruction()
@@ -325,11 +360,13 @@ void Frontend::run()
 
         if (activelyEmulating) {
             runFrame();
+            if (m_movieRecording)
+                m_movieFrames.push_back(MovieFrame{m_bus.controller1State(), m_bus.controller2State()});
             updateTexture();
         }
 
-        ImGui_ImplSDLRenderer2_NewFrame();
-        ImGui_ImplSDL2_NewFrame();
+        ImGui_ImplSDLRenderer3_NewFrame();
+        ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
         drawUI();
         ImGui::Render();
@@ -341,12 +378,23 @@ void Frontend::run()
         SDL_RenderClear(m_renderer);
 
         if (m_cart.isLoaded() && m_nesTexture) {
-            const SDL_Rect dst = gameDestinationRect();
-            SDL_RenderCopy(m_renderer, m_nesTexture, nullptr, &dst);
+            const int cropLeft = m_cropLeftOverscan ? kDefaultDisplayCropLeft : 0;
+            const SDL_FRect src{
+                static_cast<float>(cropLeft),
+                static_cast<float>(kDisplayCropTop),
+                static_cast<float>(kNesFrameWidth - cropLeft - kDisplayCropRight),
+                static_cast<float>(kNesFrameHeight - kDisplayCropTop - kDisplayCropBottom)
+            };
+            const SDL_Rect dstRect = gameDestinationRect();
+            const SDL_FRect dst{
+                static_cast<float>(dstRect.x), static_cast<float>(dstRect.y),
+                static_cast<float>(dstRect.w), static_cast<float>(dstRect.h)
+            };
+            SDL_RenderTexture(m_renderer, m_nesTexture, &src, &dst);
         }
 
         if (!m_fullscreen)
-            ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), m_renderer);
+            ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), m_renderer);
         SDL_RenderPresent(m_renderer);
 
         if (activelyEmulating)
@@ -454,11 +502,11 @@ void Frontend::setDefaultBindings()
         SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT };
     m_p2Keys = { SDL_SCANCODE_H, SDL_SCANCODE_G, SDL_SCANCODE_T, SDL_SCANCODE_Y,
         SDL_SCANCODE_I, SDL_SCANCODE_K, SDL_SCANCODE_J, SDL_SCANCODE_L };
-    m_p1PadButtons = { SDL_CONTROLLER_BUTTON_A, SDL_CONTROLLER_BUTTON_B, SDL_CONTROLLER_BUTTON_BACK,
-        SDL_CONTROLLER_BUTTON_START, SDL_CONTROLLER_BUTTON_DPAD_UP, SDL_CONTROLLER_BUTTON_DPAD_DOWN,
-        SDL_CONTROLLER_BUTTON_DPAD_LEFT, SDL_CONTROLLER_BUTTON_DPAD_RIGHT };
-    m_hotkeys = { SDLK_p, SDLK_F10, SDLK_r, SDLK_1, SDLK_2, SDLK_3, SDLK_4,
-        SDLK_F5, SDLK_F9, SDLK_F6, SDLK_F7, SDLK_a, SDLK_c, SDLK_F11, SDLK_ESCAPE };
+    m_p1PadButtons = { SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_EAST, SDL_GAMEPAD_BUTTON_BACK,
+        SDL_GAMEPAD_BUTTON_START, SDL_GAMEPAD_BUTTON_DPAD_UP, SDL_GAMEPAD_BUTTON_DPAD_DOWN,
+        SDL_GAMEPAD_BUTTON_DPAD_LEFT, SDL_GAMEPAD_BUTTON_DPAD_RIGHT };
+    m_hotkeys = { SDLK_P, SDLK_F10, SDLK_R, SDLK_1, SDLK_2, SDLK_3, SDLK_4,
+        SDLK_F5, SDLK_F9, SDLK_F6, SDLK_F7, SDLK_A, SDLK_C, SDLK_F11, SDLK_ESCAPE };
     m_masterVolume = 1.50f;
 }
 
@@ -482,13 +530,25 @@ void Frontend::loadFrontendConfig()
             in >> timing;
             if (timing >= int(TimingOverride::Auto) && timing <= int(TimingOverride::Dendy))
                 m_timingOverride = static_cast<TimingOverride>(timing);
+        } else if (key == "crop_left_overscan") {
+            int enabled = 0;
+            in >> enabled;
+            m_cropLeftOverscan = enabled != 0;
+        } else if (key == "hide_native_raster_artifacts") {
+            int enabled = 0;
+            in >> enabled;
+            m_hideNativeRasterArtifacts = enabled != 0;
+        } else if (key == "show_fps") {
+            int enabled = 0;
+            in >> enabled;
+            m_showFps = enabled != 0;
         } else if ((key == "p1key" || key == "p2key" || key == "p1pad" || key == "hotkey") && (in >> index >> value)) {
             if (key == "p1key" && index >= 0 && index < int(m_p1Keys.size()))
                 m_p1Keys[index] = static_cast<SDL_Scancode>(value);
             else if (key == "p2key" && index >= 0 && index < int(m_p2Keys.size()))
                 m_p2Keys[index] = static_cast<SDL_Scancode>(value);
             else if (key == "p1pad" && index >= 0 && index < int(m_p1PadButtons.size()))
-                m_p1PadButtons[index] = static_cast<SDL_GameControllerButton>(value);
+                m_p1PadButtons[index] = static_cast<SDL_GamepadButton>(value);
             else if (key == "hotkey" && configVersion >= 2) {
                 if (configVersion >= 4) {
                     if (index >= 0 && index < 14)
@@ -513,9 +573,12 @@ void Frontend::saveFrontendConfig() const
 {
     std::ofstream out("nesultimate.cfg", std::ios::out | std::ios::trunc);
     if (!out) return;
-    out << "config_version 5\n";
+    out << "config_version 8\n";
     out << "volume " << m_masterVolume << '\n';
     out << "timing_override " << int(m_timingOverride) << '\n';
+    out << "crop_left_overscan " << (m_cropLeftOverscan ? 1 : 0) << '\n';
+    out << "hide_native_raster_artifacts " << (m_hideNativeRasterArtifacts ? 1 : 0) << '\n';
+    out << "show_fps " << (m_showFps ? 1 : 0) << '\n';
     for (int i = 0; i < int(m_p1Keys.size()); ++i) out << "p1key " << i << ' ' << int(m_p1Keys[i]) << '\n';
     for (int i = 0; i < int(m_p2Keys.size()); ++i) out << "p2key " << i << ' ' << int(m_p2Keys[i]) << '\n';
     for (int i = 0; i < int(m_p1PadButtons.size()); ++i) out << "p1pad " << i << ' ' << int(m_p1PadButtons[i]) << '\n';
@@ -544,19 +607,19 @@ bool Frontend::handleBindingCapture(const SDL_Event& e)
 {
     if (m_captureTarget == CaptureTarget::None) return false;
 
-    if (e.type == SDL_KEYDOWN) {
-        if (e.key.keysym.sym == SDLK_ESCAPE) {
+    if (e.type == SDL_EVENT_KEY_DOWN) {
+        if (e.key.key == SDLK_ESCAPE) {
             m_captureTarget = CaptureTarget::None;
             m_captureIndex = -1;
             return true;
         }
         if (m_captureIndex >= 0) {
             if (m_captureTarget == CaptureTarget::P1Keyboard)
-                m_p1Keys[m_captureIndex] = e.key.keysym.scancode;
+                m_p1Keys[m_captureIndex] = e.key.scancode;
             else if (m_captureTarget == CaptureTarget::P2Keyboard)
-                m_p2Keys[m_captureIndex] = e.key.keysym.scancode;
+                m_p2Keys[m_captureIndex] = e.key.scancode;
             else if (m_captureTarget == CaptureTarget::Hotkey)
-                m_hotkeys[m_captureIndex] = e.key.keysym.sym;
+                m_hotkeys[m_captureIndex] = e.key.key;
             else
                 return false;
             saveFrontendConfig();
@@ -566,8 +629,8 @@ bool Frontend::handleBindingCapture(const SDL_Event& e)
         }
     }
 
-    if (e.type == SDL_CONTROLLERBUTTONDOWN && m_captureTarget == CaptureTarget::P1Gamepad && m_captureIndex >= 0) {
-        m_p1PadButtons[m_captureIndex] = static_cast<SDL_GameControllerButton>(e.cbutton.button);
+    if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && m_captureTarget == CaptureTarget::P1Gamepad && m_captureIndex >= 0) {
+        m_p1PadButtons[m_captureIndex] = static_cast<SDL_GamepadButton>(e.gbutton.button);
         saveFrontendConfig();
         m_captureTarget = CaptureTarget::None;
         m_captureIndex = -1;
@@ -583,7 +646,7 @@ bool Frontend::handleHotkey(SDL_Keycode key)
     if (match(HotkeyAction::Pause)) { m_paused = !m_paused; return true; }
     if (match(HotkeyAction::StepInstruction)) { if (m_cart.isLoaded()) stepInstruction(); return true; }
     if (match(HotkeyAction::Reset)) {
-        if (m_cart.isLoaded()) { m_bus.reset(); m_statusMessage = "System reset."; m_statusIsError = false; }
+        if (m_cart.isLoaded()) { if (m_movieRecording) stopMovieRecording(); m_bus.reset(); clearSessionHistory(); m_statusMessage = "System reset."; m_statusIsError = false; }
         return true;
     }
     if (match(HotkeyAction::Scale1)) { m_scale = 1; return true; }
@@ -602,10 +665,10 @@ bool Frontend::handleHotkey(SDL_Keycode key)
 
 void Frontend::updateControllers()
 {
-    const Uint8* keys = SDL_GetKeyboardState(nullptr);
+    const bool* keys = SDL_GetKeyboardState(nullptr);
     auto pressed = [&](const std::array<SDL_Scancode, 8>& map, NesButton button) {
         const SDL_Scancode sc = map[static_cast<int>(button)];
-        return sc != SDL_SCANCODE_UNKNOWN && keys[sc] != 0;
+        return sc != SDL_SCANCODE_UNKNOWN && keys[sc];
     };
     auto pack = [](bool a, bool b, bool sel, bool st, bool u, bool d, bool l, bool r) -> uint8_t {
         uint8_t v = 0;
@@ -623,9 +686,9 @@ void Frontend::updateControllers()
 
     if (m_gamepad) {
         for (int i = 0; i < 8; ++i)
-            p1[i] = p1[i] || SDL_GameControllerGetButton(m_gamepad, m_p1PadButtons[i]);
-        Sint16 lx = SDL_GameControllerGetAxis(m_gamepad, SDL_CONTROLLER_AXIS_LEFTX);
-        Sint16 ly = SDL_GameControllerGetAxis(m_gamepad, SDL_CONTROLLER_AXIS_LEFTY);
+            p1[i] = p1[i] || SDL_GetGamepadButton(m_gamepad, m_p1PadButtons[i]);
+        Sint16 lx = SDL_GetGamepadAxis(m_gamepad, SDL_GAMEPAD_AXIS_LEFTX);
+        Sint16 ly = SDL_GetGamepadAxis(m_gamepad, SDL_GAMEPAD_AXIS_LEFTY);
         const Sint16 dead = 16000;
         if (ly < -dead) p1[4] = true;
         if (ly > dead) p1[5] = true;
@@ -633,25 +696,52 @@ void Frontend::updateControllers()
         if (lx > dead) p1[7] = true;
     }
 
-    m_bus.setController1(pack(p1[0], p1[1], p1[2], p1[3], p1[4], p1[5], p1[6], p1[7]));
-    m_bus.setController2(pack(p2[0], p2[1], p2[2], p2[3], p2[4], p2[5], p2[6], p2[7]));
+    uint8_t state1 = pack(p1[0], p1[1], p1[2], p1[3], p1[4], p1[5], p1[6], p1[7]);
+    uint8_t state2 = pack(p2[0], p2[1], p2[2], p2[3], p2[4], p2[5], p2[6], p2[7]);
+
+    const auto key = [&](SDL_Scancode sc) { return keys[sc]; };
+    const uint8_t state3 = pack(key(SDL_SCANCODE_N), key(SDL_SCANCODE_M), key(SDL_SCANCODE_COMMA), key(SDL_SCANCODE_PERIOD),
+        key(SDL_SCANCODE_W), key(SDL_SCANCODE_S), key(SDL_SCANCODE_A), key(SDL_SCANCODE_D));
+    const uint8_t state4 = pack(key(SDL_SCANCODE_KP_1), key(SDL_SCANCODE_KP_2), key(SDL_SCANCODE_KP_4), key(SDL_SCANCODE_KP_5),
+        key(SDL_SCANCODE_UP), key(SDL_SCANCODE_DOWN), key(SDL_SCANCODE_LEFT), key(SDL_SCANCODE_RIGHT));
+    m_bus.setController1(state1);
+    m_bus.setController2(state2);
+    m_bus.setController3(state3);
+    m_bus.setController4(state4);
+    m_bus.setFourScoreEnabled(m_fourScoreEnabled);
+
+    float mouseX = 0.0f, mouseY = 0.0f;
+    const SDL_MouseButtonFlags mouse = SDL_GetMouseState(&mouseX, &mouseY);
+    const int mx = static_cast<int>(mouseX);
+    const int my = static_cast<int>(mouseY);
+    const SDL_Rect dst = gameDestinationRect();
+    int zx = -1, zy = -1;
+    if (dst.w > 0 && dst.h > 0 && mx >= dst.x && mx < dst.x + dst.w && my >= dst.y && my < dst.y + dst.h) {
+        zx = (mx - dst.x) * 256 / dst.w;
+        zy = (my - dst.y) * 240 / dst.h;
+    }
+    m_bus.setZapper(m_zapperEnabled, zx, zy, (mouse & SDL_BUTTON_LMASK) != 0);
 }
 
 void Frontend::processEvents()
 {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
-        ImGui_ImplSDL2_ProcessEvent(&e);
-        if (e.type == SDL_QUIT) { m_running = false; continue; }
-        if (e.type == SDL_CONTROLLERDEVICEADDED && !m_gamepad) openGamepad();
-        if (e.type == SDL_CONTROLLERDEVICEREMOVED && m_gamepad) {
-            SDL_GameControllerClose(m_gamepad);
+        ImGui_ImplSDL3_ProcessEvent(&e);
+        if (e.type == SDL_EVENT_QUIT) { m_running = false; continue; }
+        if (e.type == SDL_EVENT_GAMEPAD_ADDED && !m_gamepad) openGamepad();
+        if (e.type == SDL_EVENT_GAMEPAD_REMOVED && m_gamepad) {
+            SDL_CloseGamepad(m_gamepad);
             m_gamepad = nullptr;
         }
+        if (e.type == SDL_EVENT_DROP_FILE && e.drop.data) {
+            loadRomPath(e.drop.data);
+            continue;
+        }
         if (handleBindingCapture(e)) continue;
-        if (e.type == SDL_KEYDOWN && !e.key.repeat) {
+        if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) {
             if (ImGui::GetIO().WantCaptureKeyboard) continue;
-            handleHotkey(e.key.keysym.sym);
+            handleHotkey(e.key.key);
         }
     }
 }
@@ -673,13 +763,23 @@ void Frontend::drawUI()
     }
     ImGui::SameLine();
     if (ImGui::Button("Reset") && m_cart.isLoaded()) {
+        if (m_movieRecording) stopMovieRecording();
         m_bus.reset();
+        clearSessionHistory();
         m_statusMessage = "System reset.";
         m_statusIsError = false;
     }
     ImGui::SameLine();
     if (ImGui::Button(m_paused ? "Resume" : "Pause"))
         m_paused = !m_paused;
+
+    ImGui::BeginDisabled(!m_cart.isLoaded());
+    if (!m_movieRecording) {
+        if (ImGui::Button("Start Recording")) startMovieRecording();
+    } else {
+        if (ImGui::Button("Stop Recording")) stopMovieRecording();
+    }
+    ImGui::EndDisabled();
 
     ImGui::SameLine();
     ImGui::BeginDisabled(!m_cart.isLoaded());
@@ -761,6 +861,30 @@ void Frontend::drawUI()
             }
             ImGui::EndMenu();
         }
+        if (ImGui::BeginMenu("Video")) {
+            if (ImGui::MenuItem("Crop left 8-pixel overscan", nullptr, m_cropLeftOverscan)) {
+                m_cropLeftOverscan = !m_cropLeftOverscan;
+                saveFrontendConfig();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Presentation-only crop of the NES leftmost 8 pixels.\nDisable this to see the full hardware 256x240 framebuffer.");
+            ImGui::Separator();
+            if (ImGui::MenuItem("Hide native raster artifacts", nullptr, m_hideNativeRasterArtifacts)) {
+                m_hideNativeRasterArtifacts = !m_hideNativeRasterArtifacts;
+                saveFrontendConfig();
+                updateTexture();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Presentation-only cleanup for known game-side raster artifacts.\nCurrently masks the SMB3 status-bar split glitch; PPU output remains unchanged.");
+            ImGui::Separator();
+            if (ImGui::MenuItem("Show FPS", nullptr, m_showFps)) {
+                m_showFps = !m_showFps;
+                saveFrontendConfig();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Show the current presentation frame rate in the emulator window.");
+            ImGui::EndMenu();
+        }
         ImGui::Separator();
         char fullscreenLabel[96];
         std::snprintf(fullscreenLabel, sizeof(fullscreenLabel), "Borderless Fullscreen    [%s]",
@@ -781,6 +905,16 @@ void Frontend::drawUI()
     }
     if (ImGui::IsItemDeactivatedAfterEdit())
         saveFrontendConfig();
+
+    if (m_showFps) {
+        ImGui::SameLine();
+        if (m_cart.isLoaded() && !m_paused)
+            ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
+        else if (m_cart.isLoaded())
+            ImGui::TextUnformatted("FPS: PAUSED");
+        else
+            ImGui::TextUnformatted("FPS: --");
+    }
 
     ImGui::Separator();
 
@@ -864,6 +998,9 @@ void Frontend::drawUI()
                 static_cast<unsigned long long>(m_apu.audioOverrunCount()));
         ImGui::Text("Slot   : %d", m_saveSlot);
         ImGui::Text("Aspect : %s", m_ntscAspect ? "NTSC 8:7" : "Square");
+        ImGui::Text("Left overscan crop: %s", m_cropLeftOverscan ? "8 px" : "OFF (full 256 px)");
+        ImGui::Text("Raster cleanup: %s", m_hideNativeRasterArtifacts ? "ON" : "OFF");
+        ImGui::Text("FPS display: %s", m_showFps ? "ON" : "OFF");
         ImGui::Text("Volume : %.0f%%", m_masterVolume * 100.0f);
         ImGui::Text("Fullscreen: borderless fit-to-display (F11 by default)");
 
@@ -897,7 +1034,7 @@ void Frontend::drawControllerConfig()
         std::string p1 = std::string(SDL_GetScancodeName(m_p1Keys[i])) + "##p1key" + std::to_string(i);
         if (ImGui::Button(p1.c_str(), ImVec2(120, 0))) { m_captureTarget = CaptureTarget::P1Keyboard; m_captureIndex = i; }
         ImGui::NextColumn();
-        const char* padName = SDL_GameControllerGetStringForButton(m_p1PadButtons[i]);
+        const char* padName = SDL_GetGamepadStringForButton(m_p1PadButtons[i]);
         std::string gp = std::string(padName ? padName : "Unknown") + "##p1pad" + std::to_string(i);
         if (ImGui::Button(gp.c_str(), ImVec2(120, 0))) { m_captureTarget = CaptureTarget::P1Gamepad; m_captureIndex = i; }
         ImGui::NextColumn();
@@ -913,9 +1050,9 @@ void Frontend::drawControllerConfig()
             SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT };
         m_p2Keys = { SDL_SCANCODE_H, SDL_SCANCODE_G, SDL_SCANCODE_T, SDL_SCANCODE_Y,
             SDL_SCANCODE_I, SDL_SCANCODE_K, SDL_SCANCODE_J, SDL_SCANCODE_L };
-        m_p1PadButtons = { SDL_CONTROLLER_BUTTON_A, SDL_CONTROLLER_BUTTON_B, SDL_CONTROLLER_BUTTON_BACK,
-            SDL_CONTROLLER_BUTTON_START, SDL_CONTROLLER_BUTTON_DPAD_UP, SDL_CONTROLLER_BUTTON_DPAD_DOWN,
-            SDL_CONTROLLER_BUTTON_DPAD_LEFT, SDL_CONTROLLER_BUTTON_DPAD_RIGHT };
+        m_p1PadButtons = { SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_EAST, SDL_GAMEPAD_BUTTON_BACK,
+            SDL_GAMEPAD_BUTTON_START, SDL_GAMEPAD_BUTTON_DPAD_UP, SDL_GAMEPAD_BUTTON_DPAD_DOWN,
+            SDL_GAMEPAD_BUTTON_DPAD_LEFT, SDL_GAMEPAD_BUTTON_DPAD_RIGHT };
         saveFrontendConfig();
     }
     ImGui::End();
@@ -928,6 +1065,16 @@ void Frontend::drawSettings()
         "Save State", "Load State", "Next Save Slot", "Previous Save Slot", "Toggle Aspect", "Chip Mod", "Fullscreen",
         "Quit" };
     ImGui::Begin("Settings - Hotkeys", &m_settingsOpen, ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::TextUnformatted("Input devices");
+    if (ImGui::Checkbox("Four Score (4 controllers)", &m_fourScoreEnabled) && m_fourScoreEnabled)
+        m_zapperEnabled = false;
+    if (ImGui::Checkbox("Zapper on port 2", &m_zapperEnabled) && m_zapperEnabled)
+        m_fourScoreEnabled = false;
+    if (m_fourScoreEnabled)
+        ImGui::TextDisabled("P3: N/M ,/. WASD   P4: keypad 1/2/4/5 + arrows");
+    if (m_zapperEnabled)
+        ImGui::TextDisabled("Aim with mouse over game image; left mouse = trigger.");
+    ImGui::Separator();
     ImGui::Text("Every emulator hotkey can be reassigned. Click one and press the new key.");
     ImGui::Separator();
     for (int i = 0; i < int(m_hotkeys.size()); ++i) {
@@ -946,26 +1093,19 @@ void Frontend::drawSettings()
     ImGui::End();
 }
 
-bool Frontend::openRomDialog()
+bool Frontend::loadRomPath(const std::string& path)
 {
-#ifdef _WIN32
-    char filename[MAX_PATH] = {};
-    OPENFILENAMEA ofn = {};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = nullptr;
-    ofn.lpstrFilter = "NES ROMs / Archives (*.nes;*.nes2;*.fds;*.bin;*.rom;*.zip;*.7z;*.rar;*.tar;*.gz)\0*.nes;*.nes2;*.fds;*.bin;*.rom;*.zip;*.7z;*.rar;*.tar;*.tgz;*.gz;*.bz2;*.xz\0NES / FDS Images (*.nes;*.nes2;*.fds;*.bin;*.rom)\0*.nes;*.nes2;*.fds;*.bin;*.rom\0Archives (*.zip;*.7z;*.rar;*.tar;*.gz)\0*.zip;*.7z;*.rar;*.tar;*.tgz;*.gz;*.bz2;*.xz\0All Files (*.*)\0*.*\0";
-    ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    ofn.lpstrTitle = "Select NES ROM, FDS Image, or Archive";
-
-    if (!GetOpenFileNameA(&ofn))
-        return false;
-
+    if (path.empty()) return false;
+    if (m_movieRecording) stopMovieRecording();
     m_cart.saveBattery();
 
-    if (!isArchivePath(filename) && m_cart.loadFromFile(filename)) {
+#ifdef _WIN32
+    if (!isArchivePath(path) && m_cart.loadFromFile(path)) {
+#else
+    if (m_cart.loadFromFile(path)) {
+#endif
         applyTimingOverride(true);
+        clearSessionHistory();
         reloadCheatsForLoadedRom();
         m_statusMessage = "Loaded: " + m_cart.fileName();
         m_statusIsError = false;
@@ -973,8 +1113,9 @@ bool Frontend::openRomDialog()
         return true;
     }
 
+#ifdef _WIN32
     std::vector<std::string> entries;
-    if (listArchiveEntries(filename, entries)) {
+    if (listArchiveEntries(path, entries)) {
         std::vector<std::size_t> order;
         order.reserve(entries.size());
         for (std::size_t i = 0; i < entries.size(); ++i)
@@ -989,12 +1130,13 @@ bool Frontend::openRomDialog()
 
         for (std::size_t index : order) {
             std::vector<uint8_t> image;
-            if (!extractArchiveEntry(filename, entries[index], image)) continue;
+            if (!extractArchiveEntry(path, entries[index], image)) continue;
             const bool namedMedia = hasNesExtension(entries[index]) || hasFdsExtension(entries[index]);
             if (!namedMedia && !hasNesSignature(image) && !hasHeaderedFdsSignature(image)) continue;
-            if (!m_cart.loadFromMemory(image, entries[index], filename)) continue;
+            if (!m_cart.loadFromMemory(image, entries[index], path)) continue;
 
             applyTimingOverride(true);
+            clearSessionHistory();
             reloadCheatsForLoadedRom();
             m_statusMessage = "Loaded from archive: " + m_cart.fileName();
             m_statusIsError = false;
@@ -1002,22 +1144,47 @@ bool Frontend::openRomDialog()
             return true;
         }
 
-        m_statusMessage = "Archive opened, but it contains no loadable iNES/NES 2.0 or FDS image.";
+        if (!m_cart.lastError().empty())
+            m_statusMessage = "Archive ROM rejected: " + m_cart.lastError();
+        else
+            m_statusMessage = "Archive opened, but it contains no loadable iNES/NES 2.0 or FDS image.";
         m_statusIsError = true;
         return false;
     }
 
-    std::string failedPath = lowerCopy(filename);
-    if (endsWithI(failedPath, ".fds"))
+    if (endsWithI(path, ".fds"))
         m_statusMessage = "Failed to load FDS image. Place a valid 8 KiB disksys.rom beside the image/archive.";
-    else if (isArchivePath(failedPath))
+    else if (isArchivePath(path))
         m_statusMessage = "Failed to open archive. The Windows archive backend may not support this file or it may be encrypted/corrupt.";
+    else if (!m_cart.lastError().empty())
+        m_statusMessage = m_cart.lastError();
     else
         m_statusMessage = "Failed to load ROM/archive (invalid or unsupported image).";
+#else
+    if (!m_cart.lastError().empty()) m_statusMessage = m_cart.lastError();
+    else m_statusMessage = "Failed to load ROM/FDS image (invalid or unsupported image).";
+#endif
     m_statusIsError = true;
     return false;
+}
+
+bool Frontend::openRomDialog()
+{
+#ifdef _WIN32
+    char filename[MAX_PATH] = {};
+    OPENFILENAMEA ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = nullptr;
+    ofn.lpstrFilter = "NES ROMs / Archives (*.nes;*.nes2;*.fds;*.bin;*.rom;*.zip;*.7z;*.rar;*.tar;*.gz)\0*.nes;*.nes2;*.fds;*.bin;*.rom;*.zip;*.7z;*.rar;*.tar;*.tgz;*.gz;*.bz2;*.xz\0NES / FDS Images (*.nes;*.nes2;*.fds;*.bin;*.rom)\0*.nes;*.nes2;*.fds;*.bin;*.rom\0Archives (*.zip;*.7z;*.rar;*.tar;*.gz)\0*.zip;*.7z;*.rar;*.tar;*.tgz;*.gz;*.bz2;*.xz\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFile = filename;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.lpstrTitle = "Select NES ROM, FDS Image, or Archive";
+
+    if (!GetOpenFileNameA(&ofn)) return false;
+    return loadRomPath(filename);
 #else
-    m_statusMessage = "Native file dialog only on Windows.";
+    m_statusMessage = "Native file dialog only on Windows; drag-and-drop or pass a ROM path on the command line.";
     m_statusIsError = true;
     return false;
 #endif
@@ -1128,7 +1295,7 @@ std::string Frontend::statePath(int slot) const
 }
 
 namespace {
-constexpr uint8_t kSaveStateVersion = 74;
+constexpr uint8_t kSaveStateVersion = 82;
 
 void appendU32(std::vector<uint8_t>& out, uint32_t value)
 {
@@ -1188,31 +1355,16 @@ bool Frontend::saveStateToPath(const std::string& path)
         return false;
     }
 
-    std::vector<uint8_t> payload;
-    m_cpu.saveState(payload);
-    m_ppu.saveState(payload);
-    m_bus.saveState(payload);
-    m_apu.saveState(payload);
-    m_cart.saveState(payload);
-
     std::vector<uint8_t> buf;
-    buf.reserve(21 + payload.size());
-    buf.push_back('N'); buf.push_back('E'); buf.push_back('S'); buf.push_back('U');
-    buf.push_back(kSaveStateVersion);
-    appendU64(buf, m_cart.romIdentity());
-    appendU32(buf, static_cast<uint32_t>(payload.size()));
-    appendU32(buf, stateChecksum(payload.data(), payload.size()));
-    buf.insert(buf.end(), payload.begin(), payload.end());
-
-    std::ofstream f(path, std::ios::binary);
-    if (!f) {
-        m_statusMessage = "Failed to write save state.";
+    if (!captureStateBlob(buf)) {
+        m_statusMessage = "Failed to capture save state.";
         m_statusIsError = true;
         return false;
     }
-    f.write(reinterpret_cast<const char*>(buf.data()), (std::streamsize)buf.size());
-    if (!f) {
-        m_statusMessage = "Failed while writing save state.";
+
+    std::string writeError;
+    if (!nes::writeFileAtomically(path, buf.data(), buf.size(), true, &writeError)) {
+        m_statusMessage = "Failed to write save state: " + writeError;
         m_statusIsError = true;
         return false;
     }
@@ -1260,38 +1412,65 @@ bool Frontend::loadStateFromPath(const std::string& path)
         return false;
     }
 
+    std::string loadError;
+    if (!restoreStateBlob(buf, loadError)) {
+        m_statusMessage = loadError;
+        m_statusIsError = true;
+        return false;
+    }
+    clearSessionHistory();
+    m_statusMessage = "State loaded: " + path;
+    m_statusIsError = false;
+    return true;
+}
+
+bool Frontend::captureStateBlob(std::vector<uint8_t>& out) const
+{
+    if (!m_cart.isLoaded())
+        return false;
+
+    std::vector<uint8_t> payload;
+    m_cpu.saveState(payload);
+    m_ppu.saveState(payload);
+    m_bus.saveState(payload);
+    m_apu.saveState(payload);
+    m_cart.saveState(payload);
+
+    out.clear();
+    out.reserve(21 + payload.size());
+    out.push_back('N'); out.push_back('E'); out.push_back('S'); out.push_back('U');
+    out.push_back(kSaveStateVersion);
+    appendU64(out, m_cart.romIdentity());
+    appendU32(out, static_cast<uint32_t>(payload.size()));
+    appendU32(out, stateChecksum(payload.data(), payload.size()));
+    out.insert(out.end(), payload.begin(), payload.end());
+    return true;
+}
+
+bool Frontend::restoreStateBlob(const std::vector<uint8_t>& buf, std::string& error)
+{
     constexpr size_t kHeaderSize = 21;
     if (buf.size() < kHeaderSize || buf[0] != 'N' || buf[1] != 'E' || buf[2] != 'S' || buf[3] != 'U') {
-        m_statusMessage = "Invalid save state file.";
-        m_statusIsError = true;
+        error = "Invalid save state data.";
         return false;
     }
-
     if (buf[4] != kSaveStateVersion) {
-        m_statusMessage = "Unsupported save state version (create a new state with this build).";
-        m_statusIsError = true;
+        error = "Unsupported save state version (create a new state with this build).";
         return false;
     }
-
-    const uint64_t savedRomIdentity = readU64(buf.data() + 5);
-    if (savedRomIdentity != m_cart.romIdentity()) {
-        m_statusMessage = "Save state belongs to a different ROM.";
-        m_statusIsError = true;
+    if (readU64(buf.data() + 5) != m_cart.romIdentity()) {
+        error = "Save state belongs to a different ROM.";
         return false;
     }
-
     const uint32_t payloadSize = readU32(buf.data() + 13);
     const uint32_t savedChecksum = readU32(buf.data() + 17);
     if (payloadSize != buf.size() - kHeaderSize) {
-        m_statusMessage = "Save state is truncated or has an invalid size.";
-        m_statusIsError = true;
+        error = "Save state is truncated or has an invalid size.";
         return false;
     }
-
     const uint8_t* payload = buf.data() + kHeaderSize;
     if (stateChecksum(payload, payloadSize) != savedChecksum) {
-        m_statusMessage = "Save state checksum failed (file is corrupt).";
-        m_statusIsError = true;
+        error = "Save state checksum failed (data is corrupt).";
         return false;
     }
 
@@ -1308,23 +1487,104 @@ bool Frontend::loadStateFromPath(const std::string& path)
             m_bus.loadState(cursor, finish) && m_apu.loadState(cursor, finish) &&
             m_cart.loadState(cursor, finish) && cursor == finish;
     };
-
     if (!loadPayload(payload, payload + payloadSize)) {
         (void)loadPayload(rollback.data(), rollback.data() + rollback.size());
-        m_statusMessage = "Save state load failed (corrupt or wrong ROM); current state was preserved.";
-        m_statusIsError = true;
+        error = "Save state load failed; current state was preserved.";
         return false;
     }
-    m_statusMessage = "State loaded: " + path;
-    m_statusIsError = false;
+    error.clear();
     return true;
+}
+
+void Frontend::clearSessionHistory()
+{
+    m_movieRecording = false;
+    m_movieInitialState.clear();
+    m_movieFrames.clear();
+    m_movieOutputPath.clear();
+}
+
+std::string Frontend::moviePath() const
+{
+    std::filesystem::path base;
+    if (const char* rawBase = SDL_GetBasePath()) {
+        base = rawBase;
+    } else {
+        base = std::filesystem::current_path();
+    }
+
+    std::error_code ec;
+    const std::filesystem::path recordings = base / "recordings";
+    std::filesystem::create_directories(recordings, ec);
+
+    std::string stem = std::filesystem::path(m_cart.fileName()).stem().string();
+    if (stem.empty()) stem = "recording";
+    for (char& ch : stem) {
+        const unsigned char c = static_cast<unsigned char>(ch);
+        if (!(std::isalnum(c) || ch == '-' || ch == '_' || ch == ' ')) ch = '_';
+    }
+
+    std::time_t now = std::time(nullptr);
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &now);
+#else
+    localtime_r(&now, &tm);
+#endif
+    char stamp[32]{};
+    std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &tm);
+    std::filesystem::path candidate = recordings / (stem + "_" + stamp + ".nmovie");
+    for (unsigned suffix = 2; std::filesystem::exists(candidate); ++suffix)
+        candidate = recordings / (stem + "_" + stamp + "_" + std::to_string(suffix) + ".nmovie");
+    return candidate.string();
+}
+
+void Frontend::startMovieRecording()
+{
+    if (!m_cart.isLoaded()) return;
+    m_movieFrames.clear();
+    m_movieOutputPath = moviePath();
+    if (!captureStateBlob(m_movieInitialState)) {
+        m_statusMessage = "Could not capture movie start state.";
+        m_statusIsError = true;
+        return;
+    }
+    m_movieRecording = true;
+    m_statusMessage = "Input recording started: " + m_movieOutputPath;
+    m_statusIsError = false;
+}
+
+void Frontend::stopMovieRecording()
+{
+    if (!m_movieRecording) return;
+    m_movieRecording = false;
+    std::vector<uint8_t> out;
+    out.insert(out.end(), {'N','E','S','M'});
+    out.push_back(1);
+    appendU64(out, m_cart.romIdentity());
+    appendU32(out, static_cast<uint32_t>(m_movieInitialState.size()));
+    appendU32(out, static_cast<uint32_t>(m_movieFrames.size()));
+    out.insert(out.end(), m_movieInitialState.begin(), m_movieInitialState.end());
+    for (const MovieFrame& frame : m_movieFrames) {
+        out.push_back(frame.p1);
+        out.push_back(frame.p2);
+    }
+    std::string error;
+    const std::string path = m_movieOutputPath.empty() ? moviePath() : m_movieOutputPath;
+    if (!nes::writeFileAtomically(path, out.data(), out.size(), true, &error)) {
+        m_statusMessage = "Input recording save failed: " + error;
+        m_statusIsError = true;
+        return;
+    }
+    m_statusMessage = "Input recording saved: " + path;
+    m_statusIsError = false;
 }
 
 void Frontend::toggleFullscreen()
 {
     m_fullscreen = !m_fullscreen;
-    SDL_SetWindowFullscreen(m_window, m_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
-    SDL_ShowCursor(m_fullscreen ? SDL_DISABLE : SDL_ENABLE);
+    SDL_SetWindowFullscreen(m_window, m_fullscreen);
+    if (m_fullscreen) SDL_HideCursor(); else SDL_ShowCursor();
     m_statusMessage = m_fullscreen
         ? "Borderless fullscreen ON - press the fullscreen hotkey to return."
         : "Borderless fullscreen OFF";

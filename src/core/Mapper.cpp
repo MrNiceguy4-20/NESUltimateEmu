@@ -1,6 +1,7 @@
 #include "Mapper.hpp"
 #include "MapperFamilies.hpp"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -54,6 +55,152 @@ public:
     }
 
     bool implementationSupported() const override { return false; }
+};
+
+class Mapper128 final : public Mapper {
+public:
+    explicit Mapper128(const MapperConfig& config) : Mapper(config) { reset(true); }
+
+    bool cpuMapRead(uint16_t addr, uint32_t& mapped) const override
+    {
+        if (addr < 0x8000 || m_config.prgRomSize == 0) return false;
+        const std::size_t outer = std::size_t(m_outerAddress >> 2);
+        const std::size_t bank = (addr < 0xC000) ? (outer | (m_latch & 0x07u)) : (outer | 0x07u);
+        mapped = mapBank(bank, 0x4000, m_config.prgRomSize, addr & 0x3FFFu);
+        return true;
+    }
+
+    bool cpuWrite(uint16_t addr, uint8_t data, uint64_t) override
+    {
+        if (addr < 0x8000) return false;
+
+        if (m_outerAddress < 0xF000u) m_outerAddress = addr;
+        m_latch = data;
+        updateMirror();
+        return true;
+    }
+
+    bool ppuMapRead(uint16_t addr, uint32_t& mapped) override
+    {
+        if (addr >= 0x2000) return false;
+        const std::size_t size = m_config.chrRomSize ? m_config.chrRomSize : m_config.chrRamSize;
+        if (!size) return false;
+        mapped = uint32_t(addr % size);
+        return true;
+    }
+
+    bool ppuMapWrite(uint16_t addr, uint32_t& mapped) override
+    {
+        if (m_config.chrRomSize != 0 || m_config.chrRamSize == 0 || addr >= 0x2000) return false;
+        mapped = uint32_t(addr % m_config.chrRamSize);
+        return true;
+    }
+
+    void reset(bool hard) override
+    {
+        if (!hard) return;
+        m_outerAddress = 0;
+        m_latch = 0;
+        updateMirror();
+    }
+
+    void saveState(std::vector<uint8_t>& out) const override
+    {
+        put8(out, uint8_t(m_outerAddress));
+        put8(out, uint8_t(m_outerAddress >> 8));
+        put8(out, m_latch);
+    }
+
+    bool loadState(const uint8_t*& p, const uint8_t* end) override
+    {
+        uint8_t lo=0, hi=0;
+        if (!get8(p,end,lo) || !get8(p,end,hi) || !get8(p,end,m_latch)) return false;
+        m_outerAddress = uint16_t(lo) | (uint16_t(hi) << 8);
+        updateMirror();
+        return true;
+    }
+
+private:
+    void updateMirror()
+    {
+
+        m_mirror = (m_outerAddress & 0x0002u) ? Mirror::Horizontal : Mirror::Vertical;
+    }
+
+    uint16_t m_outerAddress = 0;
+    uint8_t m_latch = 0;
+};
+
+class Mapper186 final : public Mapper {
+public:
+    explicit Mapper186(const MapperConfig& config) : Mapper(config) { reset(true); }
+
+    bool cpuReadRegister(uint16_t addr, uint8_t& data) override
+    {
+        if (addr == 0x4200 || addr == 0x4201 || addr == 0x4203) { data = 0x00; return true; }
+        if (addr == 0x4202) { data = 0x40; return true; }
+        if (addr >= 0x4204 && addr <= 0x43FF) { data = 0xFF; return true; }
+        if (addr >= 0x4400 && addr <= 0x4EFF) { data = m_internalRam[addr - 0x4400]; return true; }
+        return false;
+    }
+
+    bool cpuMapRead(uint16_t addr, uint32_t& mapped) const override
+    {
+        if (addr < 0x8000 || m_config.prgRomSize == 0) return false;
+        const std::size_t bank = addr < 0xC000 ? m_prgBank : 0;
+        mapped = mapBank(bank, 0x4000, m_config.prgRomSize, addr & 0x3FFF);
+        return true;
+    }
+
+    bool cpuWrite(uint16_t addr, uint8_t data, uint64_t) override
+    {
+        if (addr >= 0x4200 && addr <= 0x43FF) {
+            if (addr & 1) m_prgBank = data;
+            else m_ramBank = uint8_t(data >> 6);
+            return true;
+        }
+        if (addr >= 0x4400 && addr <= 0x4EFF) {
+            m_internalRam[addr - 0x4400] = data;
+            return true;
+        }
+        return false;
+    }
+
+    bool mapPrgRam(uint16_t addr, uint32_t& mapped, bool) const override
+    {
+        if (addr < 0x6000 || addr > 0x7FFF || m_config.prgRamSize == 0) return false;
+        mapped = mapBank(m_ramBank, 0x2000, m_config.prgRamSize, addr - 0x6000);
+        return true;
+    }
+
+    void reset(bool hard) override
+    {
+        if (!hard) return;
+        m_prgBank = 0;
+        m_ramBank = 0;
+        m_internalRam.fill(0);
+    }
+
+    void saveState(std::vector<uint8_t>& out) const override
+    {
+        put8(out, m_prgBank);
+        put8(out, m_ramBank);
+        out.insert(out.end(), m_internalRam.begin(), m_internalRam.end());
+    }
+
+    bool loadState(const uint8_t*& p, const uint8_t* end) override
+    {
+        if (!get8(p, end, m_prgBank) || !get8(p, end, m_ramBank)) return false;
+        if (end - p < static_cast<std::ptrdiff_t>(m_internalRam.size())) return false;
+        std::memcpy(m_internalRam.data(), p, m_internalRam.size());
+        p += m_internalRam.size();
+        return true;
+    }
+
+private:
+    uint8_t m_prgBank = 0;
+    uint8_t m_ramBank = 0;
+    std::array<uint8_t, 0xB00> m_internalRam{};
 };
 
 class Mapper9 final : public Mapper {
@@ -473,9 +620,9 @@ private:
             if (data == 0x30) {
                 const uint32_t base = phys & ~uint32_t(0x0FFF);
                 const uint32_t limit = std::min<uint32_t>(base + 0x1000u, uint32_t(m_flash.size()));
-                std::fill(m_flash.begin() + base, m_flash.begin() + limit, 0xFF);
+                std::fill(m_flash.begin() + base, m_flash.begin() + limit, uint8_t{0xFF});
             } else if (chipAddr == 0x5555 && data == 0x10) {
-                std::fill(m_flash.begin(), m_flash.end(), 0xFF);
+                std::fill(m_flash.begin(), m_flash.end(), uint8_t{0xFF});
             }
             m_flashState = 0;
             break;
@@ -1223,9 +1370,10 @@ private:
         case 5: m_flashState = (a == 0x2AAA && data == 0x55) ? 6 : 0; break;
         case 6:
             if (data == 0x30) {
-                const uint32_t base = phys & ~uint32_t(0x0FFF);
-                std::fill(m_flash.begin()+base, m_flash.begin()+std::min<uint32_t>(base+0x1000, m_flash.size()), 0xFF);
-            } else if (a == 0x5555 && data == 0x10) std::fill(m_flash.begin(), m_flash.end(), 0xFF);
+                const std::size_t base = static_cast<std::size_t>(phys & ~uint32_t(0x0FFF));
+                const std::size_t limit = std::min(base + std::size_t{0x1000}, m_flash.size());
+                std::fill(m_flash.begin() + base, m_flash.begin() + limit, uint8_t{0xFF});
+            } else if (a == 0x5555 && data == 0x10) std::fill(m_flash.begin(), m_flash.end(), uint8_t{0xFF});
             m_flashState = 0; break;
         default: m_flashState = 0; break;
         }
@@ -1294,6 +1442,9 @@ bool Mapper::mapPrgRam(uint16_t addr, uint32_t& mapped, bool) const
     return true;
 }
 
+uint8_t Mapper::transformPrgRamRead(uint16_t, uint8_t data) const { return data; }
+
+void Mapper::notifyCpuAddress(uint16_t) {}
 void Mapper::notifyPpuAddress(uint16_t, uint64_t) {}
 void Mapper::notifyPpuAddressContext(uint16_t addr, uint64_t ppuCycle, int, int) { notifyPpuAddress(addr, ppuCycle); }
 void Mapper::notifyPpuScanline(int, bool) {}
@@ -1326,14 +1477,98 @@ std::size_t Mapper::chrBanks(std::size_t bankSize) const
     return bankSize ? size / bankSize : 0;
 }
 
+class Mapper487 final : public Mapper {
+public:
+    explicit Mapper487(const MapperConfig& config) : Mapper(config) { reset(true); }
+
+    bool cpuMapRead(uint16_t addr, uint32_t& mapped) const override {
+        if (addr < 0x8000 || m_config.prgRomSize == 0) return false;
+        const uint32_t bank = prgBank32();
+        mapped = static_cast<uint32_t>((uint64_t(bank) * 0x8000u + (addr - 0x8000u)) % m_config.prgRomSize);
+        return true;
+    }
+
+    bool cpuWrite(uint16_t addr, uint8_t data, uint64_t) override {
+
+        if ((addr & 0xC180u) == 0x4180u) {
+            m_outer = data;
+            updateMirror();
+            return true;
+        }
+        const bool colorDreamsMode = (m_outer & 0x20) != 0;
+        if (!colorDreamsMode && (addr & 0xC180u) == 0x4100u) {
+            m_inner = data;
+            return true;
+        }
+        if (colorDreamsMode && addr >= 0x8000) {
+            m_inner = data;
+            return true;
+        }
+        return false;
+    }
+
+    bool ppuMapRead(uint16_t addr, uint32_t& mapped) override {
+        if (addr >= 0x2000) return false;
+        const std::size_t size = m_config.chrRomSize ? m_config.chrRomSize : m_config.chrRamSize;
+        if (size == 0) return false;
+        const uint32_t bank = chrBank8();
+        mapped = static_cast<uint32_t>((uint64_t(bank) * 0x2000u + addr) % size);
+        return true;
+    }
+    bool ppuMapWrite(uint16_t addr, uint32_t& mapped) override {
+        if (m_config.chrRamSize == 0) return false;
+        return ppuMapRead(addr, mapped);
+    }
+    bool ppuUsesChrRam(uint16_t addr) const override { return addr < 0x2000 && m_config.chrRamSize != 0; }
+
+    void reset(bool hard) override {
+        if (hard) { m_outer = 0; m_inner = 0; }
+        updateMirror();
+    }
+    void saveState(std::vector<uint8_t>& out) const override { out.push_back(m_outer); out.push_back(m_inner); }
+    bool loadState(const uint8_t*& p, const uint8_t* end) override {
+        if (p + 2 > end) return false;
+        m_outer = *p++; m_inner = *p++; updateMirror(); return true;
+    }
+
+private:
+    uint8_t m_outer = 0;
+    uint8_t m_inner = 0;
+
+    uint32_t outerGroup() const {
+        uint32_t group = (m_outer >> 1) & 0x0F;
+        if ((m_outer & 0x20) == 0) group &= 0x07;
+        return group;
+    }
+    uint32_t prgBank32() const {
+        const bool largeInner = (m_outer & 0x40) != 0;
+        const bool colorDreams = (m_outer & 0x20) != 0;
+        const uint32_t innerA15 = largeInner
+            ? (colorDreams ? (m_inner & 0x01) : ((m_inner >> 3) & 0x01))
+            : (m_outer & 0x01);
+        return (outerGroup() << 1) | innerA15;
+    }
+    uint32_t chrBank8() const {
+        const bool largeInner = (m_outer & 0x40) != 0;
+        const bool colorDreams = (m_outer & 0x20) != 0;
+        const uint32_t chrA15 = largeInner
+            ? (colorDreams ? ((m_inner >> 6) & 0x01) : ((m_inner >> 2) & 0x01))
+            : (m_outer & 0x01);
+        const uint32_t chrA14A13 = colorDreams ? ((m_inner >> 4) & 0x03) : (m_inner & 0x03);
+        return (outerGroup() << 3) | (chrA15 << 2) | chrA14A13;
+    }
+    void updateMirror() { m_mirror = (m_outer & 0x80) ? Mirror::Horizontal : Mirror::Vertical; }
+};
+
 std::unique_ptr<Mapper> createMapper(const MapperConfig& config)
 {
     if (auto mapper = createNintendoDiscreteMapper(config))
         return mapper;
 
     switch (config.id) {
+    case 487: return std::make_unique<Mapper487>(config);
     case 1: case 155: return createMmc1Mapper(config);
-    case 4: case 37: case 44: case 45: case 47: case 49: case 52: case 74: case 114: case 115: case 118: case 119: case 121: case 123: case 191: case 192: case 194: case 195: case 197: case 215:
+    case 4: case 14: case 37: case 44: case 45: case 47: case 49: case 52: case 74: case 114: case 115: case 118: case 119: case 121: case 123: case 191: case 192: case 194: case 195: case 197: case 215:
         return createMmc3Mapper(config);
     case 182: {
         MapperConfig compat = config; compat.id = 114;
@@ -1359,6 +1594,7 @@ std::unique_ptr<Mapper> createMapper(const MapperConfig& config)
     case 20: return std::make_unique<Mapper20>(config);
     case 21: case 22: case 23: case 25: case 27: return createVrcMapper(config);
     case 28: return std::make_unique<Mapper28>(config);
+    case 29: return std::make_unique<Mapper29>(config);
     case 24: case 26: return createVrcMapper(config);
     case 30: return std::make_unique<Mapper30>(config);
     case 31: return std::make_unique<Mapper31>(config);
@@ -1402,10 +1638,15 @@ std::unique_ptr<Mapper> createMapper(const MapperConfig& config)
     case 76: return std::make_unique<Mapper76>(config);
     case 77: return std::make_unique<Mapper77>(config);
     case 78: return std::make_unique<Mapper78>(config);
-    case 79: case 113: case 146: return std::make_unique<Mapper79>(config);
+    case 79: case 146: return std::make_unique<Mapper79>(config);
+    case 113: return std::make_unique<Mapper113>(config);
     case 80: case 207: return std::make_unique<Mapper80>(config);
     case 81: return std::make_unique<Mapper81>(config);
     case 82: return std::make_unique<Mapper82>(config);
+    case 83: return createUnlicensedMapper(config);
+    case 109: { MapperConfig compat = config; compat.id = 137; return std::make_unique<Mapper137>(compat); }
+    case 130: case 331: return std::make_unique<Mapper331>(config);
+    case 110: { MapperConfig compat = config; compat.id = 243; return std::make_unique<Mapper243>(compat); }
     case 85: return createVrcMapper(config);
     case 86: return std::make_unique<Mapper86>(config);
     case 87: return std::make_unique<Mapper87>(config);
@@ -1428,9 +1669,12 @@ std::unique_ptr<Mapper> createMapper(const MapperConfig& config)
     case 111: if (config.chrRomSize) return std::make_unique<Mapper111Mmc1>(config); else return std::make_unique<Mapper111>(config);
     case 112: return std::make_unique<Mapper112>(config);
     case 120: return std::make_unique<Mapper120>(config);
+    case 129: { MapperConfig compat=config; compat.id=58; return std::make_unique<Mapper58>(compat); }
+    case 131: { MapperConfig compat=config; compat.id=205; return createMmc3Mapper(compat); }
 
     case 122: case 184: return createSunsoftMapper(config);
     case 125: return std::make_unique<Mapper125>(config);
+    case 128: return std::make_unique<Mapper128>(config);
     case 132: return std::make_unique<Mapper132>(config);
     case 133: return std::make_unique<Mapper133>(config);
     case 136: return std::make_unique<Mapper136>(config);
@@ -1445,25 +1689,74 @@ std::unique_ptr<Mapper> createMapper(const MapperConfig& config)
     case 149: return std::make_unique<Mapper149>(config);
     case 150: return std::make_unique<Mapper150>(config);
     case 156: return std::make_unique<Mapper156>(config);
+    case 160: { MapperConfig compat = config; compat.id = 90; return createUnlicensedMapper(compat); }
+    case 161: { MapperConfig compat = config; compat.id = 1; return createMmc1Mapper(compat); }
+    case 162: return std::make_unique<Mapper162>(config);
+    case 163: return std::make_unique<Mapper163>(config);
+    case 164: return std::make_unique<Mapper164>(config);
+    case 165: return createMmc3Mapper(config);
+    case 166: case 167: return std::make_unique<Mapper166_167>(config);
+    case 168: return std::make_unique<Mapper168>(config);
+    case 169: return std::make_unique<Mapper169>(config);
+    case 170: return std::make_unique<Mapper170>(config);
+    case 172: return std::make_unique<Mapper172>(config);
     case 171: return std::make_unique<Mapper171>(config);
     case 174: return std::make_unique<Mapper174>(config);
+    case 175: return std::make_unique<Mapper175>(config);
     case 176: case 179: return createUnlicensedMapper(config);
+    case 177: return std::make_unique<Mapper177>(config);
+    case 173: return std::make_unique<Mapper173>(config);
+    case 178: return std::make_unique<Mapper178>(config);
     case 180: return std::make_unique<Mapper180>(config);
+    case 181: { MapperConfig compat=config; compat.id=185; return std::make_unique<Mapper185>(compat); }
+    case 183: return std::make_unique<Mapper183>(config);
     case 185: return std::make_unique<Mapper185>(config);
+    case 186: return std::make_unique<Mapper186>(config);
+    case 187: return createMmc3Mapper(config);
+    case 188: return std::make_unique<Mapper188>(config);
+    case 189: return createMmc3Mapper(config);
+    case 190: return std::make_unique<Mapper190>(config);
     case 193: return std::make_unique<Mapper193>(config);
+    case 196: return createMmc3Mapper(config);
+    case 126: case 422: case 534: return createMmc3Mapper(config);
+    case 134: return createMmc3Mapper(config);
+    case 198: case 199: return createMmc3Mapper(config);
     case 200: return std::make_unique<Mapper200>(config);
     case 202: case 203: case 204: case 214: case 217: case 229: case 231:
         return std::make_unique<MapperBmcBundled47>(config);
+    case 205: return createMmc3Mapper(config);
     case 206: return std::make_unique<Mapper206>(config);
+    case 208: return createMmc3Mapper(config);
     case 212: return std::make_unique<Mapper212>(config);
     case 213: return std::make_unique<Mapper213>(config);
+    case 216: return std::make_unique<Mapper216>(config);
+    case 218: return std::make_unique<Mapper218>(config);
+    case 219: return createMmc3Mapper(config);
+    case 223: { MapperConfig compat = config; compat.id = 199; return createMmc3Mapper(compat); }
+    case 221: return std::make_unique<Mapper221>(config);
+    case 222: return std::make_unique<Mapper222>(config);
+    case 224: return createMmc3Mapper(config);
     case 225: case 255: case 226: case 227: case 230: case 235: case 236: case 237: return std::make_unique<MapperBmcBundled48>(config);
     case 228: return std::make_unique<Mapper228>(config);
     case 232: return std::make_unique<Mapper232>(config);
+    case 233: return std::make_unique<Mapper233>(config);
+    case 234: return std::make_unique<Mapper234>(config);
+    case 238: return createMmc3Mapper(config);
     case 240: return std::make_unique<Mapper240>(config);
     case 241: return std::make_unique<Mapper241>(config);
     case 242: return std::make_unique<Mapper242>(config);
     case 243: return std::make_unique<Mapper243>(config);
+    case 244: return std::make_unique<Mapper244>(config);
+    case 245: return createMmc3Mapper(config);
+    case 248: { MapperConfig compat = config; compat.id = 115; return createMmc3Mapper(compat); }
+    case 249: case 250: return createMmc3Mapper(config);
+    case 251: { MapperConfig compat = config; compat.id = 45; return createMmc3Mapper(compat); }
+    case 252: return std::make_unique<Mapper252>(config);
+    case 253: return std::make_unique<Mapper253>(config);
+    case 254: return createMmc3Mapper(config);
+    case 259: case 263: return createMmc3Mapper(config);
+    case 265: return std::make_unique<Mapper265>(config);
+    case 264: return createUnlicensedMapper(config);
     case 268: return createUnlicensedMapper(config);
     case 246: return std::make_unique<Mapper246>(config);
     default: return std::make_unique<MapperFallback>(config);
@@ -1474,12 +1767,14 @@ bool mapperImplementationSupported(uint16_t mapper, uint8_t submapper)
 {
 
     switch (mapper) {
+    case 29: return submapper == 0;
     case 1: return submapper == 0 || submapper == 5;
     case 155: return submapper == 0 || submapper == 5;
     case 2: case 3: case 7: return submapper <= 2;
     case 6: return submapper <= 7;
     case 8: return submapper == 0 || submapper == 4;
     case 12: return submapper <= 1;
+    case 14: return submapper == 0;
     case 17: return submapper <= 3;
     case 30: return submapper <= 4;
     case 32: return submapper <= 1;
@@ -1489,16 +1784,23 @@ bool mapperImplementationSupported(uint16_t mapper, uint8_t submapper)
     case 34: return submapper <= 2;
     case 71: return submapper <= 1;
     case 78: return submapper == 0 || submapper == 1 || submapper == 3;
+    case 83: return submapper <= 3;
     case 85: return submapper <= 2;
     case 91: return submapper <= 1;
+    case 99: return submapper == 0;
     case 108: return submapper <= 4;
+    case 113: return submapper == 0;
+    case 109: case 110: case 160: case 161: case 162: case 163: case 164: case 165: case 166: case 167: case 168: case 169: case 170: case 172: case 175: case 177: case 183: case 187: case 233: return submapper == 0;
     case 114: return submapper <= 1;
     case 182: return submapper <= 1;
     case 116: return submapper <= 3;
     case 122: case 184: return submapper == 0;
     case 125: return submapper == 0;
+    case 126: case 422: case 534: return submapper == 0;
+    case 128: case 129: case 130: case 131: case 331: return submapper == 0;
     case 132: return submapper == 0;
     case 133: return submapper == 0;
+    case 134: return submapper == 0;
     case 136: return submapper == 0;
     case 137: return submapper == 0;
     case 135: case 138: case 139: case 141: return submapper == 0;
@@ -1512,23 +1814,32 @@ bool mapperImplementationSupported(uint16_t mapper, uint8_t submapper)
     case 152: return submapper == 0;
     case 153: return submapper == 0;
     case 243: return submapper == 0;
+    case 245: return submapper == 0;
+    case 249: case 250: return submapper == 0;
     case 156: return submapper == 0;
     case 171: return submapper == 0;
+    case 173: case 178: case 181: case 186: case 188: case 189: case 190: case 196: return submapper == 0;
     case 174: return submapper == 0;
     case 176: case 179: return submapper <= 5;
     case 185: return submapper == 0 || (submapper >= 4 && submapper <= 7);
     case 193: return submapper == 0;
+    case 198: case 199: return submapper == 0;
     case 200: return submapper == 0;
     case 201: return submapper == 0;
     case 202: case 203: case 204: case 214: case 217: case 229: case 231: return submapper == 0;
     case 225: case 255: case 226: case 227: case 230: case 235: case 236: case 237: return submapper == 0;
     case 197: return submapper == 0 || submapper == 1 || submapper == 3;
+    case 205: return submapper == 0;
     case 206: return submapper <= 1;
+    case 208: return submapper <= 1;
     case 210: return submapper <= 2;
     case 212: return submapper == 0;
     case 213: return submapper == 0;
+    case 216: case 218: case 219: case 221: case 222: case 223: case 224: case 234: case 238: case 244: case 248: case 251: case 252: case 253: case 254: return submapper == 0;
     case 215: return submapper <= 1;
+    case 259: case 263: case 264: case 265: return submapper == 0;
     case 268: return submapper <= 11;
+    case 487: return submapper == 0;
     default: break;
     }
 
@@ -1540,9 +1851,9 @@ bool mapperImplementationSupported(uint16_t mapper, uint8_t submapper)
     case 77: case 78: case 79: case 80: case 81: case 82: case 85: case 86: case 87: case 88:
     case 89: case 90: case 92: case 93: case 94: case 95: case 96: case 97: case 101: case 103: case 104: case 105: case 106: case 107: case 108: case 111: case 112: case 113: case 114: case 115: case 117: case 120: case 121: case 123:
     case 118: case 119: case 125: case 133: case 135: case 136: case 137: case 138: case 139: case 140: case 141: case 143: case 144: case 145: case 146: case 147: case 148: case 149: case 151: case 152: case 153:
-    case 154: case 155: case 157: case 158: case 159: case 174: case 176: case 180: case 184: case 185: case 191:
-    case 192: case 193: case 194: case 195: case 197: case 200: case 206: case 207: case 209: case 211: case 213: case 215: case 228: case 232: case 240: case 241:
-    case 242: case 243: case 246: case 268:
+    case 154: case 155: case 157: case 158: case 159: case 174: case 176: case 180: case 184: case 185: case 186: case 191:
+    case 189: case 192: case 193: case 194: case 195: case 196: case 197: case 200: case 205: case 206: case 207: case 209: case 211: case 213: case 215: case 228: case 232: case 240: case 241:
+    case 242: case 243: case 246: case 249: case 250: case 268:
         return true;
     default:
         return false;

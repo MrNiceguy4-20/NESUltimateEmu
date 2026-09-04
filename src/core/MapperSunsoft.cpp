@@ -130,8 +130,8 @@ public:
     void reset(bool hard) override {
         if (!hard) return;
         m_prg = 0;
-        std::fill(std::begin(m_chr), std::end(m_chr), 0);
-        std::fill(std::begin(m_nt), std::end(m_nt), 0);
+        std::fill(std::begin(m_chr), std::end(m_chr), uint8_t{0});
+        std::fill(std::begin(m_nt), std::end(m_nt), uint8_t{0});
         m_chrNt = false;
         m_ramEnable = false;
         m_external = false;

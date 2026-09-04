@@ -42,6 +42,7 @@ public:
     ConsoleTiming timing() const { return m_timing; }
     bool isMultiRegion() const { return m_multiRegion; }
     bool mapperSupported() const { return m_mapper && m_mapper->implementationSupported(); }
+    const std::string& lastError() const { return m_lastError; }
     Mirror mirroring() const { return m_mapper ? m_mapper->mirroring() : m_headerMirror; }
     bool hasChrRam() const { return !m_chrRam.empty(); }
     bool hasBattery() const { return m_battery; }
@@ -59,6 +60,7 @@ public:
     uint8_t cpuRead(uint16_t addr);
 
     bool cpuRead(uint16_t addr, uint8_t& data);
+    bool debugCpuRead(uint16_t addr, uint8_t& data) const;
     void    cpuWrite(uint16_t addr, uint8_t data, uint64_t cpuCycle = ~uint64_t(0));
     void    observeCpuWrite(uint16_t addr, uint8_t data);
     uint8_t ppuRead(uint16_t addr, PpuFetchKind kind = PpuFetchKind::Cpu);
@@ -69,6 +71,7 @@ public:
     uint8_t readNametableBacking(NametableSource source, uint32_t mapped) const;
     void    writeNametableBacking(NametableSource source, uint32_t mapped, uint8_t data);
 
+    void notifyCpuAddress(uint16_t addr);
     void notifyPpuAddress(uint16_t addr, uint64_t ppuCycle, int scanline, int dot);
     void notifyPpuScanline(int scanline, bool rendering);
     void clockCpu();
@@ -109,6 +112,7 @@ private:
     std::string m_path;
     std::string m_fileName;
     std::string m_batteryPath;
+    std::string m_lastError;
 
     void resetImage();
     void loadBattery();

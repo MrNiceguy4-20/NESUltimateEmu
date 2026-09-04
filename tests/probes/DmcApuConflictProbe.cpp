@@ -68,7 +68,23 @@ int runDmcApuConflictProbe(const std::string& romPath) {
         return 1;
     }
 
-    std::cout << "$4015_irq_clear=PASS external=A5 $4016_activation=PASS\nPASS\n";
+    Machine pal;
+    if (!pal.cart.loadFromFile(romPath) || !pal.cart.mapperSupported()) return 2;
+    pal.bus.setTiming(ConsoleTiming::PAL);
+    pal.bus.powerOn();
+    if (!reach4000(pal)) return 1;
+    pal.apu.testSetFrameIrqFlag(true);
+    if (!pal.bus.requestDmcDma(0xC015)) return 1;
+    unsigned palGuard = 0;
+    while (pal.bus.dmcDmaActive() && palGuard++ < 64) pal.bus.clock();
+    const bool palFetchBoundary = palGuard < 64 && pal.apu.testFrameIrqFlag();
+    if (!palFetchBoundary) {
+        std::cerr << "PAL DMC halt repeated/decoded an APU register read\n";
+        return 1;
+    }
+
+    std::cout << "$4015_irq_clear=PASS external=A5 $4016_activation=PASS "
+              << "pal_fetch_boundary=PASS\nPASS\n";
     return 0;
 }
 

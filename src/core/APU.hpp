@@ -249,7 +249,7 @@ private:
     int m_outputSampleRate = kSampleRate;
     bool m_audioOpen = false;
     float m_masterVolume = 1.50f;
-    uint32_t m_audioDeviceId = 0;
+    void* m_audioStream = nullptr;
     bool m_hostAudioEnabled = true;
     std::atomic<uint64_t> m_audioUnderruns{0};
     std::atomic<uint64_t> m_audioOverruns{0};

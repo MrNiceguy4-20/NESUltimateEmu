@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 #include "Timing.hpp"
@@ -35,6 +36,7 @@ public:
     void stopDmcDma();
 
     uint8_t read(uint16_t addr) const;
+    uint8_t debugRead(uint16_t addr) const;
     void    write(uint16_t addr, uint8_t data);
 
     uint64_t cpuCycleCounter() const { return m_cpuCycleCounter; }
@@ -57,10 +59,24 @@ public:
     uint8_t testExternalDataBus() const { return m_cpuDataBus; }
     uint8_t testInternalDataBus() const { return m_cpuInternalDataBus; }
     void testSetInternalDataBus(uint8_t value) { m_cpuInternalDataBus = value; }
+    uint16_t testOamDmaHeldCpuAddress() const { return m_dmaCpuReadAddress; }
+    bool testOamDmaHeldCpuAddressValid() const { return m_dmaCpuReadAddressValid; }
 #endif
 
     void setController1(uint8_t state) { m_controller1 = state; }
     void setController2(uint8_t state) { m_controller2 = state; }
+    uint8_t controller1State() const { return m_controller1; }
+    uint8_t controller2State() const { return m_controller2; }
+    void setController3(uint8_t state) { m_controller3 = state; }
+    void setController4(uint8_t state) { m_controller4 = state; }
+    void setFourScoreEnabled(bool enabled) { m_fourScoreEnabled = enabled; }
+    bool fourScoreEnabled() const { return m_fourScoreEnabled; }
+    void setZapper(bool enabled, int x, int y, bool trigger) {
+        m_zapperEnabled = enabled;
+        m_zapperX = static_cast<int16_t>(std::clamp(x, -1, 255));
+        m_zapperY = static_cast<int16_t>(std::clamp(y, -1, 239));
+        m_zapperTrigger = trigger;
+    }
 #ifdef NES_HEADLESS
 
     void testLatchControllers() {
@@ -84,6 +100,15 @@ private:
 
     uint8_t m_controller1 = 0;
     uint8_t m_controller2 = 0;
+    uint8_t m_controller3 = 0;
+    uint8_t m_controller4 = 0;
+    bool m_fourScoreEnabled = false;
+    mutable uint8_t m_fourScoreIndex1 = 0;
+    mutable uint8_t m_fourScoreIndex2 = 0;
+    bool m_zapperEnabled = false;
+    int16_t m_zapperX = -1;
+    int16_t m_zapperY = -1;
+    bool m_zapperTrigger = false;
     mutable uint8_t m_controller1Shift = 0;
     mutable uint8_t m_controller2Shift = 0;
     bool    m_strobe = false;

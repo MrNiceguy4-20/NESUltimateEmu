@@ -1,7 +1,8 @@
-#include <SDL.h>
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
 #include "imgui.h"
-#include "imgui_impl_sdl2.h"
-#include "imgui_impl_sdlrenderer2.h"
+#include "imgui_impl_sdl3.h"
+#include "imgui_impl_sdlrenderer3.h"
 
 #include "frontend/Frontend.hpp"
 #include "core/CPU.hpp"
@@ -12,27 +13,34 @@
 
 #include <memory>
 
-int main(int, char**)
+int main(int argc, char** argv)
 {
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0)
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD))
         return 1;
 
     SDL_Window* window = SDL_CreateWindow(
         "NES Ultimate Emulator",
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         1280, 720,
-        SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
+        SDL_WINDOW_RESIZABLE
     );
+    if (!window) {
+        SDL_Quit();
+        return 1;
+    }
 
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1,
-        SDL_RENDERER_ACCELERATED);
+    SDL_Renderer* renderer = SDL_CreateRenderer(window, nullptr);
+    if (!renderer) {
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 1;
+    }
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
 
-    ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
-    ImGui_ImplSDLRenderer2_Init(renderer);
+    ImGui_ImplSDL3_InitForSDLRenderer(window, renderer);
+    ImGui_ImplSDLRenderer3_Init(renderer);
 
     auto bus = std::make_unique<Bus>();
     auto cpu = std::make_unique<CPU>(*bus);
@@ -55,13 +63,15 @@ int main(int, char**)
     apu->initAudio();
 
     Frontend frontend(window, renderer, *cpu, *bus, *cart, *ppu, *apu);
+    if (argc > 1 && argv[1] && *argv[1])
+        frontend.loadRomPath(argv[1]);
     frontend.run();
 
     cart->saveBattery();
     apu->shutdownAudio();
 
-    ImGui_ImplSDLRenderer2_Shutdown();
-    ImGui_ImplSDL2_Shutdown();
+    ImGui_ImplSDLRenderer3_Shutdown();
+    ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
 
     SDL_DestroyRenderer(renderer);

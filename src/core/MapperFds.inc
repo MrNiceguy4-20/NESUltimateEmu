@@ -15,25 +15,74 @@ struct Envelope {
 };
 
 struct Modulator : Envelope {
-    int8_t counter=0; bool disabled=false; uint8_t table[64]={},pos=0; uint16_t overflow=0; int32_t output=0;
+    int8_t counter=0; bool disabled=false,forceCarry=false; uint8_t table[64]={},pos=0; uint16_t overflow=0; int32_t output=0;
     void setCounter(int v){v&=0x7F;counter=v>=64?int8_t(v-128):int8_t(v);}
-    void writeReg(uint16_t a,uint8_t d){if(a==0x4084||a==0x4086)Envelope::write(a,d);else if(a==0x4085)setCounter(d);else if(a==0x4087){Envelope::write(a,d);disabled=(d&0x80)!=0;if(disabled)overflow=0;}}
+    void writeReg(uint16_t a,uint8_t d){if(a==0x4084||a==0x4086)Envelope::write(a,d);else if(a==0x4085)setCounter(d);else if(a==0x4087){Envelope::write(a,d);forceCarry=(d&0x40)!=0;disabled=(d&0x80)!=0;if(disabled)overflow=0;}}
     void writeTable(uint8_t d){if(!disabled)return;table[pos&0x3F]=d&7;table[(pos+1)&0x3F]=d&7;pos=(pos+2)&0x3F;}
-    bool tickMod(){static const int lut[8]={0,1,2,4,0x7FFF,-4,-2,-1};if(disabled||freq==0)return false;uint16_t old=overflow;overflow=uint16_t(overflow+freq);if(overflow<old){int v=lut[table[pos&0x3F]];setCounter(v==0x7FFF?0:int(counter)+v);pos=(pos+1)&0x3F;return true;}return false;}
+    bool tickMod(){static const int lut[8]={0,1,2,4,0x7FFF,-4,-2,-1};if(disabled)return false;const uint16_t sum=uint16_t((overflow&0x0FFFu)+(freq&0x0FFFu));overflow=uint16_t(sum&0x0FFFu);if(forceCarry||sum>0x0FFFu){int v=lut[table[pos&0x3F]];setCounter(v==0x7FFF?0:int(counter)+v);pos=(pos+1)&0x3F;return true;}return false;}
     void update(uint16_t pitch){int32_t t=int32_t(counter)*gain;int32_t rem=t&0xF;t>>=4;if(rem>0&&(t&0x80)==0)t+=counter<0?-1:2;if(t>=192)t-=256;else if(t<-64)t+=256;t*=pitch;rem=t&0x3F;t>>=6;if(rem>=32)++t;output=t;}
     int32_t out()const{return (!disabled&&freq>0)?output:0;}
-    void save(std::vector<uint8_t>&o)const{Envelope::save(o);put8(o,uint8_t(counter));put8(o,disabled);for(auto v:table)put8(o,v);put8(o,pos);put16(o,overflow);put32(o,uint32_t(output));}
-    bool load(const uint8_t*&p,const uint8_t*e){uint8_t b;uint32_t q;if(!Envelope::load(p,e)||!get8(p,e,b))return false;counter=int8_t(b);if(!get8(p,e,b))return false;disabled=b;for(auto&v:table)if(!get8(p,e,v))return false;if(!get8(p,e,pos)||!get16(p,e,overflow)||!get32(p,e,q))return false;output=int32_t(q);return true;}
+    void save(std::vector<uint8_t>&o)const{Envelope::save(o);put8(o,uint8_t(counter));put8(o,disabled);put8(o,forceCarry);for(auto v:table)put8(o,v);put8(o,pos);put16(o,overflow);put32(o,uint32_t(output));}
+    bool load(const uint8_t*&p,const uint8_t*e){uint8_t b;uint32_t q;if(!Envelope::load(p,e)||!get8(p,e,b))return false;counter=int8_t(b);if(!get8(p,e,b))return false;disabled=b;if(!get8(p,e,b))return false;forceCarry=b;for(auto&v:table)if(!get8(p,e,v))return false;if(!get8(p,e,pos)||!get16(p,e,overflow)||!get32(p,e,q))return false;output=int32_t(q);return true;}
 };
 
 struct Audio {
-    uint8_t wave[64]={}; bool waveWrite=false,disableEnvelopes=false,halt=false; uint8_t masterVol=0,wavePos=0,last=0; uint16_t waveOverflow=0; Envelope volume; Modulator mod;
-    void clock(){int f=volume.freq;if(!halt&&!disableEnvelopes){volume.tick();if(mod.tick())mod.update(uint16_t(f));}if(mod.tickMod())mod.update(uint16_t(f));if(halt)wavePos=0;else if(!waveWrite&&f+mod.out()>0){uint16_t add=uint16_t(f+mod.out());uint16_t old=waveOverflow;waveOverflow=uint16_t(waveOverflow+add);if(waveOverflow<old)wavePos=(wavePos+1)&0x3F;}static const uint8_t scale[4]={36,24,17,14};uint32_t level=std::min<int>(volume.gain,32)*scale[masterVol&3];last=uint8_t((wave[wavePos]*level)/1152);}
-    uint8_t read(uint16_t a)const{if(a<=0x407F)return wave[a&0x3F]&0x3F;if(a==0x4090)return volume.gain&0x3F;if(a==0x4092)return mod.gain&0x3F;return 0;}
-    void write(uint16_t a,uint8_t d){if(a<=0x407F){if(waveWrite)wave[a&0x3F]=d&0x3F;return;}switch(a){case 0x4080:case 0x4082:volume.write(a,d);break;case 0x4083:disableEnvelopes=(d&0x40)!=0;halt=(d&0x80)!=0;if(disableEnvelopes){volume.resetTimer();mod.resetTimer();}volume.write(a,d);break;case 0x4084:case 0x4085:case 0x4086:case 0x4087:mod.writeReg(a,d);break;case 0x4088:mod.writeTable(d);break;case 0x4089:masterVol=d&3;waveWrite=(d&0x80)!=0;break;case 0x408A:volume.master=d;mod.master=d;break;}}
+    uint8_t wave[64]={}; bool waveWrite=false,disableEnvelopes=false,halt=false; uint8_t masterVol=0,wavePos=0,last=0,phase16=0; uint16_t waveOverflow=0; uint32_t waveAcc=0; Envelope volume; Modulator mod;
+    void resetIo(){
+
+        volume.gain=0; volume.timer=0;
+        wavePos=0; waveOverflow=0; waveAcc=0; phase16=0; last=0;
+        mod.setCounter(0); mod.output=0;
+    }
+    void clock(){
+        int f=volume.freq;
+
+        if(!halt&&!disableEnvelopes){volume.tick();if(mod.tick())mod.update(uint16_t(f));}
+        phase16=uint8_t((phase16+1)&0x0F);
+        if(phase16==0){
+            if(!halt&&mod.tickMod())mod.update(uint16_t(f));
+            if(!halt&&f+mod.out()>0){
+                const uint32_t pitch=uint32_t(f+mod.out())&0x3FFFu;
+
+                waveAcc=(waveAcc+(pitch<<6))&0x00FFFFFFu;
+                wavePos=uint8_t((waveAcc>>18)&0x3Fu);
+                waveOverflow=uint16_t(waveAcc&0xFFFFu);
+            }
+        }
+        if(halt){wavePos=0;waveOverflow=0;waveAcc=0;}
+
+        if(!waveWrite){
+            static const uint8_t scale[4]={36,24,17,14};
+            uint32_t level=std::min<int>(volume.gain,32)*scale[masterVol&3];
+            last=uint8_t((wave[wavePos]*level)/1152);
+        }
+    }
+    uint8_t read(uint16_t a)const{
+        if(a<=0x407F)return wave[waveWrite?(a&0x3F):(wavePos&0x3F)]&0x3F;
+        switch(a){
+        case 0x4090:return volume.gain&0x3F;
+        case 0x4091:{
+
+            return uint8_t((waveAcc>>12)&0xFF);
+        }
+        case 0x4092:return mod.gain&0x3F;
+        case 0x4093:
+
+            return uint8_t((((uint32_t(mod.pos)<<16)|mod.overflow)>>14)&0x7F);
+        case 0x4094:return uint8_t((uint32_t(mod.output)>>4)&0xFF);
+        case 0x4095:{
+            static const uint8_t inc[8]={0x0,0x1,0x2,0x4,0xC,0xC,0xE,0xF};
+            return inc[mod.table[mod.pos&0x3F]&7];
+        }
+        case 0x4096:return wave[wavePos&0x3F]&0x3F;
+        case 0x4097:return uint8_t(mod.counter)&0x7F;
+        default:return 0;
+        }
+    }
+    void write(uint16_t a,uint8_t d,bool ioEnabled=true){if(a<=0x407F){if(waveWrite)wave[a&0x3F]=d&0x3F;return;}switch(a){case 0x4080:if(ioEnabled)volume.write(a,d);break;case 0x4082:volume.write(a,d);break;case 0x4083:disableEnvelopes=(d&0x40)!=0;halt=(d&0x80)!=0;if(halt){wavePos=0;waveOverflow=0;waveAcc=0;phase16=0;}if(disableEnvelopes){volume.resetTimer();mod.resetTimer();}volume.write(a,d);break;case 0x4084:case 0x4085:case 0x4086:case 0x4087:mod.writeReg(a,d);break;case 0x4088:if(ioEnabled)mod.writeTable(d);break;case 0x4089:masterVol=d&3;waveWrite=(d&0x80)!=0;break;case 0x408A:volume.master=d;mod.master=d;break;}}
     float sample()const{return (float(last)/63.0f)*0.65f;}
-    void save(std::vector<uint8_t>&o)const{for(auto v:wave)put8(o,v);put8(o,waveWrite);put8(o,disableEnvelopes);put8(o,halt);put8(o,masterVol);put8(o,wavePos);put8(o,last);put16(o,waveOverflow);volume.save(o);mod.save(o);}
-    bool load(const uint8_t*&p,const uint8_t*e){uint8_t b;for(auto&v:wave)if(!get8(p,e,v))return false;if(!get8(p,e,b))return false;waveWrite=b;if(!get8(p,e,b))return false;disableEnvelopes=b;if(!get8(p,e,b))return false;halt=b;return get8(p,e,masterVol)&&get8(p,e,wavePos)&&get8(p,e,last)&&get16(p,e,waveOverflow)&&volume.load(p,e)&&mod.load(p,e);}
+    void save(std::vector<uint8_t>&o)const{for(auto v:wave)put8(o,v);put8(o,waveWrite);put8(o,disableEnvelopes);put8(o,halt);put8(o,masterVol);put8(o,wavePos);put8(o,last);put8(o,phase16);put16(o,waveOverflow);put32(o,waveAcc);volume.save(o);mod.save(o);}
+    bool load(const uint8_t*&p,const uint8_t*e){uint8_t b;for(auto&v:wave)if(!get8(p,e,v))return false;if(!get8(p,e,b))return false;waveWrite=b;if(!get8(p,e,b))return false;disableEnvelopes=b;if(!get8(p,e,b))return false;halt=b;return get8(p,e,masterVol)&&get8(p,e,wavePos)&&get8(p,e,last)&&get8(p,e,phase16)&&get16(p,e,waveOverflow)&&get32(p,e,waveAcc)&&volume.load(p,e)&&mod.load(p,e);}
 };
 }
 
@@ -46,32 +95,110 @@ public:
     bool ppuMapWrite(uint16_t a,uint32_t&m)override{return ppuMapRead(a,m);}
 
     bool cpuReadRegister(uint16_t a,uint8_t&d)override{
-        if(m_soundRegs&&a>=0x4040&&a<=0x4092){d=m_audio.read(a);return true;}
-        if(!m_diskRegs||a<0x4030||a>0x4033)return false;
+
+        if(a>=0x4040&&a<=0x4097){d=m_audio.read(a);return true;}
+        if(a<0x4030||a>0x4033)return false;
         switch(a){
-        case 0x4030:d=uint8_t((m_timerPending?1:0)|(m_transferComplete?2:0)|(m_badCrc?0x10:0));if(true){m_transferComplete=false;m_timerPending=false;m_diskPending=false;}return true;
-        case 0x4031:d=m_readData;if(true){m_transferComplete=false;m_diskPending=false;}return true;
+        case 0x4030:
+
+            d=uint8_t((m_timerPending?0x01:0x00)|
+                      (m_refreshPending?0x02:0x00)|
+                      (m_mirror==Mirror::Horizontal?0x08:0x00)|
+                      (m_transferComplete?0x80:0x00));
+            m_timerPending=false;
+            m_refreshPending=false;
+            return true;
+        case 0x4031:d=m_readData;m_transferComplete=false;m_diskPending=false;return true;
         case 0x4032:d=uint8_t((!diskInserted()?1:0)|((!diskInserted()||!m_scanning)?2:0)|(!diskInserted()?4:0));return true;
-        case 0x4033:d=m_ext;return true;
+        case 0x4033:
+
+            d=uint8_t((m_ext&0x7F)|(m_motor?0x80:0x00));return true;
         }
         return false;
     }
     bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{
-        if(m_soundRegs&&a>=0x4040&&a<=0x408A){m_audio.write(a,d);return true;}
+        if(a>=0x4040&&a<=0x408A){
+
+            const bool alwaysWritable=(a<=0x407F)||(a>=0x4082&&a<=0x4087)||a==0x4089||a==0x408A;
+            if(m_soundRegs||alwaysWritable)m_audio.write(a,d,m_soundRegs);
+            return true;
+        }
         switch(a){
         case 0x4020:m_irqReload=uint16_t((m_irqReload&0xFF00)|d);return true;
         case 0x4021:m_irqReload=uint16_t((m_irqReload&0x00FF)|(uint16_t(d)<<8));return true;
         case 0x4022:m_irqRepeat=(d&1)!=0;m_irqEnabled=(d&2)!=0&&m_diskRegs;if(m_irqEnabled)m_irqCounter=m_irqReload;else m_timerPending=false;return true;
-        case 0x4023:m_diskRegs=(d&1)!=0;m_soundRegs=(d&2)!=0;if(!m_diskRegs){m_irqEnabled=false;m_timerPending=false;m_diskPending=false;}return true;
+        case 0x4023:{
+            const bool diskEnable=(d&1)!=0;
+            const bool soundEnable=(d&2)!=0;
+            m_refreshIrqEnabled=(d&0x80)!=0;
+            if(!diskEnable){
+
+                m_irqEnabled=false;
+                m_timerPending=false;
+                m_refreshPending=false;
+                m_refreshCounter=0;
+                m_refreshWatchdog=0;
+                m_diskPending=false;
+                m_motor=false;
+                m_resetTransfer=true;
+
+                m_ext=0x7F;
+                m_readMode=true;
+                m_crcControl=false;
+                m_diskReady=false;
+                m_transferControl5=false;
+                m_transferPhaseMaster=0;
+                m_diskIrqEnabled=false;
+                m_mirror=Mirror::Vertical;
+                m_scanning=false;
+                m_endOfHead=true;
+            }
+            m_diskRegs=diskEnable;
+            if(m_soundRegs&&!soundEnable)m_audio.resetIo();
+            m_soundRegs=soundEnable;
+            return true;
+        }
         case 0x4024:if(!m_diskRegs)return true;m_writeData=d;m_transferComplete=false;m_diskPending=false;return true;
-        case 0x4025:if(!m_diskRegs)return true;m_motor=(d&1)!=0;m_resetTransfer=(d&2)!=0;m_readMode=(d&4)!=0;m_mirror=(d&8)?Mirror::Horizontal:Mirror::Vertical;m_crcControl=(d&0x10)!=0;m_diskReady=(d&0x40)!=0;m_diskIrqEnabled=(d&0x80)!=0;m_diskPending=false;return true;
-        case 0x4026:if(m_diskRegs)m_ext=d;return true;
-        default:return a>=0x4020&&a<=0x4092;
+        case 0x4025:if(!m_diskRegs)return true;
+
+            m_resetTransfer=(d&0x01)==0;
+            m_motor=(d&0x02)==0;
+            m_readMode=(d&4)!=0;m_mirror=(d&8)?Mirror::Horizontal:Mirror::Vertical;m_crcControl=(d&0x10)!=0;
+            m_transferControl5=(d&0x20)!=0;m_diskReady=(d&0x40)!=0;m_diskIrqEnabled=(d&0x80)!=0;
+            m_transferPhaseMaster=0;m_diskPending=false;return true;
+        case 0x4026:
+
+            if(m_diskRegs) m_ext=uint8_t(d&0x7F);
+            return true;
+        default:return a>=0x4020&&a<=0x4097;
         }
     }
 
+    void notifyCpuAddress(uint16_t a)override{
+        if(!m_diskRegs)return;
+
+        if(a<0x6000||a>0xDFFF){
+            m_refreshCounter=uint8_t((m_refreshCounter+1)&0x7F);
+            if(m_refreshCounter==0)m_refreshWatchdog=0;
+        }
+    }
     void clockCpu()override{
-        m_audio.clock();
+
+        if(m_diskRegs&&!m_readMode&&m_diskReady&&m_transferControl5){
+            m_transferPhaseMaster=uint16_t(m_transferPhaseMaster+12);
+            if(m_transferPhaseMaster>=1792){
+                m_transferPhaseMaster=uint16_t(m_transferPhaseMaster-1792);
+                m_transferComplete=true;
+                if(m_diskIrqEnabled)m_diskPending=true;
+            }
+        }
+        if(m_diskRegs){
+            if(m_refreshWatchdog==3245){
+                if(m_refreshIrqEnabled)m_refreshPending=true;
+                m_refreshWatchdog=0;
+            }else ++m_refreshWatchdog;
+        }
+        if(m_soundRegs)m_audio.clock();
         if(m_irqEnabled){if(m_irqCounter==0){m_timerPending=true;m_irqCounter=m_irqReload;if(!m_irqRepeat)m_irqEnabled=false;}else --m_irqCounter;}
         if(!diskInserted()||!m_motor){m_endOfHead=true;m_scanning=false;return;}
         if(m_resetTransfer&&!m_scanning)return;
@@ -100,7 +227,7 @@ public:
         }
         m_prevCrc=m_crcControl;++m_diskPos;if(m_diskPos>=side.size()){m_motor=false;m_endOfHead=true;}else m_delay=150;
     }
-    bool irqActive()const override{return m_timerPending||m_diskPending;}
+    bool irqActive()const override{return m_timerPending||m_diskPending||(m_refreshPending&&m_refreshIrqEnabled);}
     float expansionAudioSample(bool = false)const override{return m_soundRegs?m_audio.sample():0.0f;}
 
     bool loadDiskImage(const std::vector<uint8_t>&raw)override{
@@ -123,6 +250,10 @@ public:
         put8(o,m_irqEnabled);
         put8(o,m_irqRepeat);
         put8(o,m_timerPending);
+        put8(o,m_refreshIrqEnabled);
+        put8(o,m_refreshPending);
+        put8(o,m_refreshCounter);
+        fds_detail::put16(o,m_refreshWatchdog);
         put8(o,m_diskRegs);
         put8(o,m_soundRegs);
         put8(o,m_writeData);
@@ -132,6 +263,8 @@ public:
         put8(o,m_crcControl);
         put8(o,m_diskReady);
         put8(o,m_diskIrqEnabled);
+        put8(o,m_transferControl5);
+        fds_detail::put16(o,m_transferPhaseMaster);
         put8(o,m_ext);
         put8(o,m_badCrc);
         put8(o,m_endOfHead);
@@ -151,7 +284,7 @@ public:
     bool loadState(const uint8_t*&p,const uint8_t*e)override{
         uint8_t b;uint32_t q;if(!fds_detail::get16(p,e,m_irqReload)||!fds_detail::get16(p,e,m_irqCounter)||!fds_detail::get16(p,e,m_crc))return false;
 #define FDS_BOOL(x) if(!get8(p,e,b))return false;x=b
-        FDS_BOOL(m_irqEnabled);FDS_BOOL(m_irqRepeat);FDS_BOOL(m_timerPending);FDS_BOOL(m_diskRegs);FDS_BOOL(m_soundRegs);if(!get8(p,e,m_writeData))return false;FDS_BOOL(m_motor);FDS_BOOL(m_resetTransfer);FDS_BOOL(m_readMode);FDS_BOOL(m_crcControl);FDS_BOOL(m_diskReady);FDS_BOOL(m_diskIrqEnabled);if(!get8(p,e,m_ext))return false;FDS_BOOL(m_badCrc);FDS_BOOL(m_endOfHead);if(!get8(p,e,m_readData))return false;FDS_BOOL(m_gapEnded);FDS_BOOL(m_scanning);FDS_BOOL(m_transferComplete);FDS_BOOL(m_diskPending);FDS_BOOL(m_prevCrc);
+        FDS_BOOL(m_irqEnabled);FDS_BOOL(m_irqRepeat);FDS_BOOL(m_timerPending);FDS_BOOL(m_refreshIrqEnabled);FDS_BOOL(m_refreshPending);if(!get8(p,e,m_refreshCounter)||!fds_detail::get16(p,e,m_refreshWatchdog))return false;FDS_BOOL(m_diskRegs);FDS_BOOL(m_soundRegs);if(!get8(p,e,m_writeData))return false;FDS_BOOL(m_motor);FDS_BOOL(m_resetTransfer);FDS_BOOL(m_readMode);FDS_BOOL(m_crcControl);FDS_BOOL(m_diskReady);FDS_BOOL(m_diskIrqEnabled);FDS_BOOL(m_transferControl5);if(!fds_detail::get16(p,e,m_transferPhaseMaster)||!get8(p,e,m_ext))return false;FDS_BOOL(m_badCrc);FDS_BOOL(m_endOfHead);if(!get8(p,e,m_readData))return false;FDS_BOOL(m_gapEnded);FDS_BOOL(m_scanning);FDS_BOOL(m_transferComplete);FDS_BOOL(m_diskPending);FDS_BOOL(m_prevCrc);
 #undef FDS_BOOL
         if(!fds_detail::get32(p,e,q))return false;
         m_currentSide=int(q)-1;
@@ -170,5 +303,5 @@ private:
     void updateCrc(uint8_t value){
         for(uint16_t n=1;n<=0x80;n<<=1){uint8_t carry=uint8_t(m_crc&1);m_crc>>=1;if(carry)m_crc^=0x8408;if(value&n)m_crc^=0x8000;}
     }
-    uint16_t m_irqReload=0,m_irqCounter=0,m_crc=0;bool m_irqEnabled=false,m_irqRepeat=false,m_timerPending=false,m_diskRegs=true,m_soundRegs=true;uint8_t m_writeData=0,m_ext=0,m_readData=0;bool m_motor=false,m_resetTransfer=false,m_readMode=false,m_crcControl=false,m_diskReady=false,m_diskIrqEnabled=false,m_badCrc=false,m_endOfHead=true,m_gapEnded=true,m_scanning=false,m_transferComplete=false,m_diskPending=false,m_prevCrc=false;int m_currentSide=-1;uint32_t m_diskPos=0,m_delay=0;std::vector<std::vector<uint8_t>>m_sides;fds_detail::Audio m_audio;
+    uint16_t m_irqReload=0,m_irqCounter=0,m_crc=0;bool m_irqEnabled=false,m_irqRepeat=false,m_timerPending=false,m_refreshIrqEnabled=false,m_refreshPending=false;uint8_t m_refreshCounter=0;uint16_t m_refreshWatchdog=0;bool m_diskRegs=true,m_soundRegs=true;uint8_t m_writeData=0,m_ext=0,m_readData=0;bool m_motor=false,m_resetTransfer=false,m_readMode=false,m_crcControl=false,m_diskReady=false,m_diskIrqEnabled=false,m_transferControl5=false,m_badCrc=false,m_endOfHead=true,m_gapEnded=true,m_scanning=false,m_transferComplete=false,m_diskPending=false,m_prevCrc=false;int m_currentSide=-1;uint32_t m_diskPos=0,m_delay=0;uint16_t m_transferPhaseMaster=0;std::vector<std::vector<uint8_t>>m_sides;fds_detail::Audio m_audio;
 };

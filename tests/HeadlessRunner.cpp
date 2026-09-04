@@ -155,9 +155,10 @@ bool parseArgs(int argc, char** argv, Options& out)
 
 bool hasBlarggSignature(const Bus& bus)
 {
-    return bus.read(kSignature + 0) == 0xDE &&
-           bus.read(kSignature + 1) == 0xB0 &&
-           bus.read(kSignature + 2) == 0x61;
+
+    return bus.debugRead(kSignature + 0) == 0xDE &&
+           bus.debugRead(kSignature + 1) == 0xB0 &&
+           bus.debugRead(kSignature + 2) == 0x61;
 }
 
 std::string readBlarggMessage(const Bus& bus)
@@ -165,7 +166,7 @@ std::string readBlarggMessage(const Bus& bus)
     std::string text;
     text.reserve(256);
     for (std::size_t i = 0; i < kMaxMessage; ++i) {
-        const uint8_t c = bus.read(static_cast<uint16_t>(kMessage + i));
+        const uint8_t c = bus.debugRead(static_cast<uint16_t>(kMessage + i));
         if (c == 0) break;
         if (c == '\r') continue;
         if (c == '\n' || c == '\t' || (c >= 32 && c <= 126))
@@ -577,7 +578,7 @@ int main(int argc, char** argv)
             continue;
 
         protocolSeen = true;
-        const uint8_t status = m.bus->read(kStatus);
+        const uint8_t status = m.bus->debugRead(kStatus);
         const std::string message = readBlarggMessage(*m.bus);
         if (!options.quiet && !message.empty() && message != lastMessage) {
             std::cout << message;

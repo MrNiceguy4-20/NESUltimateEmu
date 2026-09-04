@@ -77,13 +77,24 @@ int runBuiltInProbeSuite(const char* executablePath)
     };
 
     unsigned passed = 0;
+    unsigned skipped = 0;
+    unsigned failed = 0;
     std::cout << "\n=== BUILT-IN PROBE SUMMARY ===\n";
     for (const Result& result : results) {
-        const bool ok = result.code == 0;
-        passed += ok ? 1u : 0u;
-        std::cout << (ok ? "PASS" : "FAIL") << " [" << result.code << "] " << result.name << "\n";
+        if (result.code == 0) {
+            ++passed;
+            std::cout << "PASS [0] " << result.name << "\n";
+        } else if (result.code == 2) {
+            ++skipped;
+            std::cout << "SKIP [2] " << result.name << " (required probe ROM not present)\n";
+        } else {
+            ++failed;
+            std::cout << "FAIL [" << result.code << "] " << result.name << "\n";
+        }
     }
-    const unsigned total = static_cast<unsigned>(sizeof(results) / sizeof(results[0]));
-    std::cout << passed << "/" << total << " probes passed\n";
-    return passed == total ? 0 : 1;
+    const unsigned runnable = passed + failed;
+    std::cout << passed << "/" << runnable << " runnable probes passed";
+    if (skipped) std::cout << ", " << skipped << " skipped";
+    std::cout << "\n";
+    return failed == 0 ? 0 : 1;
 }

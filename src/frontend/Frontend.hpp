@@ -1,7 +1,8 @@
 #pragma once
-#include <SDL.h>
+#include <SDL3/SDL.h>
 #include "imgui.h"
 #include <array>
+#include <memory>
 #include <string>
 #include <vector>
 #include "../core/Timing.hpp"
@@ -19,6 +20,7 @@ public:
     ~Frontend();
 
     void run();
+    bool loadRomPath(const std::string& path);
 
 private:
     SDL_Window* m_window;
@@ -31,7 +33,7 @@ private:
     bool          m_running;
 
     SDL_Texture* m_nesTexture = nullptr;
-    SDL_GameController* m_gamepad = nullptr;
+    SDL_Gamepad* m_gamepad = nullptr;
 
     std::string m_statusMessage;
     bool        m_statusIsError = false;
@@ -40,7 +42,18 @@ private:
     int  m_scale = 3;
     bool m_fullscreen = false;
     bool m_ntscAspect = true;
+    bool m_cropLeftOverscan = true;
+    bool m_hideNativeRasterArtifacts = false;
+    bool m_showFps = true;
+    bool m_fourScoreEnabled = false;
+    bool m_zapperEnabled = false;
     int  m_saveSlot = 0;
+
+    struct MovieFrame { uint8_t p1 = 0; uint8_t p2 = 0; };
+    bool m_movieRecording = false;
+    std::vector<uint8_t> m_movieInitialState;
+    std::string m_movieOutputPath;
+    std::vector<MovieFrame> m_movieFrames;
 
     enum class NesButton : int { A, B, Select, Start, Up, Down, Left, Right, Count };
     enum class HotkeyAction : int {
@@ -51,7 +64,7 @@ private:
 
     std::array<SDL_Scancode, static_cast<int>(NesButton::Count)> m_p1Keys{};
     std::array<SDL_Scancode, static_cast<int>(NesButton::Count)> m_p2Keys{};
-    std::array<SDL_GameControllerButton, static_cast<int>(NesButton::Count)> m_p1PadButtons{};
+    std::array<SDL_GamepadButton, static_cast<int>(NesButton::Count)> m_p1PadButtons{};
     std::array<SDL_Keycode, static_cast<int>(HotkeyAction::Count)> m_hotkeys{};
     CaptureTarget m_captureTarget = CaptureTarget::None;
     int m_captureIndex = -1;
@@ -96,5 +109,11 @@ private:
     void loadState();
     bool saveStateToPath(const std::string& path);
     bool loadStateFromPath(const std::string& path);
+    bool captureStateBlob(std::vector<uint8_t>& out) const;
+    bool restoreStateBlob(const std::vector<uint8_t>& blob, std::string& error);
+    void clearSessionHistory();
+    void startMovieRecording();
+    void stopMovieRecording();
+    std::string moviePath() const;
     std::string statePath(int slot) const;
 };

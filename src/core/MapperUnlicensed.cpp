@@ -183,6 +183,210 @@ private:
     void irqClock(){if(!m_irqEnabled)return;uint8_t dir=(m_irqMode>>6)&3;if(dir!=1&&dir!=2)return;uint8_t mask=(m_irqMode&4)?7:0xFF;bool wrap=false;if(dir==1){++m_prescaler;wrap=(m_prescaler&mask)==0;}else{--m_prescaler;wrap=(m_prescaler&mask)==mask;}if(!wrap)return;if(dir==1){++m_irqCounter;if(m_irqCounter==0)m_irqPending=true;}else{--m_irqCounter;if(m_irqCounter==0xFF)m_irqPending=true;}}
 };
 
+class Mapper83 final : public Mapper {
+public:
+    explicit Mapper83(const MapperConfig& c) : Mapper(c) { reset(true); }
+
+    bool implementationSupported() const override {
+        if (m_config.id == 264) return m_config.submapper == 0;
+        return m_config.id == 83 && (!m_config.nes20 || m_config.submapper <= 3);
+    }
+
+    bool cpuReadRegister(uint16_t a, uint8_t& d) override {
+        const uint16_t r = asicAddress(a);
+        if ((r & 0xF100) == 0x5000) { d = uint8_t((d & 0xFC) | (m_solderPad & 3)); return true; }
+        if (r >= 0x5100 && r < 0x5104) { d = m_scratch[r & 3]; return true; }
+        return false;
+    }
+
+    bool cpuMapRead(uint16_t a, uint32_t& m) const override {
+        if (!m_config.prgRomSize) return false;
+        if (a >= 0x6000 && a < 0x8000) {
+            if (isSub2()) return false;
+            if ((m_mode & 0x20) == 0) return false;
+            m = mapBank(prg8kBank(3), 0x2000, m_config.prgRomSize, a & 0x1FFF);
+            return true;
+        }
+        if (a < 0x8000) return false;
+
+        const unsigned pm = (m_mode >> 3) & 3;
+        if (pm == 0) {
+            std::size_t bank16 = prgBase16();
+            const unsigned innerBits = innerPrgBits16();
+            const std::size_t innerMask = (std::size_t(1) << innerBits) - 1;
+            if (a >= 0xC000) bank16 = (bank16 & ~innerMask) | innerMask;
+            m = mapBank(bank16, 0x4000, m_config.prgRomSize, a & 0x3FFF);
+            return true;
+        }
+        if (pm == 1) {
+            m = mapBank(prgBase16(), 0x4000, m_config.prgRomSize, a & 0x3FFF);
+            return true;
+        }
+
+        const unsigned slot = (a - 0x8000) >> 13;
+        const std::size_t bank = slot < 3 ? prg8kBank(slot) : fixedLast8kBank();
+        m = mapBank(bank, 0x2000, m_config.prgRomSize, a & 0x1FFF);
+        return true;
+    }
+
+    bool cpuWrite(uint16_t a, uint8_t d, uint64_t) override {
+        const uint16_t r = asicAddress(a);
+        if (r >= 0x5100 && r < 0x5104) { m_scratch[r & 3] = d; return true; }
+
+        if ((r & 0x8300) == 0x8000) { m_prgBase = d; return true; }
+        if ((r & 0x8300) == 0x8100) { m_mode = d; updateMirror(); return true; }
+        if ((r & 0x8301) == 0x8200) {
+            m_irqCounter = uint16_t((m_irqCounter & 0xFF00) | d);
+            m_irqPending = false;
+            return true;
+        }
+        if ((r & 0x8301) == 0x8201) {
+            m_irqCounter = uint16_t((m_irqCounter & 0x00FF) | (uint16_t(d) << 8));
+            if (m_mode & 0x80) m_irqEnabled = true;
+            return true;
+        }
+        if ((r & 0x8310) == 0x8300) { m_prg[r & 3] = d & 0x1F; return true; }
+        if ((r & 0x8318) == 0x8310) { m_chr[r & 7] = d; return true; }
+        if ((r & 0x8318) == 0x8318) { m_irqSourceA12 = d != 0; return true; }
+        return a >= 0x8000;
+    }
+
+    bool ppuMapRead(uint16_t a, uint32_t& m) override { return mapChr(a, m); }
+    bool ppuMapReadEx(uint16_t a, uint32_t& m, PpuFetchKind) override { return mapChr(a, m); }
+    bool ppuMapWrite(uint16_t a, uint32_t& m) override {
+        if (!m_config.chrRamSize) return false;
+        return mapChr(a, m);
+    }
+    bool ppuUsesChrRam(uint16_t a) const override { return a < 0x2000 && m_config.chrRamSize != 0 && m_config.chrRomSize == 0; }
+
+    bool mapPrgRam(uint16_t a, uint32_t& m, bool) const override {
+        if (!isSub2() || a < 0x6000 || a >= 0x8000 || !m_config.prgRamSize) return false;
+        const std::size_t bank = (m_prgBase >> 6) & 3;
+        m = static_cast<uint32_t>((bank * 0x2000 + (a & 0x1FFF)) % m_config.prgRamSize);
+        return true;
+    }
+
+    void notifyPpuAddress(uint16_t a, uint64_t) override {
+        const bool high = (a & 0x1000) != 0;
+        if (m_irqSourceA12 && high && !m_lastA12) clockIrq();
+        m_lastA12 = high;
+    }
+    void clockCpu() override { if (!m_irqSourceA12) clockIrq(); }
+    bool irqActive() const override { return m_irqPending; }
+
+    void reset(bool hard) override {
+        if (!hard) { m_irqPending = false; return; }
+        m_prgBase = m_mode = 0;
+        std::fill(std::begin(m_prg), std::end(m_prg), uint8_t{0});
+        std::fill(std::begin(m_chr), std::end(m_chr), uint8_t{0});
+        std::fill(std::begin(m_scratch), std::end(m_scratch), uint8_t{0});
+        m_irqCounter = 0; m_irqEnabled = m_irqPending = m_irqSourceA12 = m_lastA12 = false;
+        m_solderPad = m_config.boardVariant & 3;
+        updateMirror();
+    }
+
+    void saveState(std::vector<uint8_t>& o) const override {
+        put8(o, static_cast<uint8_t>(m_mirror));
+        put8(o, m_prgBase); put8(o, m_mode);
+        for (auto v : m_prg) put8(o, v);
+        for (auto v : m_chr) put8(o, v);
+        for (auto v : m_scratch) put8(o, v);
+        put8(o, uint8_t(m_irqCounter)); put8(o, uint8_t(m_irqCounter >> 8));
+        put8(o, m_irqEnabled); put8(o, m_irqPending); put8(o, m_irqSourceA12); put8(o, m_lastA12); put8(o, m_solderPad);
+    }
+    bool loadState(const uint8_t*& p, const uint8_t* e) override {
+        uint8_t b=0,lo=0,hi=0;
+        if(!get8(p,e,b))return false;
+        m_mirror=static_cast<Mirror>(b);
+        if(!get8(p,e,m_prgBase)||!get8(p,e,m_mode))return false;
+        for(auto&v:m_prg) if(!get8(p,e,v)) return false;
+        for(auto&v:m_chr) if(!get8(p,e,v)) return false;
+        for(auto&v:m_scratch) if(!get8(p,e,v)) return false;
+        if(!get8(p,e,lo)||!get8(p,e,hi))return false;
+        m_irqCounter=uint16_t(lo)|(uint16_t(hi)<<8);
+        if(!get8(p,e,b))return false;
+        m_irqEnabled=b!=0;
+        if(!get8(p,e,b))return false;
+        m_irqPending=b!=0;
+        if(!get8(p,e,b))return false;
+        m_irqSourceA12=b!=0;
+        if(!get8(p,e,b))return false;
+        m_lastA12=b!=0;
+        if(!get8(p,e,m_solderPad))return false;
+        return true;
+    }
+
+private:
+    uint8_t m_prgBase=0,m_mode=0,m_prg[4]{},m_chr[8]{},m_scratch[4]{},m_solderPad=0;
+    uint16_t m_irqCounter=0;
+    bool m_irqEnabled=false,m_irqPending=false,m_irqSourceA12=false,m_lastA12=false;
+
+    uint16_t asicAddress(uint16_t a) const {
+        if (m_config.id != 264) return a;
+        return uint16_t((a & 0xF0FF) | ((a & 0x0C00) >> 2));
+    }
+    bool isSub2() const { return m_config.id == 83 && m_config.nes20 && m_config.submapper == 2; }
+    bool isSub3() const { return m_config.id == 83 && m_config.nes20 && m_config.submapper == 3; }
+    bool is2kChr() const { return m_config.id == 264 || (m_config.id == 83 && m_config.nes20 && m_config.submapper == 1); }
+    unsigned innerPrgBits16() const { return (isSub3() || m_config.id == 264) ? 3u : 4u; }
+    std::size_t prgBase16() const {
+        if (isSub2() || isSub3()) return std::size_t(m_prgBase & 0x3F);
+        return m_prgBase;
+    }
+    std::size_t prgOuter8k() const {
+        if (isSub2()) return std::size_t((m_prgBase >> 4) & 0x03) << 5;
+        if (isSub3()) return std::size_t((m_prgBase >> 3) & 0x07) << 4;
+        if (m_config.id == 264) return std::size_t(m_prgBase >> 3) << 4;
+        return std::size_t(m_prgBase >> 4) << 5;
+    }
+    std::size_t prg8kBank(unsigned slot) const {
+        (void)slot;
+        const std::size_t mask = (isSub3() || m_config.id == 264) ? 0x0F : 0x1F;
+        return prgOuter8k() | (m_prg[slot & 3] & mask);
+    }
+    std::size_t fixedLast8kBank() const {
+        const std::size_t mask = (isSub3() || m_config.id == 264) ? 0x0F : 0x1F;
+        return prgOuter8k() | mask;
+    }
+    std::size_t chrOuter1k() const {
+        if (isSub2()) return std::size_t((m_prgBase >> 4) & 0x03) << 8;
+        if (isSub3()) return std::size_t((m_prgBase >> 6) & 3) << 8;
+        return 0;
+    }
+    bool mapChr(uint16_t a, uint32_t& m) const {
+        if (a >= 0x2000) return false;
+        const std::size_t size = m_config.chrRomSize ? m_config.chrRomSize : m_config.chrRamSize;
+        if (!size) return false;
+        if (is2kChr()) {
+            unsigned reg = 0;
+            if (a < 0x0800) reg = 0;
+            else if (a < 0x1000) reg = 1;
+            else if (a < 0x1800) reg = 6;
+            else reg = 7;
+            const std::size_t bank = chrOuter1k() | (std::size_t(m_chr[reg]) << 1);
+            m = mapBank(bank, 0x400, size, a & 0x7FF);
+        } else {
+            const unsigned slot = a >> 10;
+            const std::size_t bank = chrOuter1k() | m_chr[slot];
+            m = mapBank(bank, 0x400, size, a & 0x3FF);
+        }
+        return true;
+    }
+    void updateMirror() {
+        switch (m_mode & 3) {
+        case 0: m_mirror=Mirror::Vertical; break;
+        case 1: m_mirror=Mirror::Horizontal; break;
+        case 2: m_mirror=Mirror::OnescreenLo; break;
+        default:m_mirror=Mirror::OnescreenHi; break;
+        }
+    }
+    void clockIrq() {
+        if (!m_irqEnabled || m_irqCounter == 0) return;
+        if (m_mode & 0x40) --m_irqCounter; else ++m_irqCounter;
+        if (m_irqCounter == 0) { m_irqEnabled=false; m_irqPending=true; }
+    }
+};
+
 class Mapper268 final : public Mapper {
 public:
     explicit Mapper268(const MapperConfig& c) : Mapper(c) { hardReset(); }
@@ -888,6 +1092,8 @@ std::unique_ptr<Mapper> createUnlicensedMapper(const MapperConfig& config)
         return nullptr;
     case 35: case 90: case 209: case 211:
         return std::make_unique<MapperJY>(config);
+    case 83: case 264:
+        return std::make_unique<Mapper83>(config);
     case 176: case 179:
         return std::make_unique<Mapper176>(config);
     case 268:

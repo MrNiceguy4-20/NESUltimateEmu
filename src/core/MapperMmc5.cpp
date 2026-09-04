@@ -25,7 +25,7 @@ inline bool get32(const uint8_t*& p,const uint8_t* e,uint32_t& v){v=0;for(int i=
 
 static constexpr uint8_t kLengthTable[32] = {
     10,254,20,2,40,4,80,6,160,8,60,10,14,12,26,14,
-    12,16,24,18,48,20,96,22,192,24,72,26,16,28,32,30
+    12,16,24,18,48,20,96,22,192,24,72,26,0,28,32,30
 };
 
 struct Mmc5Pulse {
@@ -51,6 +51,7 @@ public:
     }
 
     bool cpuReadRegister(uint16_t a,uint8_t& d) override {
+        if(a==0x5010){ d=uint8_t((m_pcmIrqEnable&&m_pcmIrqTrip?0x80:0)|0x01); m_pcmIrqTrip=false; return true; }
         if(a==0x5015){ d=uint8_t((m_pulse[0].length?1:0)|(m_pulse[1].length?2:0)); return true; }
         if(a==0x5204){ d=uint8_t((m_irqPending?0x80:0)|(m_inFrame?0x40:0)); if(true)m_irqPending=false; return true; }
         if(a==0x5205){ d=uint8_t(uint16_t(m_mulA)*m_mulB); return true; }
@@ -106,8 +107,8 @@ public:
 
     bool cpuWrite(uint16_t a,uint8_t d,uint64_t) override {
         if(a>=0x5000&&a<=0x5007){int ch=(a>=0x5004);uint8_t r=a&3;if(r==0)m_pulse[ch].writeControl(d);else if(r==2)m_pulse[ch].writeLow(d);else if(r==3)m_pulse[ch].writeHigh(d);return true;}
-        if(a==0x5010){m_pcmReadMode=(d&1)!=0;return true;}
-        if(a==0x5011){if(!m_pcmReadMode&&d!=0)m_pcm=d;return true;}
+        if(a==0x5010){m_pcmReadMode=(d&1)!=0;m_pcmIrqEnable=(d&0x80)!=0;return true;}
+        if(a==0x5011){if(!m_pcmReadMode){if(d==0)m_pcmIrqTrip=true;else{m_pcm=d;m_pcmIrqTrip=false;}}return true;}
         if(a==0x5015){for(int i=0;i<2;i++){m_pulse[i].enabled=(d&(1<<i))!=0;if(!m_pulse[i].enabled)m_pulse[i].length=0;}return true;}
         if(a==0x5100){m_prgMode=d&3;return true;} if(a==0x5101){m_chrMode=d&3;return true;}
         if(a==0x5102){m_prot1=d&3;return true;} if(a==0x5103){m_prot2=d&3;return true;}
@@ -127,7 +128,7 @@ public:
 
         if(a==0xFFFA || a==0xFFFB) resetScanlineDetector(true);
 
-        if(m_pcmReadMode&&a>=0x8000&&a<0xC000&&d!=0)m_pcm=d;
+        if(m_pcmReadMode&&a>=0x8000&&a<0xC000){if(d==0)m_pcmIrqTrip=true;else{m_pcm=d;m_pcmIrqTrip=false;}}
     }
     void observeCpuWrite(uint16_t a,uint8_t d) override {
 
@@ -196,16 +197,16 @@ public:
 
         if(++m_frameAudio>7458){m_frameAudio=uint16_t(m_frameAudio-7458);m_pulse[0].quarter();m_pulse[1].quarter();m_pulse[0].half();m_pulse[1].half();}
     }
-    bool irqActive() const override { return m_irqEnable&&m_irqPending; }
+    bool irqActive() const override { return (m_irqEnable&&m_irqPending)||(m_pcmIrqEnable&&m_pcmIrqTrip); }
     float expansionAudioSample(bool = false) const override { float p=(m_pulse[0].sample()+m_pulse[1].sample())*0.18f;float pcm=float(m_pcm)/255.0f*0.20f;return -(p+pcm); }
 
-    void saveState(std::vector<uint8_t>&o)const override {put8(o,m_prgMode);put8(o,m_chrMode);put8(o,m_prot1);put8(o,m_prot2);put8(o,m_exramMode);put8(o,m_ntMap);put8(o,m_fillTile);put8(o,m_fillPalette);for(auto v:m_prgReg)put8(o,v);for(auto v:m_chrReg)put8(o,v);put8(o,m_chrUpper);put8(o,m_splitCtrl);put8(o,m_splitScroll);put8(o,m_splitBank);put8(o,m_irqLine);put8(o,m_irqEnable);put8(o,m_irqPending);put8(o,m_inFrame);mapper_hard_detail::put16(o,m_scanLastNt);put8(o,m_scanMatchCount);put8(o,m_scanlineCounter);put8(o,m_ppuIdleCpu);put8(o,m_scanSyncPending);put8(o,m_ppuReadSeen);put8(o,m_mulA);put8(o,m_mulB);put8(o,m_pcmReadMode);put8(o,m_pcm);put8(o,m_sprite16);put8(o,m_chrLastSet);mapper_hard_detail::put16(o,m_frameAudio);mapper_hard_detail::put16(o,uint16_t(m_currentScanline));mapper_hard_detail::put16(o,m_exAttrNtOffset);mapper_hard_detail::put16(o,m_exAttrChrBank);put8(o,m_exAttrPending);put8(o,m_exAttrPatternReads);put8(o,m_specialAttrFetch);put8(o,m_specialPalette);put8(o,m_splitActive);put8(o,m_splitNtFetch);put8(o,m_splitPatternReads);put8(o,m_splitColumn);put8(o,m_splitFineY);put8(o,m_splitTileNumber);mapper_hard_detail::put16(o,m_splitTileOffset);for(auto v:m_exram)put8(o,v);m_pulse[0].save(o);m_pulse[1].save(o);}
-    bool loadState(const uint8_t*&p,const uint8_t*e)override {uint8_t b;if(!get8(p,e,m_prgMode)||!get8(p,e,m_chrMode)||!get8(p,e,m_prot1)||!get8(p,e,m_prot2)||!get8(p,e,m_exramMode)||!get8(p,e,m_ntMap)||!get8(p,e,m_fillTile)||!get8(p,e,m_fillPalette))return false;for(auto&v:m_prgReg)if(!get8(p,e,v))return false;for(auto&v:m_chrReg)if(!get8(p,e,v))return false;if(!get8(p,e,m_chrUpper)||!get8(p,e,m_splitCtrl)||!get8(p,e,m_splitScroll)||!get8(p,e,m_splitBank)||!get8(p,e,m_irqLine))return false;if(!get8(p,e,b))return false;m_irqEnable=b;if(!get8(p,e,b))return false;m_irqPending=b;if(!get8(p,e,b))return false;m_inFrame=b;if(!mapper_hard_detail::get16(p,e,m_scanLastNt)||!get8(p,e,m_scanMatchCount)||!get8(p,e,m_scanlineCounter)||!get8(p,e,m_ppuIdleCpu)||!get8(p,e,b))return false;m_scanSyncPending=b;if(!get8(p,e,b))return false;m_ppuReadSeen=b;if(!get8(p,e,m_mulA)||!get8(p,e,m_mulB)||!get8(p,e,b))return false;m_pcmReadMode=b;if(!get8(p,e,m_pcm)||!get8(p,e,b))return false;m_sprite16=b;if(!get8(p,e,b))return false;m_chrLastSet=b;if(!mapper_hard_detail::get16(p,e,m_frameAudio))return false;uint16_t q=0;if(!mapper_hard_detail::get16(p,e,q))return false;m_currentScanline=int16_t(q);if(!mapper_hard_detail::get16(p,e,m_exAttrNtOffset)||!mapper_hard_detail::get16(p,e,m_exAttrChrBank))return false;if(!get8(p,e,b))return false;m_exAttrPending=b;if(!get8(p,e,m_exAttrPatternReads)||!get8(p,e,b))return false;m_specialAttrFetch=b;if(!get8(p,e,m_specialPalette)||!get8(p,e,b))return false;m_splitActive=b;if(!get8(p,e,b))return false;m_splitNtFetch=b;if(!get8(p,e,m_splitPatternReads)||!get8(p,e,m_splitColumn)||!get8(p,e,m_splitFineY)||!get8(p,e,m_splitTileNumber)||!mapper_hard_detail::get16(p,e,m_splitTileOffset))return false;for(auto&v:m_exram)if(!get8(p,e,v))return false;return m_pulse[0].load(p,e)&&m_pulse[1].load(p,e);}
+    void saveState(std::vector<uint8_t>&o)const override {put8(o,m_prgMode);put8(o,m_chrMode);put8(o,m_prot1);put8(o,m_prot2);put8(o,m_exramMode);put8(o,m_ntMap);put8(o,m_fillTile);put8(o,m_fillPalette);for(auto v:m_prgReg)put8(o,v);for(auto v:m_chrReg)put8(o,v);put8(o,m_chrUpper);put8(o,m_splitCtrl);put8(o,m_splitScroll);put8(o,m_splitBank);put8(o,m_irqLine);put8(o,m_irqEnable);put8(o,m_irqPending);put8(o,m_inFrame);mapper_hard_detail::put16(o,m_scanLastNt);put8(o,m_scanMatchCount);put8(o,m_scanlineCounter);put8(o,m_ppuIdleCpu);put8(o,m_scanSyncPending);put8(o,m_ppuReadSeen);put8(o,m_mulA);put8(o,m_mulB);put8(o,m_pcmReadMode);put8(o,m_pcmIrqEnable);put8(o,m_pcmIrqTrip);put8(o,m_pcm);put8(o,m_sprite16);put8(o,m_chrLastSet);mapper_hard_detail::put16(o,m_frameAudio);mapper_hard_detail::put16(o,uint16_t(m_currentScanline));mapper_hard_detail::put16(o,m_exAttrNtOffset);mapper_hard_detail::put16(o,m_exAttrChrBank);put8(o,m_exAttrPending);put8(o,m_exAttrPatternReads);put8(o,m_specialAttrFetch);put8(o,m_specialPalette);put8(o,m_splitActive);put8(o,m_splitNtFetch);put8(o,m_splitPatternReads);put8(o,m_splitColumn);put8(o,m_splitFineY);put8(o,m_splitTileNumber);mapper_hard_detail::put16(o,m_splitTileOffset);for(auto v:m_exram)put8(o,v);m_pulse[0].save(o);m_pulse[1].save(o);}
+    bool loadState(const uint8_t*&p,const uint8_t*e)override {uint8_t b;if(!get8(p,e,m_prgMode)||!get8(p,e,m_chrMode)||!get8(p,e,m_prot1)||!get8(p,e,m_prot2)||!get8(p,e,m_exramMode)||!get8(p,e,m_ntMap)||!get8(p,e,m_fillTile)||!get8(p,e,m_fillPalette))return false;for(auto&v:m_prgReg)if(!get8(p,e,v))return false;for(auto&v:m_chrReg)if(!get8(p,e,v))return false;if(!get8(p,e,m_chrUpper)||!get8(p,e,m_splitCtrl)||!get8(p,e,m_splitScroll)||!get8(p,e,m_splitBank)||!get8(p,e,m_irqLine))return false;if(!get8(p,e,b))return false;m_irqEnable=b;if(!get8(p,e,b))return false;m_irqPending=b;if(!get8(p,e,b))return false;m_inFrame=b;if(!mapper_hard_detail::get16(p,e,m_scanLastNt)||!get8(p,e,m_scanMatchCount)||!get8(p,e,m_scanlineCounter)||!get8(p,e,m_ppuIdleCpu)||!get8(p,e,b))return false;m_scanSyncPending=b;if(!get8(p,e,b))return false;m_ppuReadSeen=b;if(!get8(p,e,m_mulA)||!get8(p,e,m_mulB)||!get8(p,e,b))return false;m_pcmReadMode=b;if(!get8(p,e,b))return false;m_pcmIrqEnable=b;if(!get8(p,e,b))return false;m_pcmIrqTrip=b;if(!get8(p,e,m_pcm)||!get8(p,e,b))return false;m_sprite16=b;if(!get8(p,e,b))return false;m_chrLastSet=b;if(!mapper_hard_detail::get16(p,e,m_frameAudio))return false;uint16_t q=0;if(!mapper_hard_detail::get16(p,e,q))return false;m_currentScanline=int16_t(q);if(!mapper_hard_detail::get16(p,e,m_exAttrNtOffset)||!mapper_hard_detail::get16(p,e,m_exAttrChrBank))return false;if(!get8(p,e,b))return false;m_exAttrPending=b;if(!get8(p,e,m_exAttrPatternReads)||!get8(p,e,b))return false;m_specialAttrFetch=b;if(!get8(p,e,m_specialPalette)||!get8(p,e,b))return false;m_splitActive=b;if(!get8(p,e,b))return false;m_splitNtFetch=b;if(!get8(p,e,m_splitPatternReads)||!get8(p,e,m_splitColumn)||!get8(p,e,m_splitFineY)||!get8(p,e,m_splitTileNumber)||!mapper_hard_detail::get16(p,e,m_splitTileOffset))return false;for(auto&v:m_exram)if(!get8(p,e,v))return false;return m_pulse[0].load(p,e)&&m_pulse[1].load(p,e);}
 private:
     uint8_t m_prgMode=3,m_chrMode=3,m_prot1=0,m_prot2=0,m_exramMode=0,m_ntMap=0,m_fillTile=0,m_fillPalette=0;
     uint8_t m_prgReg[5]={0,0,0,0,0xFF},m_chrReg[12]={},m_chrUpper=0;
     uint8_t m_splitCtrl=0,m_splitScroll=0,m_splitBank=0,m_irqLine=0,m_mulA=0,m_mulB=0,m_pcm=0;
-    bool m_irqEnable=false,m_irqPending=false,m_inFrame=false,m_pcmReadMode=false,m_sprite16=false,m_chrLastSet=false;uint16_t m_frameAudio=0;
+    bool m_irqEnable=false,m_irqPending=false,m_inFrame=false,m_pcmReadMode=false,m_pcmIrqEnable=false,m_pcmIrqTrip=false,m_sprite16=false,m_chrLastSet=false;uint16_t m_frameAudio=0;
     uint16_t m_scanLastNt=0;uint8_t m_scanMatchCount=0,m_scanlineCounter=0,m_ppuIdleCpu=0;bool m_scanSyncPending=false,m_ppuReadSeen=false;
     int m_currentScanline=-1;uint16_t m_exAttrNtOffset=0,m_exAttrChrBank=0,m_splitTileOffset=0;bool m_exAttrPending=false,m_specialAttrFetch=false,m_splitActive=false,m_splitNtFetch=false;uint8_t m_exAttrPatternReads=0,m_specialPalette=0,m_splitPatternReads=0,m_splitColumn=0,m_splitFineY=0,m_splitTileNumber=0;
     uint8_t m_exram[0x400]={};mapper_hard_detail::Mmc5Pulse m_pulse[2];

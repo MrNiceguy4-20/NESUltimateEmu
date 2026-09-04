@@ -138,6 +138,7 @@ int runPpuConformanceProbe()
     maskDelay.testBypassRegisterWriteInhibit();
     maskDelay.cpuWrite(0x2001, 0x18);
     const bool delayArmed = maskDelay.testEffectiveRenderMask() == 0 && maskDelay.testRenderMaskDelay() == 3;
+
     maskDelay.clock();
     maskDelay.clock();
     const bool enableHeld = maskDelay.testEffectiveRenderMask() == 0 && maskDelay.testRenderMaskDelay() == 1;
@@ -153,6 +154,74 @@ int runPpuConformanceProbe()
         delayArmed ? "PASS" : "FAIL", enableHeld ? "PASS" : "FAIL", enableApplied ? "PASS" : "FAIL",
         disableHeld ? "PASS" : "FAIL", disableApplied ? "PASS" : "FAIL");
     ok &= delayArmed && enableHeld && enableApplied && disableHeld && disableApplied;
+
+    PPU lateMaskDelay;
+    lateMaskDelay.testBypassRegisterWriteInhibit();
+    lateMaskDelay.testSetCpuPpuIoLatePhase(true);
+    lateMaskDelay.cpuWrite(0x2001, 0x18);
+    lateMaskDelay.testSetCpuPpuIoLatePhase(false);
+    const bool lateDelayArmed = lateMaskDelay.testEffectiveRenderMask() == 0 && lateMaskDelay.testRenderMaskDelay() == 3;
+    for (int i = 0; i < 2; ++i) lateMaskDelay.clock();
+    const bool lateDelayHeld = lateMaskDelay.testEffectiveRenderMask() == 0 && lateMaskDelay.testRenderMaskDelay() == 1;
+    lateMaskDelay.clock();
+    const bool lateDelayApplied = lateMaskDelay.testEffectiveRenderMask() == 0x18 && lateMaskDelay.testRenderMaskDelay() == 0;
+
+    PPU latePhaseBoundary;
+    latePhaseBoundary.testBypassRegisterWriteInhibit();
+    latePhaseBoundary.testSetOddFrame(true);
+    latePhaseBoundary.testSetTimingPosition(-1, 337);
+    latePhaseBoundary.testSetCpuPpuIoLatePhase(true);
+    latePhaseBoundary.cpuWrite(0x2001, 0x08);
+    latePhaseBoundary.testSetCpuPpuIoLatePhase(false);
+    for (int i = 0; i < 3; ++i) latePhaseBoundary.clock();
+
+    const bool latePhase337Skips = latePhaseBoundary.scanline() == 0 && latePhaseBoundary.cycle() == 0;
+
+    std::printf("ppumask_late_phase=armed:%s hold:%s apply:%s odd337_skip:%s\n",
+        lateDelayArmed ? "PASS" : "FAIL", lateDelayHeld ? "PASS" : "FAIL",
+        lateDelayApplied ? "PASS" : "FAIL", latePhase337Skips ? "PASS" : "FAIL");
+    ok &= lateDelayArmed && lateDelayHeld && lateDelayApplied && latePhase337Skips;
+
+    PPU earlyEnable;
+    earlyEnable.testBypassRegisterWriteInhibit();
+    earlyEnable.testSetOddFrame(true);
+    earlyEnable.testSetTimingPosition(-1, 337);
+    earlyEnable.cpuWrite(0x2001, 0x08);
+    for (int i = 0; i < 3; ++i) earlyEnable.clock();
+    const bool earlyEnableSkips = earlyEnable.scanline() == 0 && earlyEnable.cycle() == 0;
+
+    PPU lateEnable;
+    lateEnable.testBypassRegisterWriteInhibit();
+    lateEnable.testSetOddFrame(true);
+    lateEnable.testSetTimingPosition(-1, 338);
+    lateEnable.cpuWrite(0x2001, 0x08);
+    lateEnable.clock();
+    lateEnable.clock();
+    const bool lateEnableDoesNotSkip = lateEnable.scanline() == -1 && lateEnable.cycle() == 340;
+
+    PPU earlyDisable;
+    earlyDisable.testBypassRegisterWriteInhibit();
+    earlyDisable.testForceEffectiveRenderMask(0x08);
+    earlyDisable.testSetOddFrame(true);
+    earlyDisable.testSetTimingPosition(-1, 337);
+    earlyDisable.cpuWrite(0x2001, 0x00);
+    for (int i = 0; i < 3; ++i) earlyDisable.clock();
+    const bool earlyDisablePreventsSkip = earlyDisable.scanline() == -1 && earlyDisable.cycle() == 340;
+
+    PPU lateDisable;
+    lateDisable.testBypassRegisterWriteInhibit();
+    lateDisable.testForceEffectiveRenderMask(0x08);
+    lateDisable.testSetOddFrame(true);
+    lateDisable.testSetTimingPosition(-1, 338);
+    lateDisable.cpuWrite(0x2001, 0x00);
+    lateDisable.clock();
+    lateDisable.clock();
+    const bool lateDisableStillSkips = lateDisable.scanline() == 0 && lateDisable.cycle() == 0;
+
+    std::printf("odd_frame_mask_boundary=enable337:%s enable338:%s disable337:%s disable338:%s\n",
+        earlyEnableSkips ? "PASS" : "FAIL", lateEnableDoesNotSkip ? "PASS" : "FAIL",
+        earlyDisablePreventsSkip ? "PASS" : "FAIL", lateDisableStillSkips ? "PASS" : "FAIL");
+    ok &= earlyEnableSkips && lateEnableDoesNotSkip && earlyDisablePreventsSkip && lateDisableStillSkips;
 
     PPU addrDelay;
     addrDelay.testBypassRegisterWriteInhibit();
@@ -713,6 +782,38 @@ int runPpuConformanceProbe()
     ok &= spriteOverflowBugOk;
 
     std::puts(ok ? "PASS" : "FAIL");
+
+    PPU evalA;
+    evalA.powerOn();
+    evalA.testBypassRegisterWriteInhibit();
+    evalA.cpuWrite(0x2003, 0x00);
+    for (unsigned i = 0; i < 64; ++i) {
+        evalA.cpuWrite(0x2004, static_cast<uint8_t>((i % 9 == 0) ? 0 : 0xF0));
+        evalA.cpuWrite(0x2004, static_cast<uint8_t>(i));
+        evalA.cpuWrite(0x2004, 0);
+        evalA.cpuWrite(0x2004, static_cast<uint8_t>(i * 3));
+    }
+    evalA.cpuWrite(0x2001, 0x18);
+    while (!(evalA.scanline() == 0 && evalA.cycle() == 137)) evalA.clock();
+    const uint64_t evalBefore = evalA.testSpriteEvalSignature();
+    std::vector<uint8_t> evalState;
+    evalA.saveState(evalState);
+    PPU evalB;
+    evalB.powerOn();
+    const uint8_t* evalCursor = evalState.data();
+    const bool evalLoad = evalB.loadState(evalCursor, evalState.data() + evalState.size()) &&
+        evalCursor == evalState.data() + evalState.size();
+    const bool evalExact = evalLoad && evalB.testSpriteEvalSignature() == evalBefore;
+    for (int i = 0; i < 120; ++i) { evalA.clock(); evalB.clock(); }
+    const bool evalDeterministic = evalExact &&
+        evalA.testSpriteEvalSignature() == evalB.testSpriteEvalSignature() &&
+        evalA.testStatus() == evalB.testStatus() && evalA.cycle() == evalB.cycle() &&
+        evalA.scanline() == evalB.scanline();
+    std::printf("ppu_mid_sprite_eval_state=%s exact=%s deterministic=%s\n",
+        evalDeterministic ? "PASS" : "FAIL", evalExact ? "PASS" : "FAIL",
+        evalDeterministic ? "PASS" : "FAIL");
+    ok &= evalDeterministic;
+
     return ok ? 0 : 1;
 }
 

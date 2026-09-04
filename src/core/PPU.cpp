@@ -223,13 +223,13 @@ uint8_t PPU::ppuRead(uint16_t addr, PpuFetchKind kind, bool driveAddress)
             value = m_cart->ppuRead(addr, kind);
     }
     else if (addr >= 0x2000 && addr <= 0x3EFF) {
-        NametableSource source = NametableSource::Ciram;
+        NametableSource ntSource = NametableSource::Ciram;
         uint32_t mapped = 0;
-        if (m_cart && m_cart->mapNametable(addr, source, mapped)) {
-            if (source == NametableSource::Ciram)
+        if (m_cart && m_cart->mapNametable(addr, ntSource, mapped)) {
+            if (ntSource == NametableSource::Ciram)
                 value = m_nametable[mapped & 0x0FFF];
             else
-                value = m_cart->readNametableBacking(source, mapped);
+                value = m_cart->readNametableBacking(ntSource, mapped);
         }
         else {
             value = m_nametable[mirrorNametable(addr)];
@@ -699,6 +699,8 @@ void PPU::clockSpriteFetches()
     else if (phase == 2) {
         beginRenderFetch(static_cast<uint16_t>(0x2000 | (m_v & 0x0FFF)),
                          PpuFetchKind::Background, RenderFetchTarget::SpriteGarbage, slot);
+
+        notifyPpuAddress(spritePatternAddress(slot));
         m_spriteAttr[slot] = valid ? m_oamSecondary[slot * 4 + 2] : 0;
         if (valid)
             touchOamRow(slot);
@@ -1091,11 +1093,14 @@ void PPU::clock()
             case 1:
                 completeRenderFetch();
                 break;
-            case 2:
+            case 2: {
                 beginRenderFetch(static_cast<uint16_t>(0x23C0 | (m_v & 0x0C00) |
                                  ((m_v >> 4) & 0x38) | ((m_v >> 2) & 0x07)),
                                  PpuFetchKind::Background, RenderFetchTarget::BgAttr);
+                const uint16_t base = (m_ctrl & 0x10) ? 0x1000 : 0x0000;
+                notifyPpuAddress(static_cast<uint16_t>(base + (static_cast<uint16_t>(m_bgNextTileId) << 4) + ((m_v >> 12) & 0x7)));
                 break;
+            }
             case 3:
                 completeRenderFetch();
                 break;
@@ -1268,13 +1273,13 @@ void PPU::clock()
 uint8_t PPU::readBusLatchWithDecay()
 {
 
-    static constexpr uint64_t kPpuClocksPerSecond = 5369318ull;
+    const uint64_t ppuClocksPerSecond = static_cast<uint64_t>(consolePpuClockHz(m_timing));
     static constexpr uint16_t kDecayMs[8] = { 520, 610, 560, 640, 500, 590, 545, 625 };
     for (unsigned bit = 0; bit < 8; ++bit) {
         const uint8_t mask = static_cast<uint8_t>(1u << bit);
         if ((m_busLatch & mask) == 0)
             continue;
-        const uint64_t threshold = (kPpuClocksPerSecond * kDecayMs[bit]) / 1000ull;
+        const uint64_t threshold = (ppuClocksPerSecond * kDecayMs[bit]) / 1000ull;
         if (m_masterClock - m_busBitRefreshClock[bit] >= threshold)
             m_busLatch = static_cast<uint8_t>(m_busLatch & ~mask);
     }
@@ -1537,6 +1542,7 @@ void PPU::cpuWrite(uint16_t addr, uint8_t data)
         const uint8_t newRenderBits = static_cast<uint8_t>(data & 0x18);
         if (newRenderBits != oldRenderBits || (m_renderMaskDelay != 0 && newRenderBits != m_pendingRenderMask)) {
             m_pendingRenderMask = newRenderBits;
+
             m_renderMaskDelay = 3;
         }
         break;
@@ -1702,6 +1708,20 @@ void PPU::saveState(std::vector<uint8_t>& out) const
     put8(m_renderFetchUseLiveHigh ? 1 : 0);
     putBytes(m_oam, 256);
     putBytes(m_oamSecondary, 32);
+
+    put8(m_spriteEvalStartAddr);
+    put8(m_spriteEvalN);
+    put8(m_spriteEvalM);
+    put8(m_spriteEvalFound);
+    put8(m_spriteEvalData);
+    put8(m_spriteEvalCopyRemaining);
+    put8(m_spriteEvalWrapBusData);
+    put8(m_spriteEvalOverflowIncRemaining);
+    put8(m_spriteEvalOverflowHandoff ? 1 : 0);
+    put8(m_spriteEvalFull ? 1 : 0);
+    put8(m_spriteEvalOverflowDiagonal ? 1 : 0);
+    put8(m_spriteEvalWrapped ? 1 : 0);
+    put8(m_spriteZeroNext ? 1 : 0);
     put8(m_spriteCount);
     put8(m_spriteZeroPossible ? 1 : 0);
     put8(m_spriteZeroBeingRendered ? 1 : 0);
@@ -1771,12 +1791,17 @@ bool PPU::loadState(const uint8_t*& p, const uint8_t* end)
     uint32_t sl = 0, cy = 0;
     uint8_t fc = 0, odd = 0, w = 0;
     if (!get32(sl) || !get32(cy) || !get8(fc) || !get8(odd)) return false;
-    m_scanline = (int)(int32_t)sl;
-    m_cycle = (int)cy;
+    const int loadedScanline = static_cast<int>(static_cast<int32_t>(sl));
+    const int loadedCycle = static_cast<int>(cy);
+    if (loadedScanline < -1 || loadedScanline >= consoleScanlines(m_timing) ||
+        loadedCycle < 0 || loadedCycle > 340 || fc > 1 || odd > 1)
+        return false;
+    m_scanline = loadedScanline;
+    m_cycle = loadedCycle;
     m_frameComplete = fc != 0;
     m_oddFrame = odd != 0;
     if (!get8(m_ctrl) || !get8(m_mask) || !get8(m_renderMask) || !get8(m_pendingRenderMask) || !get8(m_renderMaskDelay) || !get8(m_status) || !get8(m_oamAddr)) return false;
-    if ((m_renderMask & ~0x18) != 0 || (m_pendingRenderMask & ~0x18) != 0 || m_renderMaskDelay > 3) return false;
+    if ((m_renderMask & ~0x18) != 0 || (m_pendingRenderMask & ~0x18) != 0 || m_renderMaskDelay > 4) return false;
     if (!get16(m_pendingVramAddress) || !get8(m_vramAddressDelay) || !get8(m_ppudataIncrementDelay)) return false;
     uint8_t ppudataPending = 0; if (!get8(ppudataPending)) return false; m_ppudataIncrementPending = ppudataPending != 0;
     uint8_t ioLatePhase = 0; if (!get8(ioLatePhase)) return false; m_cpuPpuIoLatePhase = ioLatePhase != 0;
@@ -1811,6 +1836,21 @@ bool PPU::loadState(const uint8_t*& p, const uint8_t* end)
     m_ppuBusReadSource = "none";
     if (!getBytes(m_oam, 256)) return false;
     if (!getBytes(m_oamSecondary, 32)) return false;
+    uint8_t evalHandoff = 0, evalFull = 0, evalDiagonal = 0, evalWrapped = 0, zeroNext = 0;
+    if (!get8(m_spriteEvalStartAddr) || !get8(m_spriteEvalN) || !get8(m_spriteEvalM) ||
+        !get8(m_spriteEvalFound) || !get8(m_spriteEvalData) || !get8(m_spriteEvalCopyRemaining) ||
+        !get8(m_spriteEvalWrapBusData) || !get8(m_spriteEvalOverflowIncRemaining) ||
+        !get8(evalHandoff) || !get8(evalFull) || !get8(evalDiagonal) ||
+        !get8(evalWrapped) || !get8(zeroNext)) return false;
+    if (m_spriteEvalN > 63 || m_spriteEvalM > 3 || m_spriteEvalFound > 8 ||
+        m_spriteEvalCopyRemaining > 3 || m_spriteEvalOverflowIncRemaining > 3 ||
+        evalHandoff > 1 || evalFull > 1 || evalDiagonal > 1 || evalWrapped > 1 || zeroNext > 1)
+        return false;
+    m_spriteEvalOverflowHandoff = evalHandoff != 0;
+    m_spriteEvalFull = evalFull != 0;
+    m_spriteEvalOverflowDiagonal = evalDiagonal != 0;
+    m_spriteEvalWrapped = evalWrapped != 0;
+    m_spriteZeroNext = zeroNext != 0;
     if (!get8(m_spriteCount)) return false;
     if (!get8(fc)) return false;
     m_spriteZeroPossible = fc != 0;
@@ -1866,6 +1906,5 @@ bool PPU::loadState(const uint8_t*& p, const uint8_t* end)
     }
     if (!get8(m_oamLfsr)) return false;
 
-    rebuildSpriteOverflowEvaluation();
     return true;
 }

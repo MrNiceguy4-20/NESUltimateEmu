@@ -47,6 +47,24 @@ std::array<uint8_t, 16> baseHeader(uint8_t prg16k, uint8_t chr8k)
     h[4] = prg16k; h[5] = chr8k;
     return h;
 }
+
+std::vector<uint8_t> makeUnif(const std::string& board, uint8_t mirr, uint8_t tvci, bool battery, bool chrRam)
+{
+    std::vector<uint8_t> image(32, 0);
+    image[0]='U'; image[1]='N'; image[2]='I'; image[3]='F'; image[4]=7;
+    auto chunk = [&](const char id[4], const std::vector<uint8_t>& data) {
+        image.insert(image.end(), id, id + 4);
+        const uint32_t n = static_cast<uint32_t>(data.size());
+        for (int i=0;i<4;++i) image.push_back(static_cast<uint8_t>(n >> (i*8)));
+        image.insert(image.end(), data.begin(), data.end());
+    };
+    std::vector<uint8_t> mapr(board.begin(), board.end()); mapr.push_back(0); chunk("MAPR", mapr);
+    std::vector<uint8_t> prg(0x8000); for (std::size_t i=0;i<prg.size();++i) prg[i]=static_cast<uint8_t>(i/0x4000); chunk("PRG0", prg);
+    if (!chrRam) { std::vector<uint8_t> chr(0x2000, 0x5A); chunk("CHR0", chr); }
+    chunk("MIRR", std::vector<uint8_t>{mirr}); chunk("TVCI", std::vector<uint8_t>{tvci});
+    if (battery) chunk("BATR", std::vector<uint8_t>{1});
+    return image;
+}
 }
 
 int runCartridgeConformanceProbe()
@@ -95,7 +113,7 @@ int runCartridgeConformanceProbe()
     m53Header[6] = 0x50; m53Header[7] = 0x30;
     std::vector<uint8_t> m53Prg(0x220000);
     for (std::size_t i=0;i<m53Prg.size();++i) m53Prg[i]=static_cast<uint8_t>(i/0x4000);
-    std::fill(m53Prg.begin(),m53Prg.begin()+0x8000,0);
+    std::fill(m53Prg.begin(), m53Prg.begin() + 0x8000, uint8_t{0});
     m53Prg[0x7FFC]=0xF1; m53Prg[0x7FFD]=0xEC; m53Prg[0x7FFE]=0x1A; m53Prg[0x7FFF]=0x21;
     const bool m53Crc = RomDatabase::crc32(m53Prg.data(),0x8000)==0x63794E25u;
     const auto m53Path=root/"supervision53.nes";
@@ -206,6 +224,7 @@ int runCartridgeConformanceProbe()
     const auto savePath = root / "battery.sav";
     std::error_code ec;
     std::filesystem::remove(savePath, ec);
+    std::filesystem::remove(savePath.string() + ".bak", ec);
     Cartridge batteryA;
     const bool batteryLoadedA = writeRom(batteryPath, batteryHeader, 0x4000, 0) &&
         batteryA.loadFromFile(batteryPath.string());
@@ -223,6 +242,30 @@ int runCartridgeConformanceProbe()
         batteryLoadedB ? batteryB.cpuRead(0x6000) : 0,
         batteryLoadedB ? batteryB.ppuRead(0x0123) : 0);
     ok &= batteryRoundTrip;
+
+    bool batteryBackupRecovery = false;
+    bool batteryStructuredV2 = false;
+    if (batteryLoadedB) {
+        batteryB.cpuWrite(0x6000, 0x3C);
+        batteryB.ppuWrite(0x0123, 0xC3);
+        batteryB.saveBattery();
+
+        std::ifstream saved(savePath, std::ios::binary);
+        std::array<uint8_t, 5> magic{};
+        if (saved) saved.read(reinterpret_cast<char*>(magic.data()), static_cast<std::streamsize>(magic.size()));
+        batteryStructuredV2 = saved && magic[0] == 'N' && magic[1] == 'E' && magic[2] == 'S' &&
+            magic[3] == 'B' && magic[4] == 2;
+
+        { std::ofstream corrupt(savePath, std::ios::binary | std::ios::trunc); corrupt << "NESB\x02"; }
+        Cartridge batteryRecovered;
+        if (batteryRecovered.loadFromFile(batteryPath.string())) {
+            batteryBackupRecovery = batteryRecovered.cpuRead(0x6000) == 0xA5 &&
+                batteryRecovered.ppuRead(0x0123) == 0x5A;
+        }
+    }
+    std::printf("battery_transactional_backup=%s structured_v2=%s\n",
+        batteryBackupRecovery ? "PASS" : "FAIL", batteryStructuredV2 ? "PASS" : "FAIL");
+    ok &= batteryBackupRecovery && batteryStructuredV2;
 
     auto uxNoConflictHeader = baseHeader(4, 0);
     uxNoConflictHeader[6] = 0x20; uxNoConflictHeader[7] = 0x08; uxNoConflictHeader[8] = 0x10;
@@ -324,6 +367,37 @@ int runCartridgeConformanceProbe()
         memoryLoader ? "PASS" : "FAIL", memoryBufferCart.mapper(),
         (memoryDiskCart.romIdentity() == memoryBufferCart.romIdentity()) ? "MATCH" : "MISMATCH");
     ok &= memoryLoader;
+
+    const auto unifNrom = makeUnif("NES-NROM-256", 1, 1, false, false);
+    Cartridge unifNromCart;
+    const bool unifNromOk = unifNromCart.loadFromMemory(unifNrom, "legacy.unif") &&
+        unifNromCart.mapper() == 0 && unifNromCart.submapper() == 0 &&
+        unifNromCart.timing() == ConsoleTiming::PAL && unifNromCart.mirroring() == Mirror::Vertical &&
+        unifNromCart.cpuRead(0x8000) == 0 && unifNromCart.cpuRead(0xC000) == 1;
+    const auto unifUnrom = makeUnif("HVC-UNROM", 0, 0, false, true);
+    Cartridge unifUnromCart;
+    const bool unifUnromOk = unifUnromCart.loadFromMemory(unifUnrom, "legacy.unf") &&
+        unifUnromCart.mapper() == 2 && unifUnromCart.submapper() == 2 &&
+        unifUnromCart.mirroring() == Mirror::Horizontal;
+    auto badUnif = unifNrom; badUnif.resize(39);
+    Cartridge badUnifCart;
+    const bool unifStrict = !badUnifCart.loadFromMemory(badUnif, "truncated.unif") && !badUnifCart.isLoaded();
+    std::printf("unif_loader=%s nrom=%s unrom=%s strict=%s\n",
+        (unifNromOk && unifUnromOk && unifStrict) ? "PASS" : "FAIL",
+        unifNromOk ? "PASS" : "FAIL", unifUnromOk ? "PASS" : "FAIL", unifStrict ? "PASS" : "FAIL");
+    ok &= unifNromOk && unifUnromOk && unifStrict;
+
+    auto unsupportedHeader = baseHeader(2, 1);
+    unsupportedHeader[6] = static_cast<uint8_t>((unsupportedHeader[6] & 0x0F) | 0x40);
+    unsupportedHeader[7] = static_cast<uint8_t>((unsupportedHeader[7] & 0x0F) | 0x50);
+    std::vector<uint8_t> unsupportedImage(unsupportedHeader.begin(), unsupportedHeader.end());
+    unsupportedImage.resize(16 + 0x8000 + 0x2000);
+    Cartridge unsupportedCart;
+    const bool unsupportedRejected = !unsupportedCart.loadFromMemory(unsupportedImage, "unsupported_mapper84.nes") &&
+        !unsupportedCart.isLoaded() && unsupportedCart.lastError().find("Unsupported mapper 84") != std::string::npos;
+    std::printf("unsupported_mapper_rejection=%s error=%s\n",
+        unsupportedRejected ? "PASS" : "FAIL", unsupportedCart.lastError().c_str());
+    ok &= unsupportedRejected;
 
     std::filesystem::remove_all(root, ec);
     std::puts(ok ? "PASS" : "FAIL");

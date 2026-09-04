@@ -6,7 +6,7 @@
 
 ## Reproducible headless build
 
-The headless regression runner can be built without SDL or ImGui on Windows, Linux, or macOS with CMake 3.20+ and a C++17 compiler:
+The headless regression runner can be built without SDL or ImGui on Windows, Linux, or macOS with CMake 3.20+ and a C++23 compiler:
 
 ```bash
 cmake -S . -B build -DNES_BUILD_HEADLESS_TESTS=ON
@@ -343,7 +343,7 @@ Current Tier-0 observations from this corpus:
 - CPU reset RAM/register behavior: pass.
 - Official instruction functional tests, miscellaneous instruction tests, and instruction timing: pass.
 - PPU open bus and PPU read buffer: pass.
-- `ppu_vbl_nmi`: tests 01-04, 06, 08, and 09 pass; tests 05 and 07 now pass with phase-aware CPU /NMI sampling; test 10 still reports that the odd-frame clock is skipped too soon relative to enabling background rendering.
+- `ppu_vbl_nmi`: **10/10 PASS**. PPUMASK render-enable delay unified to 3 PPU dots for both CPU–PPU I/O phases (was 3 early / 4 late). The previous 4-dot late-phase delay made the odd-frame clock skip one dot too soon relative to enabling BG (blargg `10-even_odd_timing`). Validated against AccuracyCoin 141/141 and the full `ppu_vbl_nmi` suite.
 
 Third-party ROMs remain external and are never redistributed with the emulator source archive.
 

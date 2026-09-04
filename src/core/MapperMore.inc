@@ -86,6 +86,34 @@ private:
     uint8_t m_prg=0, m_prgA13=0, m_mode=0;
 };
 
+class Mapper29 final : public Mapper {
+public:
+    explicit Mapper29(const MapperConfig& c) : Mapper(c) { m_mirror = Mirror::Vertical; }
+
+    bool cpuMapRead(uint16_t a, uint32_t& m) const override {
+        if (a < 0x8000 || !m_config.prgRomSize) return false;
+        if (a < 0xC000) m = mapBank(m_prg, 0x4000, m_config.prgRomSize, a - 0x8000);
+        else m = mapBank(7, 0x4000, m_config.prgRomSize, a - 0xC000);
+        return true;
+    }
+    bool cpuWrite(uint16_t a, uint8_t d, uint64_t) override {
+        if (a < 0x8000) return false;
+        m_chr = uint8_t(d & 0x03);
+        m_prg = uint8_t((d >> 2) & 0x07);
+        return true;
+    }
+    bool ppuMapRead(uint16_t a, uint32_t& m) override {
+        if (a >= 0x2000 || !m_config.chrRamSize) return false;
+        m = mapBank(m_chr, 0x2000, m_config.chrRamSize, a);
+        return true;
+    }
+    bool ppuMapWrite(uint16_t a, uint32_t& m) override { return ppuMapRead(a, m); }
+    void saveState(std::vector<uint8_t>& out) const override { put8(out,m_prg); put8(out,m_chr); }
+    bool loadState(const uint8_t*& p,const uint8_t* e) override { return get8(p,e,m_prg)&&get8(p,e,m_chr); }
+private:
+    uint8_t m_prg=0, m_chr=0;
+};
+
 class Mapper31 final : public Mapper {
 public:
     explicit Mapper31(const MapperConfig& c) : Mapper(c) { m_bank[7] = 0xFF; }
@@ -499,6 +527,62 @@ public:
 private:
     uint8_t m_prg = 0, m_chr = 0;
     bool m_holyDiver = false;
+};
+
+class Mapper331 final : public Mapper {
+public:
+    explicit Mapper331(const MapperConfig& c) : Mapper(c) { updateMirror(); }
+
+    bool cpuMapRead(uint16_t a, uint32_t& m) const override {
+        if (a < 0x8000 || !m_config.prgRomSize) return false;
+        const uint8_t outer = uint8_t((m_mode & 0x03) << 3);
+        uint8_t bank = 0;
+        if (m_mode & 0x08) {
+
+            const uint8_t base = uint8_t(outer | (m_reg[0] & 0x06));
+            bank = uint8_t(base | ((a >= 0xC000) ? 1 : 0));
+        } else {
+            bank = (a < 0xC000) ? uint8_t(outer | (m_reg[0] & 0x07))
+                                : uint8_t(outer | 0x07);
+        }
+        m = mapBank(bank, 0x4000, m_config.prgRomSize, a & 0x3FFF);
+        return true;
+    }
+
+    bool cpuWrite(uint16_t a, uint8_t d, uint64_t) override {
+        if (a < 0x8000) return false;
+        switch (a & 0xE000) {
+        case 0xA000: m_reg[0] = d; return true;
+        case 0xC000: m_reg[1] = d; return true;
+        case 0xE000: m_mode = uint8_t(d & 0x0F); updateMirror(); return true;
+        default: return true;
+        }
+    }
+
+    bool ppuMapRead(uint16_t a, uint32_t& m) override {
+        if (a >= 0x2000) return false;
+        const std::size_t size = m_config.chrRomSize ? m_config.chrRomSize : m_config.chrRamSize;
+        if (!size) return false;
+        const uint8_t outer = uint8_t((m_mode & 0x03) << 5);
+        const uint8_t slot = uint8_t(a >> 12);
+        const uint8_t bank = uint8_t(outer | (m_reg[slot] >> 3));
+        m = mapBank(bank, 0x1000, size, a & 0x0FFF);
+        return true;
+    }
+    bool ppuMapWrite(uint16_t a, uint32_t& m) override { return m_config.chrRamSize && ppuMapRead(a, m); }
+    bool mapPrgRam(uint16_t, uint32_t&, bool) const override { return false; }
+
+    void saveState(std::vector<uint8_t>& o) const override {
+        put8(o,m_reg[0]); put8(o,m_reg[1]); put8(o,m_mode);
+    }
+    bool loadState(const uint8_t*& p, const uint8_t* e) override {
+        if (!get8(p,e,m_reg[0]) || !get8(p,e,m_reg[1]) || !get8(p,e,m_mode)) return false;
+        updateMirror(); return true;
+    }
+private:
+    void updateMirror() { m_mirror = (m_mode & 0x04) ? Mirror::Horizontal : Mirror::Vertical; }
+    uint8_t m_reg[2] = {0,0};
+    uint8_t m_mode = 0;
 };
 
 class Mapper79 final : public Mapper {public:explicit Mapper79(const MapperConfig&c):Mapper(c){}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;m=mapBank(m_prg,0x8000,m_config.prgRomSize,a-0x8000);return true;}bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if((a&0xE100)!=0x4100)return false;m_prg=(d>>3)&1;m_chr=d&7;return true;}bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto s=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!s)return false;m=mapBank(m_chr,0x2000,s,a);return true;}bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);}bool mapPrgRam(uint16_t,uint32_t&,bool)const override{return false;}void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg);put8(o,m_chr);}bool loadState(const uint8_t*&p,const uint8_t*e)override{return get8(p,e,m_prg)&&get8(p,e,m_chr);}private:uint8_t m_prg=0,m_chr=0;};
@@ -1092,6 +1176,400 @@ private:bool m_16k=false;uint8_t m_prg16=0,m_prg32=0,m_chr=0;bool m_dip=false;
 
 class Mapper58 final : public Mapper { public: explicit Mapper58(const MapperConfig&c):Mapper(c){} bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;size_t b=m_same?m_prg:(m_prg&~1u)+(a>=0xC000);m=mapBank(b,0x4000,m_config.prgRomSize,a&0x3FFF);return true;} bool cpuWrite(uint16_t a,uint8_t,uint64_t)override{if(a<0x8000)return false;m_prg=a&7;m_chr=(a>>3)&7;m_same=a&0x40;m_mirror=(a&0x80)?Mirror::Horizontal:Mirror::Vertical;return true;} bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto z=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!z)return false;m=mapBank(m_chr,0x2000,z,a);return true;} bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);} void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg);put8(o,m_chr);put8(o,m_same);put8(o,uint8_t(m_mirror));} bool loadState(const uint8_t*&p,const uint8_t*e)override{uint8_t b;if(!get8(p,e,m_prg)||!get8(p,e,m_chr)||!get8(p,e,b))return false;m_same=b;if(!get8(p,e,b))return false;m_mirror=Mirror(b);return true;} private:uint8_t m_prg=0,m_chr=0;bool m_same=false;};
 
+class Mapper166_167 final : public Mapper {
+public:
+    explicit Mapper166_167(const MapperConfig& c) : Mapper(c) {}
+
+    bool cpuMapRead(uint16_t a, uint32_t& m) const override {
+        if (a < 0x8000 || !m_config.prgRomSize) return false;
+        const uint8_t mode = (m_r[1] >> 2) & 3;
+        const uint8_t f = ((m_r[0] >> 3) ^ (m_r[1] >> 3)) & 1;
+        const uint8_t low5 = (m_r[2] ^ m_r[3]) & 0x1F;
+        const uint8_t sw = uint8_t((f << 5) | low5);
+        uint8_t bank = 0;
+        if (mode == 0) {
+            bank = (a < 0xC000) ? sw : uint8_t(m_config.id == 166 ? 0x07 : 0x20);
+        } else if (mode == 1) {
+            bank = (a < 0xC000) ? 0x1F : sw;
+        } else {
+            const uint8_t hi = uint8_t((f << 5) | (((m_r[2] >> 1) ^ (m_r[3] >> 1)) & 0x0F) << 1);
+            const uint8_t aBit = m_r[3] & 1;
+            const bool upper = a >= 0xC000;
+
+            const uint8_t lo = uint8_t((m_config.id == 166 ? (upper ? 1 : 0) : (upper ? 0 : 1)) ^ aBit);
+            bank = uint8_t(hi | lo);
+        }
+        m = mapBank(bank, 0x4000, m_config.prgRomSize, a & 0x3FFF);
+        return true;
+    }
+
+    bool cpuWrite(uint16_t a, uint8_t d, uint64_t) override {
+        if (a < 0x8000) return false;
+        const unsigned reg = (a >> 13) & 3;
+        m_r[reg] = d;
+        if (reg == 0) m_mirror = (d & 1) ? Mirror::Vertical : Mirror::Horizontal;
+        return true;
+    }
+
+    void reset(bool hard) override {
+        if (hard) { for (auto& v : m_r) v = 0; m_mirror = Mirror::Horizontal; }
+    }
+    void saveState(std::vector<uint8_t>& o) const override {
+        for (auto v : m_r) put8(o, v);
+        put8(o, static_cast<uint8_t>(m_mirror));
+    }
+    bool loadState(const uint8_t*& p,const uint8_t* e) override {
+        for (auto& v : m_r) if(!get8(p,e,v)) return false;
+        uint8_t t=0; if(!get8(p,e,t)) return false; m_mirror=static_cast<Mirror>(t); return true;
+    }
+private:
+    uint8_t m_r[4]{};
+};
+
+class Mapper168 final : public Mapper {
+public:
+    explicit Mapper168(const MapperConfig& c) : Mapper(c) { m_mirror = Mirror::Vertical; }
+
+    bool cpuMapRead(uint16_t a,uint32_t& m) const override {
+        if(a<0x8000 || !m_config.prgRomSize) return false;
+        const std::size_t n16=std::max<std::size_t>(1,m_config.prgRomSize/0x4000);
+        const std::size_t b=(a<0xC000)?m_prg:(n16-1);
+        m=mapBank(b,0x4000,m_config.prgRomSize,a&0x3FFF); return true;
+    }
+    bool cpuWrite(uint16_t a,uint8_t d,uint64_t) override {
+        if(a<0x8000) return false;
+        if(a<0xC000){ m_prg=(d>>6)&3; m_chr=d&0x0F; }
+        else {
+            const bool disable=(d&0x04)!=0;
+            if(m_irqDisabled && !disable) m_ramProtected=false;
+            m_irqDisabled=disable;
+            if(disable) m_irqCounter=0;
+        }
+        return true;
+    }
+    bool ppuMapRead(uint16_t a,uint32_t& m) override {
+        if(a>=0x2000 || m_config.chrRamSize==0) return false;
+        const uint8_t b=(a<0x1000)?0:m_chr;
+        if(m_ramProtected && b>=8) return false;
+        m=mapBank(b,0x1000,m_config.chrRamSize,a&0x0FFF); return true;
+    }
+    bool ppuMapWrite(uint16_t a,uint32_t& m) override { return ppuMapRead(a,m); }
+    bool ppuUsesChrRam(uint16_t a) const override { return a<0x2000 && m_config.chrRamSize!=0; }
+    void clockCpu() override { if(!m_irqDisabled) m_irqCounter=uint16_t((m_irqCounter+1)&0x07FF); }
+    bool irqActive() const override { return !m_irqDisabled && (m_irqCounter&0x0400)!=0; }
+    void reset(bool hard) override { if(hard){m_prg=m_chr=0;m_irqCounter=0;m_irqDisabled=true;m_ramProtected=true;m_mirror=Mirror::Vertical;} }
+    void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg);put8(o,m_chr);put8(o,uint8_t(m_irqCounter));put8(o,uint8_t(m_irqCounter>>8));put8(o,m_irqDisabled);put8(o,m_ramProtected);}
+    bool loadState(const uint8_t*&p,const uint8_t*e)override{uint8_t l,h,d,r;if(!get8(p,e,m_prg)||!get8(p,e,m_chr)||!get8(p,e,l)||!get8(p,e,h)||!get8(p,e,d)||!get8(p,e,r))return false;m_irqCounter=uint16_t(l)|(uint16_t(h)<<8);m_irqDisabled=d!=0;m_ramProtected=r!=0;return true;}
+private:
+    uint8_t m_prg=0,m_chr=0; uint16_t m_irqCounter=0; bool m_irqDisabled=true,m_ramProtected=true;
+};
+
+class Mapper177 final : public Mapper {
+public:
+    explicit Mapper177(const MapperConfig& c):Mapper(c){}
+    bool cpuMapRead(uint16_t a,uint32_t& m)const override{if(a<0x8000||!m_config.prgRomSize)return false;m=mapBank(m_bank,0x8000,m_config.prgRomSize,a-0x8000);return true;}
+    bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if(a<0x8000)return false;m_bank=d&0x1F;m_mirror=(d&0x20)?Mirror::Horizontal:Mirror::Vertical;return true;}
+    void saveState(std::vector<uint8_t>&o)const override{put8(o,m_bank);put8(o,static_cast<uint8_t>(m_mirror));}
+    bool loadState(const uint8_t*&p,const uint8_t*e)override{uint8_t t;if(!get8(p,e,m_bank)||!get8(p,e,t))return false;m_mirror=static_cast<Mirror>(t);return true;}
+private:uint8_t m_bank=0;
+};
+
+class Mapper162 final : public Mapper {
+public:
+    explicit Mapper162(const MapperConfig& c) : Mapper(c) { reset(true); }
+    void reset(bool) override { m_regs[0]=3; m_regs[1]=0; m_regs[2]=0; m_regs[3]=7; }
+    bool cpuMapRead(uint16_t a, uint32_t& m) const override {
+        if (a < 0x8000 || !m_config.prgRomSize) return false;
+        std::size_t bank = 0;
+        switch (m_regs[3] & 0x05) {
+        case 0: bank=(m_regs[0]&0x0C)|(m_regs[1]&0x02)|((m_regs[2]&0x0F)<<4); break;
+        case 1: bank=(m_regs[0]&0x0C)|((m_regs[2]&0x0F)<<4); break;
+        case 4: bank=(m_regs[0]&0x0E)|((m_regs[1]>>1)&0x01)|((m_regs[2]&0x0F)<<4); break;
+        default: bank=(m_regs[0]&0x0F)|((m_regs[2]&0x0F)<<4); break;
+        }
+        m = mapBank(bank,0x8000,m_config.prgRomSize,a&0x7FFF); return true;
+    }
+    bool cpuWrite(uint16_t a,uint8_t d,uint64_t) override {
+        if (a < 0x5000 || a > 0x53FF) return false;
+        m_regs[(a >> 8) & 3] = d;
+        return true;
+    }
+    bool ppuMapRead(uint16_t a, uint32_t& m) override {
+        if (a >= 0x2000) return false;
+        const std::size_t sz = m_config.chrRomSize ? m_config.chrRomSize : m_config.chrRamSize;
+        if (!sz) return false;
+        m = uint32_t(a % sz);
+        return true;
+    }
+    bool ppuMapWrite(uint16_t a,uint32_t& m) override { if(!m_config.chrRamSize||a>=0x2000)return false; m=uint32_t(a%m_config.chrRamSize); return true; }
+    void saveState(std::vector<uint8_t>&o)const override{for(auto v:m_regs)put8(o,v);}
+    bool loadState(const uint8_t*&p,const uint8_t*e)override{for(auto&v:m_regs)if(!get8(p,e,v))return false;return true;}
+private: uint8_t m_regs[4]{};
+};
+
+class Mapper163 final : public Mapper {
+public:
+    explicit Mapper163(const MapperConfig& c) : Mapper(c) { reset(true); }
+    void reset(bool) override {
+        for (auto& v : m_regs) v = 0;
+        m_feedbackE = false;
+        m_feedbackF = false;
+        m_chrHalf = 0;
+        m_lastA13 = false;
+    }
+    bool cpuMapRead(uint16_t a, uint32_t& m) const override {
+        if (a < 0x8000 || !m_config.prgRomSize) return false;
+        const uint8_t lo = m_regs[0];
+        const uint8_t hi = m_regs[2];
+        std::size_t bank = (lo & 0x0F) | ((std::size_t(hi) & 3) << 4);
+
+        if ((m_regs[3] & 0x04) == 0) bank = (bank & ~std::size_t(3)) | 3;
+        m = mapBank(bank, 0x8000, m_config.prgRomSize, a & 0x7FFF);
+        return true;
+    }
+    bool cpuReadRegister(uint16_t a, uint8_t& d) override {
+        if (a >= 0x5500 && a <= 0x55FF) {
+
+            d = m_feedbackF ? 0x00 : 0x04;
+            return true;
+        }
+        return false;
+    }
+    bool cpuWrite(uint16_t a, uint8_t d, uint64_t) override {
+        if (a < 0x5000 || a > 0x53FF) return false;
+
+        if ((a & 0xFF00) != 0x5300) d = transformData(d);
+
+        if (a == 0x5101) {
+            if (m_feedbackE) m_feedbackF = !m_feedbackF;
+            return true;
+        }
+
+        switch (a & 0xFF00) {
+        case 0x5000:
+            m_regs[0] = d;
+            break;
+        case 0x5100:
+            m_regs[1] = d;
+            m_feedbackE = (d & 0x02) != 0;
+            m_feedbackF = (d & 0x04) != 0;
+            break;
+        case 0x5200:
+            m_regs[2] = d;
+            break;
+        case 0x5300:
+            m_regs[3] = d;
+            break;
+        default:
+            return false;
+        }
+        return true;
+    }
+    bool ppuMapRead(uint16_t a, uint32_t& m) override {
+        if (a >= 0x2000) return false;
+        if (!m_config.chrRamSize && !m_config.chrRomSize) return false;
+        const std::size_t sz = m_config.chrRamSize ? m_config.chrRamSize : m_config.chrRomSize;
+        uint16_t pa = a;
+        if (m_regs[0] & 0x80) pa = uint16_t((a & 0x0FFF) | (uint16_t(m_chrHalf) << 12));
+        m = uint32_t(pa % sz);
+        return true;
+    }
+    bool ppuMapWrite(uint16_t a, uint32_t& m) override {
+        if (!m_config.chrRamSize || a >= 0x2000) return false;
+        uint16_t pa = a;
+        if (m_regs[0] & 0x80) pa = uint16_t((a & 0x0FFF) | (uint16_t(m_chrHalf) << 12));
+        m = uint32_t(pa % m_config.chrRamSize);
+        return true;
+    }
+    void notifyPpuAddressContext(uint16_t a, uint64_t, int, int) override {
+        const bool a13 = (a & 0x2000) != 0;
+        if (a13 && !m_lastA13) m_chrHalf = uint8_t((a >> 9) & 1);
+        m_lastA13 = a13;
+    }
+    void saveState(std::vector<uint8_t>& o) const override {
+        for (auto v : m_regs) put8(o, v);
+        put8(o, m_feedbackE);
+        put8(o, m_feedbackF);
+        put8(o, m_chrHalf);
+        put8(o, m_lastA13);
+    }
+    bool loadState(const uint8_t*& p, const uint8_t* e) override {
+        uint8_t b = 0;
+        for (auto& v : m_regs) if (!get8(p, e, v)) return false;
+        if (!get8(p, e, b)) return false;
+        m_feedbackE = b != 0;
+        if (!get8(p, e, b)) return false;
+        m_feedbackF = b != 0;
+        if (!get8(p, e, m_chrHalf)) return false;
+        if (!get8(p, e, b)) return false;
+        m_lastA13 = b != 0;
+        return true;
+    }
+private:
+    uint8_t transformData(uint8_t v) const {
+        if (!(m_regs[3] & 1)) return v;
+        return uint8_t((v & ~3) | ((v & 1) << 1) | ((v & 2) >> 1));
+    }
+    uint8_t m_regs[4]{};
+    bool m_feedbackE = false;
+    bool m_feedbackF = false;
+    uint8_t m_chrHalf = 0;
+    bool m_lastA13 = false;
+};
+
+class Mapper173 final : public Mapper {
+public:
+    explicit Mapper173(const MapperConfig& c) : Mapper(c) {}
+
+    bool cpuMapRead(uint16_t a, uint32_t& m) const override {
+        if (a < 0x8000 || !m_config.prgRomSize) return false;
+        m = static_cast<uint32_t>((a - 0x8000) % m_config.prgRomSize);
+        return true;
+    }
+    bool cpuReadRegister(uint16_t a, uint8_t& d) override {
+        if ((a & 0xE100) != 0x4100) return false;
+        d = uint8_t((m_r & 7) | (((m_s ^ m_invert) & 1) << 3));
+        return true;
+    }
+    bool cpuWrite(uint16_t a, uint8_t d, uint64_t) override {
+        if ((a & 0xE100) == 0x4100) {
+            switch (a & 3) {
+            case 0:
+                if (m_increment) m_r = uint8_t((m_r + 1) & 7);
+                else m_r = uint8_t((m_invert ? ~m_p : m_p) & 7);
+                break;
+            case 1: m_invert = d & 1; break;
+            case 2: m_s = (d >> 3) & 1; m_p = d & 7; break;
+            case 3: m_increment = d & 1; break;
+            }
+            return true;
+        }
+        if (a & 0x8000) { m_output = m_r & 3; return true; }
+        return false;
+    }
+    bool ppuMapRead(uint16_t a, uint32_t& m) override {
+        if (a >= 0x2000) return false;
+        const std::size_t size = m_config.chrRomSize ? m_config.chrRomSize : m_config.chrRamSize;
+        if (!size) return false;
+        const uint8_t bank = uint8_t((m_output & 1) | ((m_invert ? 0 : 1) << 1));
+        m = mapBank(bank, 0x2000, size, a);
+        return true;
+    }
+    bool ppuMapWrite(uint16_t a, uint32_t& m) override {
+        return m_config.chrRamSize && !m_config.chrRomSize && ppuMapRead(a, m);
+    }
+    void reset(bool hard) override {
+        if (hard) { m_p=m_r=m_output=m_s=m_increment=m_invert=0; }
+    }
+    void saveState(std::vector<uint8_t>& o) const override {
+        put8(o,m_p); put8(o,m_r); put8(o,m_output); put8(o,m_s); put8(o,m_increment); put8(o,m_invert);
+    }
+    bool loadState(const uint8_t*& p,const uint8_t* e) override {
+        return get8(p,e,m_p)&&get8(p,e,m_r)&&get8(p,e,m_output)&&get8(p,e,m_s)&&get8(p,e,m_increment)&&get8(p,e,m_invert);
+    }
+private:
+    uint8_t m_p=0,m_r=0,m_output=0,m_s=0,m_increment=0,m_invert=0;
+};
+
+class Mapper178 final : public Mapper {
+public:
+    explicit Mapper178(const MapperConfig& c) : Mapper(c) {}
+
+    bool cpuMapRead(uint16_t a,uint32_t& m) const override {
+        if(a<0x8000 || !m_config.prgRomSize) return false;
+        const bool upper=a>=0xC000;
+        const uint32_t outer=uint32_t(m_high)<<3;
+        uint32_t low=m_low&7;
+        uint32_t bank=0;
+        switch((m_mode>>1)&3) {
+        case 0: bank=outer|(low&6)|(upper?1u:0u); break;
+        case 1: bank=outer|(upper?7u:low); break;
+        case 2: bank=outer|low; break;
+        default: bank=outer|(upper?(6u|(low&1u)):low); break;
+        }
+        m=mapBank(bank,0x4000,m_config.prgRomSize,a&0x3FFF); return true;
+    }
+    bool cpuWrite(uint16_t a,uint8_t d,uint64_t) override {
+        if(a<0x4800 || a>0x4FFF) return false;
+        switch(a&3) {
+        case 0: m_mode=d; m_mirror=(d&1)?Mirror::Horizontal:Mirror::Vertical; break;
+        case 1: m_low=d&7; break;
+        case 2: m_high=d; break;
+        case 3: m_ramBank=d; break;
+        }
+        return true;
+    }
+    bool mapPrgRam(uint16_t a,uint32_t& m,bool) const override {
+        if(a<0x6000||a>0x7FFF||!m_config.prgRamSize) return false;
+        m=(uint32_t(m_ramBank)*0x2000u+(a-0x6000u))%uint32_t(m_config.prgRamSize); return true;
+    }
+    void reset(bool hard) override { if(hard){m_mode=m_low=m_high=m_ramBank=0;m_mirror=Mirror::Vertical;} }
+    void saveState(std::vector<uint8_t>&o)const override{put8(o,m_mode);put8(o,m_low);put8(o,m_high);put8(o,m_ramBank);put8(o,uint8_t(m_mirror));}
+    bool loadState(const uint8_t*&p,const uint8_t*e)override{uint8_t mi;if(!get8(p,e,m_mode)||!get8(p,e,m_low)||!get8(p,e,m_high)||!get8(p,e,m_ramBank)||!get8(p,e,mi))return false;m_mirror=Mirror(mi);return true;}
+private: uint8_t m_mode=0,m_low=0,m_high=0,m_ramBank=0;
+};
+
+class Mapper188 final : public Mapper {
+public:
+    explicit Mapper188(const MapperConfig& c) : Mapper(c) {}
+    bool cpuMapRead(uint16_t a,uint32_t& m) const override {
+        if(a<0x8000||!m_config.prgRomSize)return false;
+        const std::size_t total=m_config.prgRomSize;
+        const std::size_t internal=(total>0x20000)?(total/2):total;
+        if(a>=0xC000){m=mapBank(std::max<std::size_t>(1,internal/0x4000)-1,0x4000,internal,a&0x3FFF);return true;}
+        const bool internalSel=(m_reg&0x20)!=0;
+        const std::size_t regionBase=internalSel?0:internal;
+        const std::size_t regionSize=internalSel?internal:(total-internal);
+        if(!regionSize)return false;
+        m=uint32_t(regionBase+mapBank(m_reg&0x0F,0x4000,regionSize,a&0x3FFF));return true;
+    }
+    bool cpuReadRegister(uint16_t a,uint8_t& d) override {
+        if(a<0x6000||a>0x7FFF)return false;
+        d=0x03;
+        return true;
+    }
+    bool cpuWrite(uint16_t a,uint8_t d,uint64_t) override {
+        if (a < 0x8000) return false;
+        m_reg = d;
+        m_mirror = (d & 0x40) ? Mirror::Horizontal : Mirror::Vertical;
+        return true;
+    }
+    bool hasBusConflicts() const override{return true;}
+    void reset(bool hard) override{if(hard){m_reg=0x20;m_mirror=Mirror::Vertical;}}
+    void saveState(std::vector<uint8_t>&o)const override{put8(o,m_reg);put8(o,uint8_t(m_mirror));}
+    bool loadState(const uint8_t*&p,const uint8_t*e)override{uint8_t mi;if(!get8(p,e,m_reg)||!get8(p,e,mi))return false;m_mirror=Mirror(mi);return true;}
+private:uint8_t m_reg=0x20;
+};
+
+class Mapper190 final : public Mapper {
+public:
+    explicit Mapper190(const MapperConfig& c):Mapper(c){}
+    bool cpuMapRead(uint16_t a,uint32_t& m) const override {
+        if(a<0x8000||!m_config.prgRomSize)return false;
+        const uint8_t bank=(a<0xC000)?m_prg:0;
+        m=mapBank(bank,0x4000,m_config.prgRomSize,a&0x3FFF);return true;
+    }
+    bool cpuWrite(uint16_t a,uint8_t d,uint64_t) override {
+        if(a>=0x8000&&a<=0x9FFF){m_prg=d&7;return true;}
+        if(a>=0xA000&&a<=0xBFFF){m_chr[a&3]=d;return true;}
+        if(a>=0xC000&&a<=0xDFFF){m_prg=uint8_t(8|(d&7));return true;}
+        return false;
+    }
+    bool ppuMapRead(uint16_t a,uint32_t& m) override {
+        if (a >= 0x2000) return false;
+        const std::size_t s = m_config.chrRomSize ? m_config.chrRomSize : m_config.chrRamSize;
+        if (!s) return false;
+        const unsigned slot = a >> 11;
+        m = mapBank(m_chr[slot], 0x800, s, a & 0x7FF);
+        return true;
+    }
+    bool ppuMapWrite(uint16_t a,uint32_t& m) override{return m_config.chrRamSize&&!m_config.chrRomSize&&ppuMapRead(a,m);}
+    void reset(bool hard)override{if(hard){m_prg=0;for(auto&v:m_chr)v=0;}}
+    void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg);for(auto v:m_chr)put8(o,v);}
+    bool loadState(const uint8_t*&p,const uint8_t*e)override{if(!get8(p,e,m_prg))return false;for(auto&v:m_chr)if(!get8(p,e,v))return false;return true;}
+private:uint8_t m_prg=0,m_chr[4]{};
+};
+
 class Mapper171 final : public Mapper {
 public:
     explicit Mapper171(const MapperConfig& c) : Mapper(c) {}
@@ -1541,7 +2019,7 @@ public:
 private:
     void set16(uint8_t lo, uint8_t hi) { m_prgLo=lo; m_prgHi=hi; }
     void update236() {
-        const uint16_t lo=m_latch[0], hi=m_latch[1];
+        const uint16_t lo = static_cast<uint16_t>(m_latch[0] & 0xFFFFu), hi = static_cast<uint16_t>(m_latch[1] & 0xFFFFu);
         uint8_t bank=0;
         if (m_config.chrRomSize) {
             bank = uint8_t(hi & 0x07);
@@ -1971,7 +2449,35 @@ class Mapper97 final : public Mapper {public:explicit Mapper97(const MapperConfi
 
 class Mapper101 final : public Mapper {public:explicit Mapper101(const MapperConfig&c):Mapper(c){}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;m=(a-0x8000)%m_config.prgRomSize;return true;}bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if(a<0x6000)return false;m_chr=d&3;return true;}bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto s=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!s)return false;m=mapBank(m_chr,0x2000,s,a);return true;}bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);}void saveState(std::vector<uint8_t>&o)const override{put8(o,m_chr);}bool loadState(const uint8_t*&p,const uint8_t*e)override{return get8(p,e,m_chr);}private:uint8_t m_chr=0;};
 
-class Mapper113 final : public Mapper {public:explicit Mapper113(const MapperConfig&c):Mapper(c){}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;m=mapBank(m_prg,0x8000,m_config.prgRomSize,a-0x8000);return true;}bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if((a&0xE100)!=0x4100&&a<0x8000)return false;m_prg=(d>>3)&7;m_chr=(d&7)|((d>>3)&8);return true;}bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto s=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!s)return false;m=mapBank(m_chr,0x2000,s,a);return true;}bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);}bool mapPrgRam(uint16_t,uint32_t&,bool)const override{return false;}void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg);put8(o,m_chr);}bool loadState(const uint8_t*&p,const uint8_t*e)override{return get8(p,e,m_prg)&&get8(p,e,m_chr);}private:uint8_t m_prg=0,m_chr=0;};
+class Mapper113 final : public Mapper {
+public:
+    explicit Mapper113(const MapperConfig& c) : Mapper(c) {}
+    bool cpuMapRead(uint16_t a, uint32_t& m) const override {
+        if (a < 0x8000 || !m_config.prgRomSize) return false;
+        m = mapBank(m_prg, 0x8000, m_config.prgRomSize, a - 0x8000); return true;
+    }
+    bool cpuWrite(uint16_t a, uint8_t d, uint64_t) override {
+        if ((a & 0xC100) != 0x4100) return false;
+        m_prg = uint8_t((d >> 3) & 7);
+        m_chr = uint8_t((d & 7) | ((d & 0x40) ? 8 : 0));
+        m_mirror = (d & 0x80) ? Mirror::Vertical : Mirror::Horizontal;
+        return true;
+    }
+    bool ppuMapRead(uint16_t a, uint32_t& m) override {
+        if (a >= 0x2000) return false;
+        const auto size = m_config.chrRomSize ? m_config.chrRomSize : m_config.chrRamSize;
+        if (!size) return false;
+        m = mapBank(m_chr, 0x2000, size, a); return true;
+    }
+    bool ppuMapWrite(uint16_t a, uint32_t& m) override { return m_config.chrRamSize && ppuMapRead(a,m); }
+    bool mapPrgRam(uint16_t, uint32_t&, bool) const override { return false; }
+    void saveState(std::vector<uint8_t>& o) const override { put8(o,m_prg); put8(o,m_chr); put8(o,static_cast<uint8_t>(m_mirror)); }
+    bool loadState(const uint8_t*& p, const uint8_t* e) override {
+        uint8_t mir=0; if(!get8(p,e,m_prg)||!get8(p,e,m_chr)||!get8(p,e,mir)) return false;
+        m_mirror=static_cast<Mirror>(mir); return true;
+    }
+private: uint8_t m_prg=0, m_chr=0;
+};
 
 class Mapper133 final : public Mapper {
 public:
@@ -2378,6 +2884,676 @@ private:
     bool m_mode = false;
 };
 
+class Mapper164 final : public Mapper {
+public:
+    explicit Mapper164(const MapperConfig& config) : Mapper(config)
+    {
+        m_eeprom.fill(0xFF);
+        updateMirroring();
+    }
+
+    bool cpuMapRead(uint16_t addr, uint32_t& mapped) const override
+    {
+        if (addr < 0x8000 || m_config.prgRomSize == 0) return false;
+
+        if (m_bankLo & 0x10) {
+
+            const std::size_t bank = (std::size_t(m_bankHi & 0x03) << 4) | (m_bankLo & 0x0F);
+            mapped = mapBank(bank, 0x8000, m_config.prgRomSize, addr - 0x8000);
+        }
+        else {
+
+            const std::size_t outer = std::size_t(m_bankHi & 0x03) << 5;
+            std::size_t inner = 0;
+            if (addr < 0xC000) {
+                inner = (m_bankLo & 0x0F) | ((m_bankLo & 0x20) >> 1);
+            }
+            else if ((m_bankLo & 0x40) == 0) {
+                inner = 0x1F;
+            }
+            else {
+                inner = 0x1C | ((m_bankLo & 0x01) << 1);
+            }
+            mapped = mapBank(outer | inner, 0x4000, m_config.prgRomSize, addr & 0x3FFF);
+        }
+        return true;
+    }
+
+    bool cpuReadRegister(uint16_t addr, uint8_t& data) override
+    {
+        if ((addr & 0xFF00) != 0x5500) return false;
+
+        data = m_eepromDo ? 0x00 : 0x04;
+        return true;
+    }
+
+    bool cpuWrite(uint16_t addr, uint8_t data, uint64_t) override
+    {
+        switch (addr & 0xFF00) {
+        case 0x5000:
+            m_bankLo = data;
+            updateMirroring();
+            return true;
+        case 0x5100:
+            m_bankHi = data & 0x03;
+            return true;
+        case 0x5200:
+            writeMicrowire(data);
+            return true;
+        case 0x5300:
+            m_mirrorReg = data;
+            updateMirroring();
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    bool mapPrgRam(uint16_t addr, uint32_t& mapped, bool) const override
+    {
+        if (addr < 0x6000 || addr >= 0x8000 || m_config.prgRamSize == 0) return false;
+        mapped = static_cast<uint32_t>((addr - 0x6000) % m_config.prgRamSize);
+        return true;
+    }
+
+    bool ppuMapRead(uint16_t addr, uint32_t& mapped) override
+    {
+        if (addr >= 0x2000 || m_config.chrRamSize == 0) return false;
+        uint16_t a = addr;
+        if (m_bankLo & 0x80) {
+
+            a = uint16_t((a & ~uint16_t(0x1008)) |
+                (m_latchedA0 ? 0x0008 : 0x0000) |
+                (m_latchedA9 ? 0x1000 : 0x0000));
+        }
+        mapped = static_cast<uint32_t>(a % m_config.chrRamSize);
+        return true;
+    }
+
+    bool ppuMapWrite(uint16_t addr, uint32_t& mapped) override
+    {
+        return ppuMapRead(addr, mapped);
+    }
+
+    void notifyPpuAddress(uint16_t addr, uint64_t) override
+    {
+        const bool a13 = (addr & 0x2000) != 0;
+        if (a13 && !m_lastA13) {
+            m_latchedA0 = (addr & 0x0001) != 0;
+            m_latchedA9 = (addr & 0x0200) != 0;
+        }
+        m_lastA13 = a13;
+    }
+
+    void reset(bool hard) override
+    {
+        if (hard) {
+            m_bankLo = m_bankHi = m_mirrorReg = 0;
+            m_latchedA0 = m_latchedA9 = m_lastA13 = false;
+        }
+        resetMicrowireBus();
+        updateMirroring();
+    }
+
+    std::size_t mapperBatterySize() const override { return m_eeprom.size(); }
+
+    void saveMapperBattery(std::vector<uint8_t>& out) const override
+    {
+        out.assign(m_eeprom.begin(), m_eeprom.end());
+    }
+
+    bool loadMapperBattery(const uint8_t* data, std::size_t size) override
+    {
+        if (!data || size != m_eeprom.size()) return false;
+        std::copy(data, data + size, m_eeprom.begin());
+        return true;
+    }
+
+    void saveState(std::vector<uint8_t>& out) const override
+    {
+        put8(out, m_bankLo); put8(out, m_bankHi); put8(out, m_mirrorReg);
+        put8(out, m_latchedA0 ? 1 : 0); put8(out, m_latchedA9 ? 1 : 0); put8(out, m_lastA13 ? 1 : 0);
+        put8(out, m_eepromCs ? 1 : 0); put8(out, m_eepromClk ? 1 : 0); put8(out, m_eepromDi ? 1 : 0);
+        put8(out, m_eepromDo ? 1 : 0); put8(out, m_writeEnable ? 1 : 0);
+        put8(out, static_cast<uint8_t>(m_serialMode)); put8(out, m_serialBits);
+        put64(out, m_serialShift); put8(out, static_cast<uint8_t>(m_serialAddr));
+        put8(out, static_cast<uint8_t>(m_serialAddr >> 8));
+        put8(out, m_readBit); put8(out, m_readPrimed ? 1 : 0);
+        for (uint8_t v : m_eeprom) put8(out, v);
+    }
+
+    bool loadState(const uint8_t*& p, const uint8_t* end) override
+    {
+        uint8_t t = 0;
+        if (!get8(p,end,m_bankLo) || !get8(p,end,m_bankHi) || !get8(p,end,m_mirrorReg)) return false;
+        if (!get8(p,end,t)) return false;
+        m_latchedA0 = t != 0;
+        if (!get8(p,end,t)) return false;
+        m_latchedA9 = t != 0;
+        if (!get8(p,end,t)) return false;
+        m_lastA13 = t != 0;
+        if (!get8(p,end,t)) return false;
+        m_eepromCs = t != 0;
+        if (!get8(p,end,t)) return false;
+        m_eepromClk = t != 0;
+        if (!get8(p,end,t)) return false;
+        m_eepromDi = t != 0;
+        if (!get8(p,end,t)) return false;
+        m_eepromDo = t != 0;
+        if (!get8(p,end,t)) return false;
+        m_writeEnable = t != 0;
+        if (!get8(p,end,t)) return false;
+        m_serialMode = static_cast<SerialMode>(t);
+        if (!get8(p,end,m_serialBits) || !get64(p,end,m_serialShift)) return false;
+        uint8_t addrLo = 0, addrHi = 0;
+        if (!get8(p,end,addrLo) || !get8(p,end,addrHi)) return false;
+        m_serialAddr = uint16_t(addrLo) | (uint16_t(addrHi) << 8);
+        if (!get8(p,end,m_readBit)) return false;
+        if (!get8(p,end,t)) return false;
+        m_readPrimed = t != 0;
+        for (uint8_t& v : m_eeprom) if (!get8(p,end,v)) return false;
+        updateMirroring();
+        return true;
+    }
+
+private:
+    enum class SerialMode : uint8_t { Command, Read, WriteData };
+
+    uint8_t m_bankLo = 0;
+    uint8_t m_bankHi = 0;
+    uint8_t m_mirrorReg = 0;
+    bool m_latchedA0 = false;
+    bool m_latchedA9 = false;
+    bool m_lastA13 = false;
+
+    std::array<uint8_t, 512> m_eeprom{};
+    bool m_eepromCs = false;
+    bool m_eepromClk = false;
+    bool m_eepromDi = false;
+    bool m_eepromDo = true;
+    bool m_writeEnable = false;
+    SerialMode m_serialMode = SerialMode::Command;
+    uint8_t m_serialBits = 0;
+    uint64_t m_serialShift = 0;
+    uint16_t m_serialAddr = 0;
+    uint8_t m_readBit = 0;
+    bool m_readPrimed = false;
+
+    void updateMirroring()
+    {
+        if ((m_bankLo & 0x10) == 0)
+            m_mirror = Mirror::Vertical;
+        else
+            m_mirror = (m_mirrorReg & 0x80) ? Mirror::Vertical : Mirror::Horizontal;
+    }
+
+    void resetMicrowireBus()
+    {
+        m_eepromCs = m_eepromClk = m_eepromDi = false;
+        m_eepromDo = true;
+        m_serialMode = SerialMode::Command;
+        m_serialBits = 0;
+        m_serialShift = 0;
+        m_serialAddr = 0;
+        m_readBit = 0;
+        m_readPrimed = false;
+    }
+
+    void beginCommand()
+    {
+        m_serialMode = SerialMode::Command;
+        m_serialBits = 0;
+        m_serialShift = 0;
+        m_readPrimed = false;
+        m_eepromDo = true;
+    }
+
+    void decodeCommand()
+    {
+
+        const uint16_t command = static_cast<uint16_t>(m_serialShift & 0x0FFF);
+        if ((command & 0x0800) == 0) { beginCommand(); return; }
+        const uint8_t op = uint8_t((command >> 9) & 0x03);
+        const uint16_t address = command & 0x01FF;
+        m_serialAddr = address;
+
+        switch (op) {
+        case 0x02:
+            m_serialMode = SerialMode::Read;
+            m_readBit = 7;
+            m_readPrimed = false;
+            m_eepromDo = (m_eeprom[m_serialAddr] & 0x80) != 0;
+            break;
+        case 0x01:
+            m_serialMode = SerialMode::WriteData;
+            m_serialBits = 0;
+            m_serialShift = 0;
+            break;
+        case 0x03:
+            if (m_writeEnable) m_eeprom[m_serialAddr] = 0xFF;
+            beginCommand();
+            break;
+        case 0x00: {
+            const uint8_t special = uint8_t((address >> 7) & 0x03);
+            if (special == 0x03) m_writeEnable = true;
+            else if (special == 0x00) m_writeEnable = false;
+            beginCommand();
+            break;
+        }
+        }
+    }
+
+    void clockMicrowireRise()
+    {
+        switch (m_serialMode) {
+        case SerialMode::Read:
+            if (m_readBit > 0) {
+                --m_readBit;
+                m_eepromDo = (m_eeprom[m_serialAddr] & (1u << m_readBit)) != 0;
+            }
+            else {
+
+                m_serialAddr = uint16_t((m_serialAddr + 1) & 0x01FF);
+                m_readBit = 7;
+                m_eepromDo = (m_eeprom[m_serialAddr] & 0x80) != 0;
+            }
+            break;
+        case SerialMode::WriteData:
+            m_serialShift = ((m_serialShift << 1) | (m_eepromDi ? 1u : 0u)) & 0xFFu;
+            if (++m_serialBits == 8) {
+                if (m_writeEnable) m_eeprom[m_serialAddr] = static_cast<uint8_t>(m_serialShift);
+                beginCommand();
+            }
+            break;
+        case SerialMode::Command:
+            m_serialShift = ((m_serialShift << 1) | (m_eepromDi ? 1u : 0u)) & 0x0FFFu;
+            if (++m_serialBits == 12) decodeCommand();
+            break;
+        }
+    }
+
+    void writeMicrowire(uint8_t data)
+    {
+        const bool newDi = (data & 0x01) != 0;
+        const bool newClk = (data & 0x04) != 0;
+        const bool newCs = (data & 0x10) != 0;
+
+        if (newCs && !m_eepromCs) beginCommand();
+        if (!newCs && m_eepromCs) beginCommand();
+
+        m_eepromDi = newDi;
+        if (newCs && !m_eepromClk && newClk) clockMicrowireRise();
+        m_eepromCs = newCs;
+        m_eepromClk = newClk;
+    }
+};
+
+class Mapper170 final : public Mapper {
+public:
+    explicit Mapper170(const MapperConfig& c) : Mapper(c) {}
+
+    bool cpuMapRead(uint16_t a, uint32_t& m) const override {
+        if (a < 0x8000 || !m_config.prgRomSize) return false;
+        m = uint32_t((a - 0x8000) % m_config.prgRomSize);
+        return true;
+    }
+    bool cpuReadRegister(uint16_t a, uint8_t& d) override {
+        if (a != 0x7001 && a != 0x7777) return false;
+        d = uint8_t(m_reg | ((a >> 8) & 0x7F));
+        return true;
+    }
+    bool cpuWrite(uint16_t a, uint8_t d, uint64_t) override {
+        if (a != 0x6502 && a != 0x7000) return false;
+        m_reg = uint8_t((d << 1) & 0x80);
+        return true;
+    }
+    bool ppuMapRead(uint16_t a, uint32_t& m) override {
+        if (a >= 0x2000) return false;
+        const std::size_t size = m_config.chrRomSize ? m_config.chrRomSize : m_config.chrRamSize;
+        if (!size) return false;
+        m = uint32_t(a % size);
+        return true;
+    }
+    bool ppuMapWrite(uint16_t a, uint32_t& m) override { return m_config.chrRamSize && ppuMapRead(a,m); }
+    bool mapPrgRam(uint16_t, uint32_t&, bool) const override { return false; }
+    void reset(bool hard) override { if (hard) m_reg = 0; }
+    void saveState(std::vector<uint8_t>& out) const override { put8(out,m_reg); }
+    bool loadState(const uint8_t*& p, const uint8_t* e) override { return get8(p,e,m_reg); }
+private:
+    uint8_t m_reg = 0;
+};
+
+class Mapper172 final : public Mapper {
+public:
+    explicit Mapper172(const MapperConfig& c) : Mapper(c) { reset(true); }
+
+    bool cpuMapRead(uint16_t a, uint32_t& m) const override {
+        if (a < 0x8000 || !m_config.prgRomSize) return false;
+        m = uint32_t((a - 0x8000) % m_config.prgRomSize);
+        return true;
+    }
+    bool cpuReadRegister(uint16_t a, uint8_t& d) override {
+        if (a < 0x4020 || a > 0x5FFF || (a & 0x0103) != 0x0100) return false;
+        uint8_t v = uint8_t((m_acc & 0x0F) | ((m_inverter ^ (m_invert ? 0xFF : 0x00)) & 0xF0));
+        d = uint8_t((d & 0xC0) | reverseLow6(v));
+        updateState();
+        return true;
+    }
+    bool cpuWrite(uint16_t a, uint8_t d, uint64_t) override {
+        if (a >= 0x4020 && a <= 0x5FFF) {
+            writeChip(a, reverseLow6(d));
+            return true;
+        }
+        if (a >= 0x8000) {
+            writeChip(a, reverseLow6(d));
+            updateState();
+            return true;
+        }
+        return false;
+    }
+    bool ppuMapRead(uint16_t a, uint32_t& m) override {
+        if (a >= 0x2000) return false;
+        const std::size_t size = m_config.chrRomSize ? m_config.chrRomSize : m_config.chrRamSize;
+        if (!size) return false;
+        m = mapBank(m_output, 0x2000, size, a);
+        return true;
+    }
+    bool ppuMapWrite(uint16_t a, uint32_t& m) override { return m_config.chrRamSize && ppuMapRead(a,m); }
+    bool mapPrgRam(uint16_t, uint32_t&, bool) const override { return false; }
+    void reset(bool hard) override {
+        if (!hard) return;
+        m_acc=0; m_inverter=0; m_staging=0; m_output=0; m_increase=false; m_invert=true;
+        updateState();
+    }
+    void saveState(std::vector<uint8_t>& out) const override {
+        put8(out,m_acc); put8(out,m_inverter); put8(out,m_staging); put8(out,m_output);
+        put8(out,m_increase); put8(out,m_invert); put8(out,static_cast<uint8_t>(m_mirror));
+    }
+    bool loadState(const uint8_t*& p, const uint8_t* e) override {
+        uint8_t b=0;
+        if(!get8(p,e,m_acc)||!get8(p,e,m_inverter)||!get8(p,e,m_staging)||!get8(p,e,m_output)||!get8(p,e,b)) return false;
+        m_increase=b!=0; if(!get8(p,e,b)) return false; m_invert=b!=0;
+        if(!get8(p,e,b)) return false;
+        m_mirror=static_cast<Mirror>(b);
+        return true;
+    }
+private:
+    static uint8_t reverseLow6(uint8_t v) {
+        return uint8_t(((v & 0x01) << 5) | ((v & 0x02) << 3) | ((v & 0x04) << 1) |
+                       ((v & 0x08) >> 1) | ((v & 0x10) >> 3) | ((v & 0x20) >> 5));
+    }
+    void writeChip(uint16_t a, uint8_t d) {
+        if (a < 0x8000) {
+            switch (a & 0xE103) {
+            case 0x4100:
+                if (m_increase) ++m_acc;
+                else m_acc = uint8_t(((m_acc & 0xF0) | (m_staging & 0x0F)) ^ (m_invert ? 0xFF : 0x00));
+                break;
+            case 0x4101: m_invert = (d & 1) != 0; break;
+            case 0x4102: m_staging = uint8_t(d & 0x0F); m_inverter = uint8_t(d & 0xF0); break;
+            case 0x4103: m_increase = (d & 1) != 0; break;
+            default: break;
+            }
+        } else {
+            m_output = uint8_t((m_acc & 0x0F) | (m_inverter & 0xF0));
+        }
+    }
+    void updateState() { if (!m_config.fourScreen) m_mirror = m_invert ? Mirror::Vertical : Mirror::Horizontal; }
+    uint8_t m_acc=0,m_inverter=0,m_staging=0,m_output=0;
+    bool m_increase=false,m_invert=true;
+};
+
+class Mapper175 final : public Mapper {
+public:
+    explicit Mapper175(const MapperConfig& c) : Mapper(c) {}
+    bool cpuMapRead(uint16_t a, uint32_t& m) const override {
+        if (a < 0x8000 || !m_config.prgRomSize) return false;
+        const uint8_t bank = (a == 0xFFFC) ? m_pending : m_active;
+        m = mapBank(bank,0x4000,m_config.prgRomSize,a&0x3FFF);
+        return true;
+    }
+    void observeCpuRead(uint16_t a, uint8_t) override { if (a == 0xFFFC) m_active = m_pending; }
+    bool cpuWrite(uint16_t a, uint8_t d, uint64_t) override {
+        if (a == 0x8000) { if(!m_config.fourScreen) m_mirror=(d&0x04)?Mirror::Horizontal:Mirror::Vertical; return true; }
+        if (a == 0xA000) { m_pending=uint8_t(d&0x0F); return true; }
+        return a >= 0x8000;
+    }
+    bool ppuMapRead(uint16_t a, uint32_t& m) override {
+        if (a >= 0x2000) return false;
+        const std::size_t size=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;
+        if(!size) return false;
+        m=mapBank(m_active,0x2000,size,a);
+        return true;
+    }
+    bool ppuMapWrite(uint16_t a,uint32_t& m) override { return m_config.chrRamSize&&ppuMapRead(a,m); }
+    bool mapPrgRam(uint16_t,uint32_t&,bool) const override { return false; }
+    void reset(bool) override { m_pending=0; m_active=0; }
+    void saveState(std::vector<uint8_t>& out) const override { put8(out,m_pending);put8(out,m_active);put8(out,static_cast<uint8_t>(m_mirror)); }
+    bool loadState(const uint8_t*& p,const uint8_t* e) override { uint8_t b;if(!get8(p,e,m_pending)||!get8(p,e,m_active)||!get8(p,e,b))return false;m_mirror=static_cast<Mirror>(b);return true; }
+private:uint8_t m_pending=0,m_active=0;
+};
+
+class Mapper183 final : public Mapper {
+public:
+    explicit Mapper183(const MapperConfig& c) : Mapper(c) { reset(true); }
+    bool cpuMapRead(uint16_t a,uint32_t& m) const override {
+        if(!m_config.prgRomSize) return false;
+        std::size_t bank=0;
+        if(a>=0x6000&&a<0x8000) bank=m_prg6000;
+        else if(a>=0x8000&&a<0xA000) bank=m_prg[0];
+        else if(a>=0xA000&&a<0xC000) bank=m_prg[1];
+        else if(a>=0xC000&&a<0xE000) bank=m_prg[2];
+        else if(a>=0xE000) bank=std::max<std::size_t>(1,m_config.prgRomSize/0x2000)-1;
+        else return false;
+        m=mapBank(bank,0x2000,m_config.prgRomSize,a&0x1FFF);return true;
+    }
+    bool cpuWrite(uint16_t a,uint8_t d,uint64_t) override {
+        if((a&0xF800)==0x6800){m_prg6000=uint8_t(a&0x3F);return true;}
+        const uint16_t r=uint16_t(a&0xF80C);
+        if(r>=0xB000&&r<=0xE00C){
+            const int slot=((((a>>11)-6)|(a>>3))&7);
+            if(a&4)m_chr[slot]=uint8_t((m_chr[slot]&0x0F)|((d&0x0F)<<4));
+            else m_chr[slot]=uint8_t((m_chr[slot]&0xF0)|(d&0x0F));
+            return true;
+        }
+        switch(r){
+        case 0x8800:m_prg[0]=d;return true;
+        case 0xA800:m_prg[1]=d;return true;
+        case 0xA000:m_prg[2]=d;return true;
+        case 0x9800:if(!m_config.fourScreen){switch(d&3){case 0:m_mirror=Mirror::Vertical;break;case 1:m_mirror=Mirror::Horizontal;break;case 2:m_mirror=Mirror::OnescreenLo;break;case 3:m_mirror=Mirror::OnescreenHi;break;}}return true;
+        case 0xF000:m_irqCounter=uint8_t((m_irqCounter&0xF0)|(d&0x0F));return true;
+        case 0xF004:m_irqCounter=uint8_t((m_irqCounter&0x0F)|((d&0x0F)<<4));return true;
+        case 0xF008:m_irqEnabled=d!=0;if(!m_irqEnabled)m_irqScaler=0;m_irqPending=false;m_irqDelay=false;return true;
+        default:return false;
+        }
+    }
+    bool ppuMapRead(uint16_t a,uint32_t& m) override {if(a>=0x2000)return false;const std::size_t s=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!s)return false;m=mapBank(m_chr[a>>10],0x400,s,a&0x3FF);return true;}
+    bool ppuMapWrite(uint16_t a,uint32_t& m) override{return m_config.chrRamSize&&ppuMapRead(a,m);}
+    bool mapPrgRam(uint16_t,uint32_t&,bool) const override{return false;}
+    void clockCpu() override {
+        if(m_irqDelay){m_irqPending=true;m_irqDelay=false;}
+        if(++m_irqScaler==114){m_irqScaler=0;if(m_irqEnabled&&++m_irqCounter==0)m_irqDelay=true;}
+    }
+    bool irqActive() const override{return m_irqPending;}
+    void reset(bool hard) override {if(!hard)return;for(auto&v:m_chr)v=0;for(auto&v:m_prg)v=0;m_prg6000=0;m_irqCounter=0;m_irqScaler=0;m_irqEnabled=false;m_irqPending=false;m_irqDelay=false;}
+    void saveState(std::vector<uint8_t>&o)const override{for(auto v:m_chr)put8(o,v);for(auto v:m_prg)put8(o,v);put8(o,m_prg6000);put8(o,m_irqCounter);put8(o,m_irqScaler);put8(o,m_irqEnabled);put8(o,m_irqPending);put8(o,m_irqDelay);put8(o,static_cast<uint8_t>(m_mirror));}
+    bool loadState(const uint8_t*&p,const uint8_t*e)override{uint8_t b;for(auto&v:m_chr)if(!get8(p,e,v))return false;for(auto&v:m_prg)if(!get8(p,e,v))return false;if(!get8(p,e,m_prg6000)||!get8(p,e,m_irqCounter)||!get8(p,e,m_irqScaler)||!get8(p,e,b))return false;m_irqEnabled=b;if(!get8(p,e,b))return false;m_irqPending=b;if(!get8(p,e,b))return false;m_irqDelay=b;if(!get8(p,e,b))return false;m_mirror=static_cast<Mirror>(b);return true;}
+private:uint8_t m_chr[8]={},m_prg[3]={},m_prg6000=0,m_irqCounter=0,m_irqScaler=0;bool m_irqEnabled=false,m_irqPending=false,m_irqDelay=false;
+};
+
+class Mapper233 final : public Mapper {
+public:
+    explicit Mapper233(const MapperConfig& c):Mapper(c){}
+    bool cpuMapRead(uint16_t a,uint32_t& m)const override{if(a<0x8000||!m_config.prgRomSize)return false;const uint8_t page=prgPage();const bool mirror16=(m_reg[0]&0x20)!=0;const uint8_t b=mirror16?page:uint8_t((page&0xFE)|((a>>14)&1));m=mapBank(b,0x4000,m_config.prgRomSize,a&0x3FFF);return true;}
+    bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if(a<0x8000)return false;m_reg[a&1]=d;if(!m_config.fourScreen)m_mirror=(m_reg[0]&0x40)?Mirror::Vertical:Mirror::Horizontal;return true;}
+    bool ppuMapRead(uint16_t a,uint32_t& m)override{if(a>=0x2000)return false;const std::size_t s=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!s)return false;m=uint32_t(a%s);return true;}
+    bool ppuMapWrite(uint16_t a,uint32_t& m)override{return m_config.chrRamSize&&ppuMapRead(a,m);}
+    bool mapPrgRam(uint16_t,uint32_t&,bool)const override{return false;}
+    void reset(bool hard)override{if(hard){m_reg[0]=m_reg[1]=0;m_resetBit=0;}else{m_resetBit^=1;}}
+    void saveState(std::vector<uint8_t>&o)const override{put8(o,m_reg[0]);put8(o,m_reg[1]);put8(o,m_resetBit);put8(o,static_cast<uint8_t>(m_mirror));}
+    bool loadState(const uint8_t*&p,const uint8_t*e)override{uint8_t b;if(!get8(p,e,m_reg[0])||!get8(p,e,m_reg[1])||!get8(p,e,m_resetBit)||!get8(p,e,b))return false;m_mirror=static_cast<Mirror>(b);return true;}
+private:uint8_t prgPage()const{return uint8_t((m_reg[0]&0x1F)|(m_resetBit<<5)|((m_reg[1]&1)<<6));}uint8_t m_reg[2]={},m_resetBit=0;
+};
+
+class Mapper222 final : public Mapper {
+public:
+    explicit Mapper222(const MapperConfig& c) : Mapper(c) { reset(true); }
+    bool cpuMapRead(uint16_t a, uint32_t& m) const override {
+        if (a < 0x8000 || !m_config.prgRomSize) return false;
+        const std::size_t n = std::max<std::size_t>(1, m_config.prgRomSize / 0x2000);
+        std::size_t b = 0;
+        if (a < 0xA000) b = m_prg[0];
+        else if (a < 0xC000) b = m_prg[1];
+        else if (a < 0xE000) b = n > 1 ? n - 2 : 0;
+        else b = n - 1;
+        m = mapBank(b, 0x2000, m_config.prgRomSize, a & 0x1FFF);
+        return true;
+    }
+    bool cpuWrite(uint16_t a, uint8_t d, uint64_t) override {
+        if (a < 0x8000) return false;
+        switch (a & 0x7003) {
+        case 0x0000: m_prg[0] = d; return true;
+        case 0x1000:
+            if (!m_config.fourScreen) m_mirror = (d & 1) ? Mirror::Horizontal : Mirror::Vertical;
+            return true;
+        case 0x2000: m_prg[1] = d; return true;
+        case 0x3000: m_chr[0] = d; return true;
+        case 0x3002: m_chr[1] = d; return true;
+        case 0x4000: m_chr[2] = d; return true;
+        case 0x4002: m_chr[3] = d; return true;
+        case 0x5000: m_chr[4] = d; return true;
+        case 0x5002: m_chr[5] = d; return true;
+        case 0x6000: m_chr[6] = d; return true;
+        case 0x6002: m_chr[7] = d; return true;
+        case 0x7000: m_irqCounter = d; m_irqPending = false; return true;
+        default: return true;
+        }
+    }
+    bool ppuMapRead(uint16_t a, uint32_t& m) override {
+        if (a >= 0x2000) return false;
+        const std::size_t size = m_config.chrRomSize ? m_config.chrRomSize : m_config.chrRamSize;
+        if (!size) return false;
+        m = mapBank(m_chr[a >> 10], 0x400, size, a & 0x3FF);
+        return true;
+    }
+    bool ppuMapWrite(uint16_t a, uint32_t& m) override { return m_config.chrRamSize && ppuMapRead(a, m); }
+    bool mapPrgRam(uint16_t, uint32_t&, bool) const override { return false; }
+    void notifyPpuScanline(int scanline, bool) override {
+        if (scanline < 0 || scanline >= 240 || m_irqCounter == 0) return;
+        if (++m_irqCounter >= 240) { m_irqCounter = 0; m_irqPending = true; }
+    }
+    bool irqActive() const override { return m_irqPending; }
+    void reset(bool hard) override {
+        if (!hard) return;
+        m_prg[0] = m_prg[1] = 0; std::fill(std::begin(m_chr), std::end(m_chr), uint8_t(0));
+        m_irqCounter = 0; m_irqPending = false;
+    }
+    void saveState(std::vector<uint8_t>& o) const override {
+        put8(o,m_prg[0]); put8(o,m_prg[1]); for(auto v:m_chr) put8(o,v);
+        put8(o,m_irqCounter); put8(o,m_irqPending); put8(o,static_cast<uint8_t>(m_mirror));
+    }
+    bool loadState(const uint8_t*& p,const uint8_t* e) override {
+        uint8_t b=0; if(!get8(p,e,m_prg[0])||!get8(p,e,m_prg[1])) return false;
+        for(auto&v:m_chr) if(!get8(p,e,v)) return false;
+        if(!get8(p,e,m_irqCounter)||!get8(p,e,b)) return false;
+        m_irqPending=b!=0;
+        if(!get8(p,e,b)) return false;
+        m_mirror=static_cast<Mirror>(b); return true;
+    }
+private:
+    uint8_t m_prg[2]{}; uint8_t m_chr[8]{}; uint8_t m_irqCounter=0; bool m_irqPending=false;
+};
+
+class Mapper252 final : public Mapper {
+public:
+    explicit Mapper252(const MapperConfig& c):Mapper(c){reset(true);}
+    bool cpuMapRead(uint16_t a,uint32_t& m) const override {
+        if(a<0x8000||!m_config.prgRomSize)return false;
+        const std::size_t n=std::max<std::size_t>(1,m_config.prgRomSize/0x2000);
+        const std::size_t b=a<0xA000?m_prg[0]:a<0xC000?m_prg[1]:a<0xE000?(n>1?n-2:0):n-1;
+        m=mapBank(b,0x2000,m_config.prgRomSize,a&0x1FFF);return true;
+    }
+    bool cpuWrite(uint16_t a,uint8_t d,uint64_t) override {
+        if(a<0x8000)return false;
+        if(a<=0x8FFF){m_prg[0]=d;return true;}
+        if(a>=0xA000&&a<=0xAFFF){m_prg[1]=d;return true;}
+        if(a>=0xB000&&a<=0xEFFF){
+            const uint8_t shift=uint8_t(a&4);
+            const uint8_t slot=uint8_t(((((a-0xB000)>>1)&0x1800)|((a<<7)&0x0400))/0x400);
+            m_chr[slot]=uint8_t((m_chr[slot]&(0xF0>>shift))|((d&0x0F)<<shift));return true;
+        }
+        switch(a&0xF00C){
+        case 0xF000:m_irqLatch=uint8_t((m_irqLatch&0xF0)|(d&0x0F));return true;
+        case 0xF004:m_irqLatch=uint8_t((m_irqLatch&0x0F)|((d&0x0F)<<4));return true;
+        case 0xF008:writeIrqControl(d);return true;
+        case 0xF00C:m_irqPending=false;m_irqEnabled=m_irqAckEnable;return true;
+        default:return true;
+        }
+    }
+    bool ppuMapRead(uint16_t a,uint32_t& m) override {
+        if(a>=0x2000)return false;
+        const std::size_t s=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;
+        if(!s)return false;
+        m=mapBank(m_chr[a>>10],0x400,s,a&0x3FF);return true;
+    }
+    bool ppuMapWrite(uint16_t a,uint32_t& m) override{return m_config.chrRamSize&&ppuMapRead(a,m);}
+    bool mapPrgRam(uint16_t,uint32_t&,bool) const override{return false;}
+    void clockCpu() override {
+        if(!m_irqEnabled)return;
+        if(m_irqCycleMode)clockIrqCounter();
+        else {m_irqPrescaler-=3;if(m_irqPrescaler<=0){m_irqPrescaler+=341;clockIrqCounter();}}
+    }
+    bool irqActive() const override{return m_irqPending;}
+    void reset(bool hard) override {if(!hard)return;m_prg[0]=m_prg[1]=0;std::fill(std::begin(m_chr),std::end(m_chr),uint8_t(0));m_irqLatch=m_irqCounter=0;m_irqPrescaler=341;m_irqEnabled=m_irqAckEnable=m_irqCycleMode=m_irqPending=false;}
+    void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg[0]);put8(o,m_prg[1]);for(auto v:m_chr)put8(o,v);put8(o,m_irqLatch);put8(o,m_irqCounter);put8(o,uint8_t(m_irqPrescaler));put8(o,uint8_t(m_irqPrescaler>>8));put8(o,m_irqEnabled);put8(o,m_irqAckEnable);put8(o,m_irqCycleMode);put8(o,m_irqPending);}
+    bool loadState(const uint8_t*&p,const uint8_t*e)override{uint8_t lo,hi,b;if(!get8(p,e,m_prg[0])||!get8(p,e,m_prg[1]))return false;for(auto&v:m_chr)if(!get8(p,e,v))return false;if(!get8(p,e,m_irqLatch)||!get8(p,e,m_irqCounter)||!get8(p,e,lo)||!get8(p,e,hi))return false;m_irqPrescaler=int16_t(uint16_t(lo)|(uint16_t(hi)<<8));if(!get8(p,e,b))return false;m_irqEnabled=b;if(!get8(p,e,b))return false;m_irqAckEnable=b;if(!get8(p,e,b))return false;m_irqCycleMode=b;if(!get8(p,e,b))return false;m_irqPending=b;return true;}
+private:
+    void writeIrqControl(uint8_t d){m_irqAckEnable=(d&1)!=0;m_irqEnabled=(d&2)!=0;m_irqCycleMode=(d&4)!=0;m_irqPending=false;if(m_irqEnabled){m_irqCounter=m_irqLatch;m_irqPrescaler=341;}}
+    void clockIrqCounter(){if(m_irqCounter==0xFF){m_irqCounter=m_irqLatch;m_irqPending=true;}else ++m_irqCounter;}
+    uint8_t m_prg[2]{},m_chr[8]{},m_irqLatch=0,m_irqCounter=0;int16_t m_irqPrescaler=341;bool m_irqEnabled=false,m_irqAckEnable=false,m_irqCycleMode=false,m_irqPending=false;
+};
+
+class Mapper253 final : public Mapper {
+public:
+    explicit Mapper253(const MapperConfig& c):Mapper(c){reset(true);}
+    bool cpuMapRead(uint16_t a,uint32_t& m) const override {
+        if(a<0x8000||!m_config.prgRomSize)return false;
+        const std::size_t n=std::max<std::size_t>(1,m_config.prgRomSize/0x2000);
+        const std::size_t b=a<0xA000?m_prg[0]:a<0xC000?m_prg[1]:a<0xE000?(n>1?n-2:0):n-1;
+        m=mapBank(b,0x2000,m_config.prgRomSize,a&0x1FFF);return true;
+    }
+    bool cpuWrite(uint16_t a,uint8_t d,uint64_t) override {
+        if(a>=0xB000&&a<=0xE00C){const uint8_t slot=uint8_t(((((a & 0x08) | (a >> 8)) >> 3) + 2) & 0x07);const uint8_t shift=uint8_t(a&4);m_chrLow[slot]=uint8_t((m_chrLow[slot]&(0xF0>>shift))|(d<<shift));if(slot==0){if(m_chrLow[0]==0xC8)m_forceChrRom=false;else if(m_chrLow[0]==0x88)m_forceChrRom=true;}if(shift)m_chrHigh[slot]=uint8_t(d>>4);return true;}
+        switch(a){
+        case 0x8010:m_prg[0]=d;return true;case 0xA010:m_prg[1]=d;return true;
+        case 0x9400:if(!m_config.fourScreen){switch(d&3){case 0:m_mirror=Mirror::Vertical;break;case 1:m_mirror=Mirror::Horizontal;break;case 2:m_mirror=Mirror::OnescreenLo;break;default:m_mirror=Mirror::OnescreenHi;break;}}return true;
+        case 0xF000:m_irqReload=uint8_t((m_irqReload&0xF0)|(d&0x0F));m_irqPending=false;return true;
+        case 0xF004:m_irqReload=uint8_t((m_irqReload&0x0F)|(d<<4));m_irqPending=false;return true;
+        case 0xF008:m_irqCounter=m_irqReload;m_irqEnabled=(d&2)!=0;m_irqScaler=0;m_irqPending=false;return true;
+        default:return a>=0x8000;
+        }
+    }
+    bool ppuMapRead(uint16_t a,uint32_t& m) override {
+        if(a>=0x2000)return false;
+        const uint8_t slot=uint8_t(a>>10);
+        const uint16_t page=uint16_t(m_chrLow[slot])|(uint16_t(m_chrHigh[slot])<<8);
+        if(usesRamSlot(slot)){if(!m_config.chrRamSize)return false;m=mapBank(m_chrLow[slot]&1,0x400,m_config.chrRamSize,a&0x3FF);return true;}
+        if(!m_config.chrRomSize)return false;
+        m=mapBank(page,0x400,m_config.chrRomSize,a&0x3FF);return true;
+    }
+    bool ppuMapWrite(uint16_t a,uint32_t& m) override {if(a>=0x2000||!m_config.chrRamSize||!usesRamSlot(uint8_t(a>>10)))return false;return ppuMapRead(a,m);}
+    bool ppuUsesChrRam(uint16_t a) const override{return a<0x2000&&m_config.chrRamSize&&usesRamSlot(uint8_t(a>>10));}
+    bool mapPrgRam(uint16_t,uint32_t&,bool) const override{return false;}
+    void clockCpu() override {if(!m_irqEnabled)return;if(++m_irqScaler>=114){m_irqScaler=0;if(++m_irqCounter==0){m_irqCounter=m_irqReload;m_irqPending=true;}}}
+    bool irqActive() const override{return m_irqPending;}
+    void reset(bool hard) override {if(!hard)return;m_prg[0]=m_prg[1]=0;std::fill(std::begin(m_chrLow),std::end(m_chrLow),uint8_t(0));std::fill(std::begin(m_chrHigh),std::end(m_chrHigh),uint8_t(0));m_forceChrRom=false;m_irqReload=m_irqCounter=0;m_irqScaler=0;m_irqEnabled=m_irqPending=false;}
+    void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg[0]);put8(o,m_prg[1]);for(auto v:m_chrLow)put8(o,v);for(auto v:m_chrHigh)put8(o,v);put8(o,m_forceChrRom);put8(o,m_irqReload);put8(o,m_irqCounter);put8(o,uint8_t(m_irqScaler));put8(o,uint8_t(m_irqScaler>>8));put8(o,m_irqEnabled);put8(o,m_irqPending);put8(o,static_cast<uint8_t>(m_mirror));}
+    bool loadState(const uint8_t*&p,const uint8_t*e)override{uint8_t lo,hi,b;if(!get8(p,e,m_prg[0])||!get8(p,e,m_prg[1]))return false;for(auto&v:m_chrLow)if(!get8(p,e,v))return false;for(auto&v:m_chrHigh)if(!get8(p,e,v))return false;if(!get8(p,e,b))return false;m_forceChrRom=b;if(!get8(p,e,m_irqReload)||!get8(p,e,m_irqCounter)||!get8(p,e,lo)||!get8(p,e,hi))return false;m_irqScaler=uint16_t(lo)|(uint16_t(hi)<<8);if(!get8(p,e,b))return false;m_irqEnabled=b;if(!get8(p,e,b))return false;m_irqPending=b;if(!get8(p,e,b))return false;m_mirror=static_cast<Mirror>(b);return true;}
+private:
+    bool usesRamSlot(uint8_t slot)const{return !m_forceChrRom&&(m_chrLow[slot]==4||m_chrLow[slot]==5);}
+    uint8_t m_prg[2]{},m_chrLow[8]{},m_chrHigh[8]{},m_irqReload=0,m_irqCounter=0;uint16_t m_irqScaler=0;bool m_forceChrRom=false,m_irqEnabled=false,m_irqPending=false;
+};
+
 class Mapper213 final : public Mapper {
 public:
     explicit Mapper213(const MapperConfig& c) : Mapper(c) {}
@@ -2686,10 +3862,174 @@ private:
 
 class Mapper232 final : public Mapper {public:explicit Mapper232(const MapperConfig&c):Mapper(c){}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;size_t b=(size_t(m_block)<<2)|(a<0xC000?m_page:3);m=mapBank(b,0x4000,m_config.prgRomSize,a&0x3FFF);return true;}bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if(a<0x8000)return false;if(a>=0xC000)m_page=d&3;else m_block=m_config.submapper==1?(((d>>4)&1)|((d>>2)&2)):((d>>3)&3);return true;}void saveState(std::vector<uint8_t>&o)const override{put8(o,m_block);put8(o,m_page);}bool loadState(const uint8_t*&p,const uint8_t*e)override{return get8(p,e,m_block)&&get8(p,e,m_page);}private:uint8_t m_block=0,m_page=0;};
 
+class Mapper216 final : public Mapper {
+public:
+    explicit Mapper216(const MapperConfig& c) : Mapper(c) {}
+    bool cpuMapRead(uint16_t a, uint32_t& m) const override {
+        if (a < 0x8000 || !m_config.prgRomSize) return false;
+        m = mapBank(m_prg, 0x8000, m_config.prgRomSize, a - 0x8000);
+        return true;
+    }
+    bool cpuWrite(uint16_t a, uint8_t, uint64_t) override {
+        if (a < 0x8000) return false;
+        m_prg = uint8_t(a & 0x01);
+        m_chr = uint8_t((a >> 1) & 0xFF);
+        return true;
+    }
+    bool ppuMapRead(uint16_t a, uint32_t& m) override {
+        if (a >= 0x2000) return false;
+        const std::size_t size = m_config.chrRomSize ? m_config.chrRomSize : m_config.chrRamSize;
+        if (!size) return false;
+        m = mapBank(m_chr, 0x2000, size, a);
+        return true;
+    }
+    bool ppuMapWrite(uint16_t a, uint32_t& m) override {
+        return m_config.chrRamSize && !m_config.chrRomSize && ppuMapRead(a, m);
+    }
+    void reset(bool hard) override { if (hard) { m_prg = 0; m_chr = 0; } }
+    void saveState(std::vector<uint8_t>& o) const override { put8(o,m_prg); put8(o,m_chr); }
+    bool loadState(const uint8_t*& p,const uint8_t* e) override { return get8(p,e,m_prg)&&get8(p,e,m_chr); }
+private:
+    uint8_t m_prg=0,m_chr=0;
+};
+
+class Mapper218 final : public Mapper {
+public:
+    explicit Mapper218(const MapperConfig& c) : Mapper(c) {}
+    bool cpuMapRead(uint16_t a, uint32_t& m) const override {
+        if (a < 0x8000 || !m_config.prgRomSize) return false;
+        m = uint32_t((a - 0x8000) % m_config.prgRomSize);
+        return true;
+    }
+    bool cpuWrite(uint16_t, uint8_t, uint64_t) override { return false; }
+    bool ppuMapRead(uint16_t, uint32_t&) override { return false; }
+    bool ppuMapWrite(uint16_t, uint32_t&) override { return false; }
+    bool mapPatternCiram(uint16_t a, uint32_t& m) const override {
+        if (a >= 0x2000) return false;
+        m = ciramIndex(a);
+        return true;
+    }
+    bool mapNametable(uint16_t a, NametableSource& s, uint32_t& m) const override {
+        if (a < 0x2000 || a > 0x3EFF) return false;
+        s = NametableSource::Ciram;
+        m = ciramIndex(uint16_t((a - 0x2000) & 0x0FFF));
+        return true;
+    }
+    bool mapNametableWrite(uint16_t a, NametableSource& s, uint32_t& m) const override {
+        return mapNametable(a,s,m);
+    }
+    bool mapPrgRam(uint16_t, uint32_t&, bool) const override { return false; }
+private:
+    uint32_t ciramIndex(uint16_t a) const {
+        unsigned sourceBit;
+        if (m_config.fourScreen) sourceBit = (m_config.headerMirror == Mirror::Vertical) ? 13u : 12u;
+        else sourceBit = (m_config.headerMirror == Mirror::Vertical) ? 10u : 11u;
+        return uint32_t(((a >> sourceBit) & 1u) << 10) | uint32_t(a & 0x03FF);
+    }
+};
+
+class Mapper234 final : public Mapper {
+public:
+    explicit Mapper234(const MapperConfig& c) : Mapper(c) { reset(true); }
+    bool hasBusConflicts() const override { return true; }
+    bool cpuMapRead(uint16_t a, uint32_t& m) const override {
+        if (a < 0x8000 || !m_config.prgRomSize || romDisabled()) return false;
+        m = mapBank(prgBank(), 0x8000, m_config.prgRomSize, a - 0x8000);
+        return true;
+    }
+    void observeCpuRead(uint16_t a, uint8_t d) override { latch(a,d); }
+    bool cpuWrite(uint16_t a, uint8_t d, uint64_t) override {
+        if (a < 0x8000) return false;
+        if (isOuter(a) || isInner(a) || isLockout(a)) { latch(a,d); return true; }
+        return false;
+    }
+    bool ppuMapRead(uint16_t a, uint32_t& m) override {
+        if (a >= 0x2000 || romDisabled()) return false;
+        const std::size_t size=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;
+        if (!size) return false;
+        m=mapBank(chrBank(),0x2000,size,a); return true;
+    }
+    bool ppuMapWrite(uint16_t a,uint32_t& m) override {
+        return m_config.chrRamSize && !m_config.chrRomSize && ppuMapRead(a,m);
+    }
+    bool mapPrgRam(uint16_t, uint32_t&, bool) const override { return false; }
+    void reset(bool) override { m_outer=0; m_inner=0; updateMirror(); }
+    void saveState(std::vector<uint8_t>& o) const override { put8(o,m_outer); put8(o,m_inner); }
+    bool loadState(const uint8_t*& p,const uint8_t* e) override {
+        if (!get8(p,e,m_outer) || !get8(p,e,m_inner)) return false;
+        updateMirror();
+        return true;
+    }
+private:
+    uint8_t m_outer=0,m_inner=0;
+    static bool isOuter(uint16_t a){return a>=0xFF80&&a<=0xFF9F;}
+    static bool isLockout(uint16_t a){return a>=0xFFC0&&a<=0xFFDF;}
+    static bool isInner(uint16_t a){return a>=0xFFE8&&a<=0xFFF7;}
+    bool locked() const { return (m_outer & 0x3F) != 0; }
+    bool romDisabled() const { return (m_outer & 0x30) == 0x30; }
+    void latch(uint16_t a,uint8_t d){
+        if(isOuter(a)){if(!locked()){m_outer=d;updateMirror();}}
+        else if(isInner(a))m_inner=d;
+    }
+    void updateMirror(){m_mirror=(m_outer&0x80)?Mirror::Horizontal:Mirror::Vertical;}
+    std::size_t chipBit32k() const { return (m_outer & 0x20) ? 0x10u : 0u; }
+    std::size_t chipBit8k() const { return (m_outer & 0x20) ? 0x40u : 0u; }
+    std::size_t prgBank() const {
+        if(m_outer&0x40) return chipBit32k() | ((std::size_t(m_outer&0x0E))) | (m_inner&1);
+        return chipBit32k() | (m_outer&0x0F);
+    }
+    std::size_t chrBank() const {
+        if(m_outer&0x40) return chipBit8k() | (std::size_t(m_outer&0x0E)<<2) | ((m_inner>>4)&7);
+        return chipBit8k() | (std::size_t(m_outer&0x0F)<<2) | ((m_inner>>4)&3);
+    }
+};
+
+class Mapper244 final : public Mapper {
+public:
+    explicit Mapper244(const MapperConfig& c):Mapper(c){}
+    bool hasBusConflicts() const override { return true; }
+    bool cpuMapRead(uint16_t a,uint32_t& m)const override{
+        if(a<0x8000||!m_config.prgRomSize)return false;
+        m=mapBank(m_prg,0x8000,m_config.prgRomSize,a-0x8000);return true;
+    }
+    bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{
+        if(a<0x8000)return false;
+        uint8_t bank=d&7;
+        if((d&8)==0){
+            if(d&0x10)bank^=3;
+            if(d&0x20)bank=swapBits(bank,0,1);
+            m_prg=bank;
+        }else{
+            if((d&0x70)==0x70)bank^=7;
+            else{
+                if(d&0x10)bank=swapBits(bank,0,1);
+                if(d&0x20)bank=swapBits(bank,1,2);
+                if(d&0x40)bank=swapBits(bank,2,0);
+            }
+            m_chr=bank;
+        }
+        return true;
+    }
+    bool ppuMapRead(uint16_t a,uint32_t& m)override{
+        if (a >= 0x2000) return false;
+        const auto s = m_config.chrRomSize ? m_config.chrRomSize : m_config.chrRamSize;
+        if (!s) return false;
+        m = mapBank(m_chr,0x2000,s,a);
+        return true;
+    }
+    bool ppuMapWrite(uint16_t a,uint32_t& m)override{return m_config.chrRamSize&&!m_config.chrRomSize&&ppuMapRead(a,m);}
+    void reset(bool hard)override{if(hard){m_prg=0;m_chr=0;}}
+    void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg);put8(o,m_chr);}
+    bool loadState(const uint8_t*&p,const uint8_t*e)override{return get8(p,e,m_prg)&&get8(p,e,m_chr);}
+private:
+    uint8_t m_prg=0,m_chr=0;
+    static uint8_t swapBits(uint8_t v,unsigned a,unsigned b){const uint8_t x=uint8_t(((v>>a)^(v>>b))&1);return uint8_t(v^(x<<a)^(x<<b));}
+};
+
 class Mapper240 final : public Mapper {public:explicit Mapper240(const MapperConfig&c):Mapper(c){}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;m=mapBank(m_prg,0x8000,m_config.prgRomSize,a-0x8000);return true;}bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if(a<0x4020||a>0x5FFF)return false;m_prg=(d>>4)&0x0F;m_chr=d&0x0F;return true;}bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto s=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!s)return false;m=mapBank(m_chr,0x2000,s,a);return true;}bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);}bool mapPrgRam(uint16_t,uint32_t&,bool)const override{return false;}void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg);put8(o,m_chr);}bool loadState(const uint8_t*&p,const uint8_t*e)override{return get8(p,e,m_prg)&&get8(p,e,m_chr);}private:uint8_t m_prg=0,m_chr=0;};
 class Mapper241 final : public Mapper {public:explicit Mapper241(const MapperConfig&c):Mapper(c){}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;m=mapBank(m_prg,0x8000,m_config.prgRomSize,a-0x8000);return true;}bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if(a<0x8000)return false;m_prg=d;return true;}void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg);}bool loadState(const uint8_t*&p,const uint8_t*e)override{return get8(p,e,m_prg);}private:uint8_t m_prg=0;};
 class Mapper242 final : public Mapper {public:explicit Mapper242(const MapperConfig&c):Mapper(c){m_mirror=Mirror::Vertical;}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;m=mapBank(m_prg,0x8000,m_config.prgRomSize,a-0x8000);return true;}bool cpuWrite(uint16_t a,uint8_t,uint64_t)override{if(a<0x8000)return false;m_prg=(a>>3)&0x0F;m_mirror=(a&2)?Mirror::Horizontal:Mirror::Vertical;return true;}void saveState(std::vector<uint8_t>&o)const override{put8(o,m_prg);put8(o,static_cast<uint8_t>(m_mirror));}bool loadState(const uint8_t*&p,const uint8_t*e)override{uint8_t b;if(!get8(p,e,m_prg)||!get8(p,e,b))return false;m_mirror=static_cast<Mirror>(b);return true;}private:uint8_t m_prg=0;};
-class Mapper246 final : public Mapper {public:explicit Mapper246(const MapperConfig&c):Mapper(c){m_prg[3]=0xFF;}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;m=mapBank(m_prg[(a-0x8000)>>13],0x2000,m_config.prgRomSize,a&0x1FFF);return true;}bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if(a<0x6000||a>0x67FF)return false;uint8_t r=a&7;if(r<=3)m_prg[r]=d;else m_chr[r&3]=d;return true;}bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto s=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!s)return false;m=mapBank(m_chr[a>>11],0x800,s,a&0x7FF);return true;}bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);}bool mapPrgRam(uint16_t,uint32_t&,bool)const override{return false;}void saveState(std::vector<uint8_t>&o)const override{for(auto v:m_prg)put8(o,v);for(auto v:m_chr)put8(o,v);}bool loadState(const uint8_t*&p,const uint8_t*e)override{for(auto&v:m_prg)if(!get8(p,e,v))return false;for(auto&v:m_chr)if(!get8(p,e,v))return false;return true;}private:uint8_t m_prg[4]={0,0,0,0xFF},m_chr[4]={};};
+class Mapper246 final : public Mapper {public:explicit Mapper246(const MapperConfig&c):Mapper(c){m_prg[3]=0xFF;}bool cpuMapRead(uint16_t a,uint32_t&m)const override{if(a<0x8000||!m_config.prgRomSize)return false;m=mapBank(m_prg[(a-0x8000)>>13],0x2000,m_config.prgRomSize,a&0x1FFF);return true;}bool cpuWrite(uint16_t a,uint8_t d,uint64_t)override{if(a<0x6000||a>0x67FF)return false;uint8_t r=a&7;if(r<=3)m_prg[r]=d;else m_chr[r&3]=d;return true;}bool ppuMapRead(uint16_t a,uint32_t&m)override{if(a>=0x2000)return false;auto s=m_config.chrRomSize?m_config.chrRomSize:m_config.chrRamSize;if(!s)return false;m=mapBank(m_chr[a>>11],0x800,s,a&0x7FF);return true;}bool ppuMapWrite(uint16_t a,uint32_t&m)override{return m_config.chrRamSize&&ppuMapRead(a,m);}bool mapPrgRam(uint16_t a,uint32_t&m,bool)const override{if(a<0x6800||a>0x6FFF||!m_config.prgRamSize)return false;m=(a-0x6800)%m_config.prgRamSize;return true;}void reset(bool)override{m_prg[0]=m_prg[1]=m_prg[2]=0;m_prg[3]=0xFF;m_chr[0]=m_chr[1]=m_chr[2]=m_chr[3]=0;}void saveState(std::vector<uint8_t>&o)const override{for(auto v:m_prg)put8(o,v);for(auto v:m_chr)put8(o,v);}bool loadState(const uint8_t*&p,const uint8_t*e)override{for(auto&v:m_prg)if(!get8(p,e,v))return false;for(auto&v:m_chr)if(!get8(p,e,v))return false;return true;}private:uint8_t m_prg[4]={0,0,0,0xFF},m_chr[4]={};};
 
 class Mapper81 final : public Mapper {
 public:
@@ -3213,4 +4553,193 @@ private:
     uint8_t m_prg = 0;
     uint8_t m_chr4 = 0;
     uint8_t m_chr2[2] = {0, 0};
+};
+
+class Mapper221 final : public Mapper {
+public:
+    explicit Mapper221(const MapperConfig& c) : Mapper(c) { reset(true); }
+
+    bool cpuMapRead(uint16_t a, uint32_t& mapped) const override {
+        if (a < 0x8000 || !m_config.prgRomSize) return false;
+        const std::size_t outer = std::size_t((m_mode & 0x00FC) >> 2);
+        std::size_t bank16 = 0;
+        if (m_mode & 0x0002) {
+            if (m_mode & 0x0100) {
+                bank16 = (a < 0xC000) ? (outer | m_prgReg) : (outer | 0x07u);
+            } else {
+                const std::size_t pair = outer | (std::size_t(m_prgReg) & 0x06u);
+                bank16 = pair | ((a >> 14) & 1u);
+            }
+        } else {
+            bank16 = outer | m_prgReg;
+        }
+        mapped = mapBank(bank16, 0x4000, m_config.prgRomSize, a & 0x3FFF);
+        return true;
+    }
+
+    bool cpuWrite(uint16_t a, uint8_t, uint64_t) override {
+        if (a < 0x8000) return false;
+        if ((a & 0xC000) == 0x8000) {
+            m_mode = a;
+            if (!m_config.fourScreen)
+                m_mirror = (m_mode & 1) ? Mirror::Horizontal : Mirror::Vertical;
+            return true;
+        }
+        if ((a & 0xC000) == 0xC000) {
+            m_prgReg = uint8_t(a & 0x07);
+            return true;
+        }
+        return true;
+    }
+
+    bool ppuMapRead(uint16_t a, uint32_t& mapped) override {
+        if (a >= 0x2000) return false;
+        const std::size_t size = m_config.chrRomSize ? m_config.chrRomSize : m_config.chrRamSize;
+        if (!size) return false;
+        mapped = static_cast<uint32_t>(a % size);
+        return true;
+    }
+    bool ppuMapWrite(uint16_t a, uint32_t& mapped) override {
+        return m_config.chrRomSize == 0 && m_config.chrRamSize != 0 && ppuMapRead(a, mapped);
+    }
+    bool mapPrgRam(uint16_t a, uint32_t& mapped, bool) const override {
+        if (a < 0x6000 || a > 0x7FFF || !m_config.prgRamSize) return false;
+        mapped = uint32_t((a - 0x6000) % m_config.prgRamSize);
+        return true;
+    }
+
+    void reset(bool hard) override {
+        if (!hard) return;
+        m_mode = 0;
+        m_prgReg = 0;
+        if (!m_config.fourScreen) m_mirror = Mirror::Vertical;
+    }
+    void saveState(std::vector<uint8_t>& out) const override {
+        put8(out, uint8_t(m_mode)); put8(out, uint8_t(m_mode >> 8)); put8(out, m_prgReg);
+        put8(out, uint8_t(m_mirror));
+    }
+    bool loadState(const uint8_t*& p, const uint8_t* end) override {
+        uint8_t lo=0,hi=0,mir=0;
+        if(!get8(p,end,lo)||!get8(p,end,hi)||!get8(p,end,m_prgReg)||!get8(p,end,mir)) return false;
+        m_mode = uint16_t(lo) | (uint16_t(hi)<<8);
+        m_mirror = static_cast<Mirror>(mir);
+        return true;
+    }
+private:
+    uint16_t m_mode = 0;
+    uint8_t m_prgReg = 0;
+};
+
+class Mapper169 final : public Mapper {
+public:
+    explicit Mapper169(const MapperConfig& c) : Mapper(c) { reset(true); }
+
+    bool cpuMapRead(uint16_t a, uint32_t& mapped) const override {
+        if (a < 0x8000 || !m_config.prgRomSize) return false;
+        const std::size_t outer = std::size_t((m_ctrl >> 2) & 0x38);
+        std::size_t bank16 = 0;
+        if (a < 0xC000) {
+            const uint8_t inner = ((m_ctrl & 0x0102) == 0x0002) ? uint8_t(m_bank & 0x06) : m_bank;
+            bank16 = outer | inner;
+        } else {
+            const uint8_t inner = ((m_ctrl & 0x0102) == 0x0102) ? 0x07 : uint8_t(m_bank | ((m_ctrl >> 1) & 1));
+            bank16 = outer | inner;
+        }
+        mapped = mapBank(bank16, 0x4000, m_config.prgRomSize, a & 0x3FFF);
+        return true;
+    }
+
+    bool cpuWrite(uint16_t a, uint8_t, uint64_t) override {
+        if (a < 0x8000) return false;
+        if (a < 0xC000) {
+            m_ctrl = a;
+            if (!m_config.fourScreen)
+                m_mirror = (m_ctrl & 1) ? Mirror::Horizontal : Mirror::Vertical;
+        } else {
+            m_bank = uint8_t(a & 7);
+        }
+        return true;
+    }
+
+    bool ppuMapRead(uint16_t a, uint32_t& mapped) override {
+        if (a >= 0x2000 || !m_config.chrRamSize) return false;
+        mapped = uint32_t(a % m_config.chrRamSize);
+        return true;
+    }
+    bool ppuMapWrite(uint16_t a, uint32_t& mapped) override { return ppuMapRead(a, mapped); }
+
+    void reset(bool hard) override {
+        if (!hard) return;
+        m_ctrl = 0;
+        m_bank = 0;
+        if (!m_config.fourScreen) m_mirror = Mirror::Vertical;
+    }
+    void saveState(std::vector<uint8_t>& out) const override {
+        put8(out, uint8_t(m_ctrl)); put8(out, uint8_t(m_ctrl >> 8)); put8(out, m_bank); put8(out, uint8_t(m_mirror));
+    }
+    bool loadState(const uint8_t*& p, const uint8_t* end) override {
+        uint8_t lo=0, hi=0, mir=0;
+        if (!get8(p,end,lo) || !get8(p,end,hi) || !get8(p,end,m_bank) || !get8(p,end,mir)) return false;
+        m_ctrl = uint16_t(lo) | (uint16_t(hi) << 8);
+        m_mirror = static_cast<Mirror>(mir);
+        return true;
+    }
+private:
+    uint16_t m_ctrl = 0;
+    uint8_t m_bank = 0;
+};
+
+class Mapper265 final : public Mapper {
+public:
+    explicit Mapper265(const MapperConfig& c) : Mapper(c) { reset(true); }
+
+    bool cpuMapRead(uint16_t a, uint32_t& mapped) const override {
+        if (a < 0x8000 || !m_config.prgRomSize) return false;
+        const std::size_t bank16 = (a < 0xC000) ? (std::size_t(m_base) | m_bank)
+            : (std::size_t(m_base) | (m_mode ? m_bank : 7u));
+        mapped = mapBank(bank16, 0x4000, m_config.prgRomSize, a & 0x3FFF);
+        return true;
+    }
+
+    bool cpuWrite(uint16_t a, uint8_t d, uint64_t) override {
+        if (a < 0x8000) return false;
+        if (!m_locked) {
+            m_base = uint8_t(((a & 0x0060) >> 2) | ((a & 0x0100) >> 3));
+            m_mode = (a & 0x0080) != 0;
+            m_locked = (a & 0x2000) != 0;
+            if (!m_config.fourScreen) m_mirror = (a & 0x0002) ? Mirror::Horizontal : Mirror::Vertical;
+        }
+        m_bank = d & 0x07;
+        return true;
+    }
+
+    bool ppuMapRead(uint16_t a, uint32_t& mapped) override {
+        if (a >= 0x2000) return false;
+        const std::size_t size = m_config.chrRomSize ? m_config.chrRomSize : m_config.chrRamSize;
+        if (!size) return false;
+        mapped = uint32_t(a % size);
+        return true;
+    }
+    bool ppuMapWrite(uint16_t a, uint32_t& mapped) override {
+        return !m_config.chrRomSize && m_config.chrRamSize && ppuMapRead(a, mapped);
+    }
+
+    void reset(bool hard) override {
+        if (!hard) return;
+        m_locked = false; m_base = 0; m_bank = 0; m_mode = false;
+        if (!m_config.fourScreen) m_mirror = Mirror::Vertical;
+    }
+    void saveState(std::vector<uint8_t>& out) const override {
+        put8(out, m_locked ? 1 : 0); put8(out, m_base); put8(out, m_bank); put8(out, m_mode ? 1 : 0); put8(out, uint8_t(m_mirror));
+    }
+    bool loadState(const uint8_t*& p, const uint8_t* end) override {
+        uint8_t b=0, mode=0, mir=0;
+        if (!get8(p,end,b) || !get8(p,end,m_base) || !get8(p,end,m_bank) || !get8(p,end,mode) || !get8(p,end,mir)) return false;
+        m_locked = b != 0; m_mode = mode != 0; m_mirror = static_cast<Mirror>(mir); return true;
+    }
+private:
+    bool m_locked = false;
+    uint8_t m_base = 0;
+    uint8_t m_bank = 0;
+    bool m_mode = false;
 };

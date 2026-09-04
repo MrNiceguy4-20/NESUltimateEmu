@@ -3,7 +3,7 @@
 #include "CPU.hpp"
 #include "Cartridge.hpp"
 #ifndef NES_HEADLESS
-#include <SDL.h>
+#include <SDL3/SDL.h>
 #endif
 #include <cstring>
 #include <algorithm>
@@ -71,11 +71,22 @@ const uint16_t APU::dmcRatesPal[16] = {
 };
 
 #ifndef NES_HEADLESS
-static void sdlAudioCallback(void* userdata, Uint8* stream, int len)
+static void SDLCALL sdlAudioCallback(void* userdata, SDL_AudioStream* stream,
+                                     int additionalAmount, int )
 {
     APU* apu = static_cast<APU*>(userdata);
-    float* out = reinterpret_cast<float*>(stream);
-    apu->fillBuffer(out, len / (int)sizeof(float));
+    std::array<float, 1024> samples{};
+    int bytesRemaining = additionalAmount;
+    while (bytesRemaining > 0) {
+        const int sampleCount = std::min<int>(
+            bytesRemaining / static_cast<int>(sizeof(float)),
+            static_cast<int>(samples.size()));
+        if (sampleCount <= 0) break;
+        apu->fillBuffer(samples.data(), sampleCount);
+        const int bytes = sampleCount * static_cast<int>(sizeof(float));
+        if (!SDL_PutAudioStreamData(stream, samples.data(), bytes)) break;
+        bytesRemaining -= bytes;
+    }
 }
 #endif
 
@@ -174,32 +185,23 @@ bool APU::initAudio()
     if (m_audioOpen)
         return true;
 
-    SDL_AudioSpec want{}, have{};
+    SDL_AudioSpec want{};
     want.freq = kSampleRate;
-    want.format = AUDIO_F32SYS;
+    want.format = SDL_AUDIO_F32;
     want.channels = 1;
-    want.samples = 512;
-    want.callback = sdlAudioCallback;
-    want.userdata = this;
 
-    const SDL_AudioDeviceID device = SDL_OpenAudioDevice(
-        nullptr, 0, &want, &have, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
-    if (device == 0)
+    SDL_AudioStream* stream = SDL_OpenAudioDeviceStream(
+        SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &want, sdlAudioCallback, this);
+    if (!stream)
         return false;
 
-    if (have.format != AUDIO_F32SYS || have.channels != 1 || have.freq <= 0) {
-        SDL_CloseAudioDevice(device);
-        return false;
-    }
-
-    m_audioDeviceId = uint32_t(device);
-    m_outputSampleRate = have.freq;
+    m_audioStream = stream;
+    m_outputSampleRate = want.freq;
     m_samplePeriod = double(consoleCpuClockHz(m_timing)) / double(m_outputSampleRate);
     updateOutputFilterCoefficients(m_outputSampleRate, m_hp90Coefficient, m_hp440Coefficient, m_lp14kCoefficient);
     resetOutputPipeline();
     m_audioOpen = true;
     m_audioPlaybackPaused = true;
-    SDL_PauseAudioDevice(device, 1);
     return true;
 #endif
 }
@@ -207,13 +209,13 @@ bool APU::initAudio()
 void APU::shutdownAudio()
 {
 #ifdef NES_HEADLESS
-    m_audioDeviceId = 0;
+    m_audioStream = nullptr;
     m_audioOpen = false;
 #else
     if (!m_audioOpen)
         return;
-    SDL_CloseAudioDevice(SDL_AudioDeviceID(m_audioDeviceId));
-    m_audioDeviceId = 0;
+    SDL_DestroyAudioStream(static_cast<SDL_AudioStream*>(m_audioStream));
+    m_audioStream = nullptr;
     m_audioOpen = false;
 #endif
 }
@@ -246,7 +248,7 @@ void APU::setHostAudioEnabled(bool enabled)
         return;
 #ifndef NES_HEADLESS
     if (m_audioOpen)
-        SDL_PauseAudioDevice(SDL_AudioDeviceID(m_audioDeviceId), 1);
+        SDL_PauseAudioStreamDevice(static_cast<SDL_AudioStream*>(m_audioStream));
 #endif
     m_audioPlaybackPaused = true;
     m_hostAudioEnabled = enabled;
@@ -259,7 +261,10 @@ void APU::setAudioPlaybackPaused(bool paused)
     if (!m_audioOpen || m_audioPlaybackPaused == paused)
         return;
 #ifndef NES_HEADLESS
-    SDL_PauseAudioDevice(SDL_AudioDeviceID(m_audioDeviceId), paused ? 1 : 0);
+    if (paused)
+        SDL_PauseAudioStreamDevice(static_cast<SDL_AudioStream*>(m_audioStream));
+    else
+        SDL_ResumeAudioStreamDevice(static_cast<SDL_AudioStream*>(m_audioStream));
 #endif
     m_audioPlaybackPaused = paused;
 }
@@ -731,7 +736,8 @@ void APU::clockFrameCounter()
         const uint32_t q1 = (m_timing == ConsoleTiming::PAL) ? 8313u : 7457u;
         const uint32_t qh2 = (m_timing == ConsoleTiming::PAL) ? 16627u : 14913u;
         const uint32_t q3 = (m_timing == ConsoleTiming::PAL) ? 24939u : 22371u;
-        const uint32_t qh5 = (m_timing == ConsoleTiming::PAL) ? 41561u : 37281u;
+
+        const uint32_t qh5 = (m_timing == ConsoleTiming::PAL) ? 41565u : 37281u;
 
         if (m_frameCycles == q1) {
             quarterFrame();
@@ -1175,6 +1181,10 @@ void APU::saveState(std::vector<uint8_t>& out) const
         put8(c.volume);
         put8(c.constant ? 1 : 0);
         put8(c.lengthHalt ? 1 : 0);
+        put8(c.pendingLengthHaltValid ? 1 : 0);
+        put8(c.pendingLengthHalt ? 1 : 0);
+        put8(c.pendingLengthReload ? 1 : 0);
+        put8(c.pendingLengthValue);
         put16(c.timer);
         put16(c.timerPeriod);
         put8(c.length);
@@ -1195,6 +1205,10 @@ void APU::saveState(std::vector<uint8_t>& out) const
 
     put8(m_triangle.enabled ? 1 : 0);
     put8(m_triangle.lengthHalt ? 1 : 0);
+    put8(m_triangle.pendingLengthHaltValid ? 1 : 0);
+    put8(m_triangle.pendingLengthHalt ? 1 : 0);
+    put8(m_triangle.pendingLengthReload ? 1 : 0);
+    put8(m_triangle.pendingLengthValue);
     put16(m_triangle.timer);
     put16(m_triangle.timerPeriod);
     put8(m_triangle.length);
@@ -1206,6 +1220,10 @@ void APU::saveState(std::vector<uint8_t>& out) const
 
     put8(m_noise.enabled ? 1 : 0);
     put8(m_noise.lengthHalt ? 1 : 0);
+    put8(m_noise.pendingLengthHaltValid ? 1 : 0);
+    put8(m_noise.pendingLengthHalt ? 1 : 0);
+    put8(m_noise.pendingLengthReload ? 1 : 0);
+    put8(m_noise.pendingLengthValue);
     put8(m_noise.constant ? 1 : 0);
     put8(m_noise.volume);
     put8(m_noise.envelope);
@@ -1247,6 +1265,7 @@ void APU::saveState(std::vector<uint8_t>& out) const
     put8(static_cast<uint8_t>(m_dmcCpuRevision));
 
     put8(m_frameMode5 ? 1 : 0);
+    put8(m_frameResetAppliedPreCpu ? 1 : 0);
     put8(m_irqInhibit ? 1 : 0);
     put8(m_frameIrqFlag ? 1 : 0);
     put8(m_frameIrqClearPending ? 1 : 0);
@@ -1311,6 +1330,10 @@ bool APU::loadState(const uint8_t*& p, const uint8_t* end)
             get8(c.volume) &&
             getBool(c.constant) &&
             getBool(c.lengthHalt) &&
+            getBool(c.pendingLengthHaltValid) &&
+            getBool(c.pendingLengthHalt) &&
+            getBool(c.pendingLengthReload) &&
+            get8(c.pendingLengthValue) &&
             get16(c.timer) &&
             get16(c.timerPeriod) &&
             get8(c.length) &&
@@ -1329,12 +1352,16 @@ bool APU::loadState(const uint8_t*& p, const uint8_t* end)
     if (!getPulse(m_pulse1) || !getPulse(m_pulse2)) return false;
 
     if (!getBool(m_triangle.enabled) || !getBool(m_triangle.lengthHalt) ||
+        !getBool(m_triangle.pendingLengthHaltValid) || !getBool(m_triangle.pendingLengthHalt) ||
+        !getBool(m_triangle.pendingLengthReload) || !get8(m_triangle.pendingLengthValue) ||
         !get16(m_triangle.timer) || !get16(m_triangle.timerPeriod) ||
         !get8(m_triangle.length) || !get8(m_triangle.linear) ||
         !get8(m_triangle.linearReload) || !getBool(m_triangle.linearReloadFlag) ||
         !get8(m_triangle.sequencer) || !getFloat(m_triangle.phase)) return false;
 
     if (!getBool(m_noise.enabled) || !getBool(m_noise.lengthHalt) ||
+        !getBool(m_noise.pendingLengthHaltValid) || !getBool(m_noise.pendingLengthHalt) ||
+        !getBool(m_noise.pendingLengthReload) || !get8(m_noise.pendingLengthValue) ||
         !getBool(m_noise.constant) || !get8(m_noise.volume) ||
         !get8(m_noise.envelope) || !get8(m_noise.envelopePeriod) ||
         !getBool(m_noise.envelopeStart) || !get16(m_noise.timer) ||
@@ -1362,23 +1389,12 @@ bool APU::loadState(const uint8_t*& p, const uint8_t* end)
     m_dmcCpuRevision = static_cast<DmcCpuRevision>(dmcRevision);
     if (m_dmc.dmaStartDelay > 3 || m_dmc.stopBugWindow > 3 || m_dmc.implicitStopWindow > 3 || m_dmc.dmaImplicitAbortDelay > 1) return false;
 
-    if (!getBool(m_frameMode5) || !getBool(m_irqInhibit) ||
+    if (!getBool(m_frameMode5) || !getBool(m_frameResetAppliedPreCpu) || !getBool(m_irqInhibit) ||
         !getBool(m_frameIrqFlag) || !getBool(m_frameIrqClearPending) || !get32(m_frameCycles) ||
         !getBool(m_apuPhase) || !get8(m_frameResetDelay) ||
         !get8(m_pendingFrameStartCycles) || !getBool(m_pendingFrameMode5) || !getBool(m_chipMod) ||
         !getDouble(m_sampleTimer)) return false;
     if (m_frameResetDelay > 5 || m_pendingFrameStartCycles > 2) return false;
-
-    auto clearPendingLength = [](auto& channel) {
-        channel.pendingLengthHaltValid = false;
-        channel.pendingLengthHalt = false;
-        channel.pendingLengthReload = false;
-        channel.pendingLengthValue = 0;
-    };
-    clearPendingLength(m_pulse1);
-    clearPendingLength(m_pulse2);
-    clearPendingLength(m_triangle);
-    clearPendingLength(m_noise);
 
     const double restoredSampleTimer = m_sampleTimer;
     resetOutputPipeline();

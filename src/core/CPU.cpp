@@ -4160,10 +4160,12 @@ void CPU::saveState(std::vector<uint8_t>& out) const
     put8(m_irqDisableBeforeInstruction ? 1 : 0);
     put8(m_currentOpcode);
     put8(m_branchPageCrossed ? 1 : 0);
+    put8(m_unstableHighStoreRdy ? 1 : 0);
     put8(static_cast<uint8_t>(m_pendingIoOp));
     put16(m_pendingIoAddr);
     put8(m_pendingIoData);
     put8(m_pendingIoData2);
+    for (int i = 0; i < 8; ++i) put8(static_cast<uint8_t>((m_instructionCount >> (i * 8)) & 0xFF));
 }
 
 bool CPU::loadState(const uint8_t*& p, const uint8_t* end)
@@ -4184,16 +4186,18 @@ bool CPU::loadState(const uint8_t*& p, const uint8_t* end)
         };
     uint32_t cycles = 0;
     uint8_t nmiPending = 0, nmiSampled = 0, nmiPolled = 0, irqLine = 0, irqPolled = 0;
-    uint8_t pollSequence = 0, irqDisableBefore = 0, currentOpcode = 0, branchPageCrossed = 0, pendingIo = 0;
+    uint8_t pollSequence = 0, irqDisableBefore = 0, currentOpcode = 0, branchPageCrossed = 0, unstableHighStoreRdy = 0, pendingIo = 0;
     uint16_t pendingAddr = 0;
     uint8_t pendingData = 0, pendingData2 = 0;
+    uint64_t instructionCount = 0;
     if (!get8(m_a) || !get8(m_x) || !get8(m_y) || !get8(m_sp)) return false;
     if (!get16(m_pc) || !get8(m_status) || !get32(cycles)) return false;
     if (!get8(nmiPending) || !get8(nmiSampled) || !get8(nmiPolled) || !get8(irqLine) || !get8(irqPolled) ||
         !get8(pollSequence) || !get8(irqDisableBefore) || !get8(currentOpcode) ||
-        !get8(branchPageCrossed) || !get8(pendingIo) ||
+        !get8(branchPageCrossed) || !get8(unstableHighStoreRdy) || !get8(pendingIo) ||
         !get16(pendingAddr) || !get8(pendingData) || !get8(pendingData2)) return false;
-    if (pendingIo > static_cast<uint8_t>(PendingIoOp::ZpYSax)) return false;
+    for (int i = 0; i < 8; ++i) { uint8_t b = 0; if (!get8(b)) return false; instructionCount |= (uint64_t(b) << (i * 8)); }
+    if (pendingIo > static_cast<uint8_t>(PendingIoOp::Implied)) return false;
     m_status = (m_status & 0xEF) | 0x20;
     m_cycles = (int)cycles;
     m_nmiPending = nmiPending != 0;
@@ -4205,9 +4209,11 @@ bool CPU::loadState(const uint8_t*& p, const uint8_t* end)
     m_irqDisableBeforeInstruction = irqDisableBefore != 0;
     m_currentOpcode = currentOpcode;
     m_branchPageCrossed = branchPageCrossed != 0;
+    m_unstableHighStoreRdy = unstableHighStoreRdy != 0;
     m_pendingIoOp = static_cast<PendingIoOp>(pendingIo);
     m_pendingIoAddr = pendingAddr;
     m_pendingIoData = pendingData;
     m_pendingIoData2 = pendingData2;
+    m_instructionCount = instructionCount;
     return true;
 }

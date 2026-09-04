@@ -108,7 +108,7 @@ int runInstruction(CPU& cpu, std::vector<CPU::BusCycle>* trace = nullptr)
 bool testImpliedTiming()
 {
     const auto path = std::filesystem::temp_directory_path() / "nesultimate_cpu_implied_probe.nes";
-    if (!writeRom(path, 0x8000, {{0x8000, {0xA2,0x10,0xE8,0xA9,0x81,0x0A,0xEA}}}))
+    if (!writeRom(path, 0x8000, {{uint16_t{0x8000}, {0xA2,0x10,0xE8,0xA9,0x81,0x0A,0xEA}}}))
         return false;
     Machine m;
     if (!loadAndReset(m, path)) return false;
@@ -143,6 +143,48 @@ bool testImpliedTiming()
         (delayedAsl && finishedAsl) ? "PASS" : "FAIL", aslBus ? "PASS" : "FAIL",
         afterFetch.x, stateOf(m.cpu).x, second.address, aslSecond.address, m.cpu.atInstructionBoundary() ? 1 : 0);
     return delayedInx && finishedInx && delayedAsl && aslBus && finishedAsl;
+}
+
+bool testImpliedPendingStateLoad()
+{
+    const auto path = std::filesystem::temp_directory_path() / "nesultimate_cpu_implied_state_probe.nes";
+    if (!writeRom(path, 0x8000, {{uint16_t{0x8000}, {0xA2,0x10,0xE8,0xEA}}}))
+        return false;
+
+    Machine a;
+    if (!loadAndReset(a, path)) return false;
+    if (runInstruction(a.cpu) != 2 || stateOf(a.cpu).x != 0x10) return false;
+
+    a.cpu.clock();
+    if (a.cpu.atInstructionBoundary()) return false;
+
+    std::vector<uint8_t> state;
+    a.cpu.saveState(state);
+
+    Machine b;
+    if (!loadAndReset(b, path)) return false;
+    const uint8_t* p = state.data();
+    const uint64_t countA = a.cpu.instructionCount();
+    const bool loaded = b.cpu.loadState(p, state.data() + state.size()) &&
+        p == state.data() + state.size();
+    if (!loaded) {
+        std::puts("implied_pending_state=FAIL load=FAIL");
+        return false;
+    }
+    const bool countRestored = b.cpu.instructionCount() == countA;
+
+    a.cpu.clock();
+    b.cpu.clock();
+    const CpuState sa = stateOf(a.cpu);
+    const CpuState sb = stateOf(b.cpu);
+    const bool exact = a.cpu.atInstructionBoundary() && b.cpu.atInstructionBoundary() &&
+        sa.x == 0x11 && sb.x == sa.x && sb.pc == sa.pc && sb.p == sa.p &&
+        countRestored && b.cpu.instructionCount() == a.cpu.instructionCount();
+    std::printf("implied_pending_state=%s load=PASS x=%02X/%02X pc=%04X/%04X count=%llu/%llu\n",
+        exact ? "PASS" : "FAIL", sa.x, sb.x, sa.pc, sb.pc,
+        static_cast<unsigned long long>(a.cpu.instructionCount()),
+        static_cast<unsigned long long>(b.cpu.instructionCount()));
+    return exact;
 }
 
 bool testUnstableStoreRdy()
@@ -180,9 +222,47 @@ bool testUnstableStoreRdy()
     } while (!stalled.cpu.atInstructionBoundary());
 
     const uint8_t stalledValue = stalled.bus.read(0x0500);
-    const bool ok = normalValue == 0x04 && dmaInjected && stalledValue == 0xA5;
-    std::printf("unstable_store_rdy=%s normal=%02X stalled=%02X dma=%d clocks=%d\n",
-        ok ? "PASS" : "FAIL", normalValue, stalledValue, dmaInjected ? 1 : 0, clocks);
+
+    Machine snapA;
+    if (!loadAndReset(snapA, path)) return false;
+    if (runInstruction(snapA.cpu) != 2 || runInstruction(snapA.cpu) != 2) return false;
+    snapA.bus.write(0x0500, 0x5A);
+    bool snapInjected = false;
+    for (int i = 0; i < 8 && !snapInjected; ++i) {
+        const CPU::BusCycle c = snapA.cpu.nextBusCycle();
+        if (c.exact && c.dummy && c.type == CPU::BusCycleType::Read && c.address == 0x0500) {
+            if (!snapA.bus.requestDmcDma(0x8000)) return false;
+            snapA.bus.clock();
+            snapInjected = true;
+            break;
+        }
+        snapA.cpu.clock();
+    }
+    if (!snapInjected) return false;
+
+    std::vector<uint8_t> cpuState, busState;
+    snapA.cpu.saveState(cpuState);
+    snapA.bus.saveState(busState);
+
+    Machine snapB;
+    if (!loadAndReset(snapB, path)) return false;
+    const uint8_t* cp = cpuState.data();
+    const uint8_t* bp = busState.data();
+    if (!snapB.cpu.loadState(cp, cpuState.data() + cpuState.size()) || cp != cpuState.data() + cpuState.size()) return false;
+    if (!snapB.bus.loadState(bp, busState.data() + busState.size()) || bp != busState.data() + busState.size()) return false;
+
+    int settleA = 0, settleB = 0;
+    while (!snapA.cpu.atInstructionBoundary() && settleA++ < 16) snapA.bus.clock();
+    while (!snapB.cpu.atInstructionBoundary() && settleB++ < 16) snapB.bus.clock();
+    const uint8_t snapValueA = snapA.bus.read(0x0500);
+    const uint8_t snapValueB = snapB.bus.read(0x0500);
+    const bool stateDeterministic = snapValueA == 0xA5 && snapValueB == snapValueA &&
+        stateOf(snapA.cpu).pc == stateOf(snapB.cpu).pc;
+
+    const bool ok = normalValue == 0x04 && dmaInjected && stalledValue == 0xA5 && stateDeterministic;
+    std::printf("unstable_store_rdy=%s normal=%02X stalled=%02X dma=%d clocks=%d state=%s restored=%02X\n",
+        ok ? "PASS" : "FAIL", normalValue, stalledValue, dmaInjected ? 1 : 0, clocks,
+        stateDeterministic ? "PASS" : "FAIL", snapValueB);
     return ok;
 }
 
@@ -318,11 +398,12 @@ bool testAllOpcodeBusCyclesExact()
 int runCpuConformanceProbe()
 {
     const bool implied = testImpliedTiming();
+    const bool impliedState = testImpliedPendingStateLoad();
     const bool jmpWrap = testJmpIndirectWrap();
     const bool branch = testBranchCycles();
     const bool unstableRdy = testUnstableStoreRdy();
     const bool exactBus = testAllOpcodeBusCyclesExact();
-    const bool ok = implied && jmpWrap && branch && unstableRdy && exactBus;
+    const bool ok = implied && impliedState && jmpWrap && branch && unstableRdy && exactBus;
     std::puts(ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }

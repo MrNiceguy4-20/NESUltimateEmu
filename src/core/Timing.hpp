@@ -16,6 +16,15 @@ inline constexpr int consoleCpuClockHz(ConsoleTiming timing)
     }
 }
 
+inline constexpr int consolePpuClockHz(ConsoleTiming timing)
+{
+    switch (timing) {
+    case ConsoleTiming::PAL:   return 5320342;
+    case ConsoleTiming::Dendy: return 5320344;
+    default:                   return 5369318;
+    }
+}
+
 inline constexpr int consoleScanlines(ConsoleTiming timing)
 {
     return timing == ConsoleTiming::NTSC ? 262 : 312;

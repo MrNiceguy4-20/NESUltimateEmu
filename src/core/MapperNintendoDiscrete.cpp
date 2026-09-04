@@ -109,6 +109,46 @@ private:
     uint8_t m_bank = 0;
 };
 
+class Mapper99 final : public Mapper {
+public:
+    explicit Mapper99(const MapperConfig& config) : Mapper(config) {}
+
+    bool cpuMapRead(uint16_t addr, uint32_t& mapped) const override
+    {
+        if (addr < 0x8000 || m_config.prgRomSize == 0) return false;
+        mapped = static_cast<uint32_t>(m_config.prgRomSize == 0x4000
+            ? (addr & 0x3FFF)
+            : ((addr - 0x8000) % m_config.prgRomSize));
+        return true;
+    }
+
+    void observeCpuWrite(uint16_t addr, uint8_t data) override
+    {
+        if (addr == 0x4016)
+            m_chrBank = static_cast<uint8_t>((data >> 2) & 0x01);
+    }
+
+    bool ppuMapRead(uint16_t addr, uint32_t& mapped) override
+    {
+        if (addr >= 0x2000) return false;
+        const std::size_t chrSize = m_config.chrRomSize ? m_config.chrRomSize : m_config.chrRamSize;
+        if (chrSize == 0) return false;
+        mapped = mapBank(m_chrBank, 0x2000, chrSize, addr);
+        return true;
+    }
+
+    bool ppuMapWrite(uint16_t addr, uint32_t& mapped) override
+    {
+        if (m_config.chrRamSize == 0) return false;
+        return ppuMapRead(addr, mapped);
+    }
+
+    void saveState(std::vector<uint8_t>& out) const override { put8(out, m_chrBank); }
+    bool loadState(const uint8_t*& p, const uint8_t* end) override { return get8(p, end, m_chrBank); }
+
+private:
+    uint8_t m_chrBank = 0;
+};
 class Mapper7 final : public Mapper {
 public:
     explicit Mapper7(const MapperConfig& config) : Mapper(config) {}
@@ -155,6 +195,7 @@ std::unique_ptr<Mapper> createNintendoDiscreteMapper(const MapperConfig& config)
     case 2: return std::make_unique<Mapper2>(config);
     case 3: return std::make_unique<Mapper3>(config);
     case 7: return std::make_unique<Mapper7>(config);
+    case 99: return std::make_unique<Mapper99>(config);
     default: return nullptr;
     }
 }

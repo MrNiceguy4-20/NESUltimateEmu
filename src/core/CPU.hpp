@@ -24,6 +24,12 @@ public:
 
     bool atInstructionBoundary() const { return m_cycles == 0; }
     uint64_t instructionCount() const { return m_instructionCount; }
+    uint8_t accumulator() const { return m_a; }
+    uint8_t xRegister() const { return m_x; }
+    uint8_t yRegister() const { return m_y; }
+    uint8_t stackPointer() const { return m_sp; }
+    uint16_t programCounter() const { return m_pc; }
+    uint8_t statusRegister() const { return m_status; }
 
     enum class BusCycleType : uint8_t { Read = 0, Write = 1 };
     struct BusCycle {

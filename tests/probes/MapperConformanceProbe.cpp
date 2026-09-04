@@ -39,6 +39,276 @@ int runMapperConformanceProbe()
 {
     bool ok = true;
 
+    auto fds = makeMapper(20, 0x2000, 0, 0x8000, 0x2000);
+    fds->cpuWrite(0x4089, 0x80, 0);
+    fds->cpuWrite(0x4040, 0x2A, 0);
+    fds->cpuWrite(0x4025, 0x08, 0);
+    const bool fdsMirrorBefore = fds->mirroring() == Mirror::Horizontal;
+    fds->cpuWrite(0x4023, 0x00, 0);
+    uint8_t fdsDiskStatus = 0xA5, fdsWave = 0x00;
+    const bool fdsReadsDisabled = fds->cpuReadRegister(0x4032, fdsDiskStatus) &&
+        fds->cpuReadRegister(0x4040, fdsWave) && fdsWave == 0x2A;
+    const bool fdsMirrorReset = fds->mirroring() == Mirror::Vertical;
+    fds->cpuWrite(0x4025, 0x08, 0);
+    const bool fdsWritesDisabled = fds->mirroring() == Mirror::Vertical;
+    const bool fds4023 = fdsMirrorBefore && fdsReadsDisabled && fdsMirrorReset && fdsWritesDisabled;
+    std::printf("fds_4023_read_decode_and_reset=%s reads=%s mirror_reset=%s writes_gated=%s\n",
+        fds4023?"PASS":"FAIL", fdsReadsDisabled?"PASS":"FAIL",
+        fdsMirrorReset?"PASS":"FAIL", fdsWritesDisabled?"PASS":"FAIL");
+    ok &= fds4023;
+
+    auto fdsStatus = makeMapper(20, 0x2000, 0, 0x8000, 0x2000);
+    std::vector<uint8_t> blankFdsSide(65500, 0);
+    const bool fdsImageLoaded = fdsStatus->loadDiskImage(blankFdsSide);
+    fdsStatus->cpuWrite(0x4025, 0x89, 0);
+    for (int i = 0; i < 50002; ++i) fdsStatus->clockCpu();
+    uint8_t fdsStatus0 = 0, fdsStatus1 = 0, fdsData = 0, fdsStatus2 = 0;
+    const bool fdsRead0 = fdsStatus->cpuReadRegister(0x4030, fdsStatus0);
+    const bool fdsIrqSurvives4030 = fdsStatus->irqActive();
+    const bool fdsRead1 = fdsStatus->cpuReadRegister(0x4030, fdsStatus1);
+    const bool fdsDataRead = fdsStatus->cpuReadRegister(0x4031, fdsData);
+    const bool fdsIrqCleared4031 = !fdsStatus->irqActive();
+    const bool fdsRead2 = fdsStatus->cpuReadRegister(0x4030, fdsStatus2);
+    const bool fds4030 = fdsImageLoaded && fdsRead0 && fdsRead1 && fdsDataRead && fdsRead2 &&
+        (fdsStatus0 & 0x88) == 0x88 && (fdsStatus0 & 0x02) == 0 &&
+        (fdsStatus1 & 0x80) != 0 && fdsIrqSurvives4030 && fdsIrqCleared4031 &&
+        (fdsStatus2 & 0x80) == 0;
+    std::printf("fds_4030_transfer_status_and_ack=%s d7=%s d3=%s d1_clear=%s irq_hold=%s ack4031=%s\n",
+        fds4030?"PASS":"FAIL", (fdsStatus0&0x80)?"PASS":"FAIL",
+        (fdsStatus0&0x08)?"PASS":"FAIL", !(fdsStatus0&0x02)?"PASS":"FAIL",
+        fdsIrqSurvives4030?"PASS":"FAIL", fdsIrqCleared4031?"PASS":"FAIL");
+    ok &= fds4030;
+
+    auto fdsRefresh = makeMapper(20, 0x2000, 0, 0x8000, 0x2000);
+    fdsRefresh->cpuWrite(0x4023, 0x83, 0);
+    for (int i = 0; i < 3246; ++i) {
+        fdsRefresh->notifyCpuAddress(0x6000);
+        fdsRefresh->clockCpu();
+    }
+    uint8_t fdsRefreshStatus = 0;
+    const bool fdsRefreshIrq = fdsRefresh->irqActive() &&
+        fdsRefresh->cpuReadRegister(0x4030, fdsRefreshStatus) &&
+        (fdsRefreshStatus & 0x02) != 0 && !fdsRefresh->irqActive();
+
+    fdsRefresh->cpuWrite(0x4023, 0x82, 0);
+    fdsRefresh->cpuWrite(0x4023, 0x83, 0);
+    for (int i = 0; i < 6000; ++i) {
+        fdsRefresh->notifyCpuAddress((i % 24) == 0 ? 0x0000 : 0x6000);
+        fdsRefresh->clockCpu();
+    }
+    const bool fdsRefreshPrevents = !fdsRefresh->irqActive();
+
+    fdsRefresh->cpuWrite(0x4023, 0x82, 0);
+    fdsRefresh->cpuWrite(0x4023, 0x83, 0);
+    for (int i = 0; i < 1600; ++i) { fdsRefresh->notifyCpuAddress(0x6000); fdsRefresh->clockCpu(); }
+    std::vector<uint8_t> fdsRefreshState; fdsRefresh->saveState(fdsRefreshState);
+    for (int i = 0; i < 1646; ++i) { fdsRefresh->notifyCpuAddress(0x6000); fdsRefresh->clockCpu(); }
+    const bool fdsRefreshStateTrip = fdsRefresh->irqActive();
+    const uint8_t* frp = fdsRefreshState.data(); const uint8_t* fre = frp + fdsRefreshState.size();
+    const bool fdsRefreshLoad = fdsRefresh->loadState(frp, fre);
+    for (int i = 0; i < 1646; ++i) { fdsRefresh->notifyCpuAddress(0x6000); fdsRefresh->clockCpu(); }
+    const bool fdsRefreshStateDeterministic = fdsRefreshLoad && fdsRefresh->irqActive() == fdsRefreshStateTrip;
+    const bool fdsRefreshWatchdog = fdsRefreshIrq && fdsRefreshPrevents && fdsRefreshStateDeterministic;
+    std::printf("fds_dram_refresh_watchdog=%s irq_d1=%s refresh=%s state=%s\n",
+        fdsRefreshWatchdog?"PASS":"FAIL", fdsRefreshIrq?"PASS":"FAIL",
+        fdsRefreshPrevents?"PASS":"FAIL", fdsRefreshStateDeterministic?"PASS":"FAIL");
+    ok &= fdsRefreshWatchdog;
+
+    auto fdsTransfer = makeMapper(20, 0x2000, 0, 0x8000, 0x2000);
+    fdsTransfer->cpuWrite(0x4025, 0xE2, 0);
+    for (int i = 0; i < 149; ++i) fdsTransfer->clockCpu();
+    uint8_t fdsTransfer149 = 0, fdsTransfer150 = 0, fdsTransferNext = 0;
+    const bool fdsTransferBefore = fdsTransfer->cpuReadRegister(0x4030, fdsTransfer149) &&
+        (fdsTransfer149 & 0x80) == 0 && !fdsTransfer->irqActive();
+    fdsTransfer->clockCpu();
+    const bool fdsTransferFirst = fdsTransfer->cpuReadRegister(0x4030, fdsTransfer150) &&
+        (fdsTransfer150 & 0x80) != 0 && fdsTransfer->irqActive();
+    fdsTransfer->cpuWrite(0x4024, 0x5A, 0);
+    const bool fdsTransferAck = !fdsTransfer->irqActive();
+    for (int i = 0; i < 148; ++i) fdsTransfer->clockCpu();
+    const bool fdsTransferStillClear = fdsTransfer->cpuReadRegister(0x4030, fdsTransferNext) &&
+        (fdsTransferNext & 0x80) == 0;
+    fdsTransfer->clockCpu();
+    const bool fdsTransferSecond = fdsTransfer->cpuReadRegister(0x4030, fdsTransferNext) &&
+        (fdsTransferNext & 0x80) != 0 && fdsTransfer->irqActive();
+    std::vector<uint8_t> fdsTransferState; fdsTransfer->saveState(fdsTransferState);
+    fdsTransfer->cpuWrite(0x4024, 0x00, 0);
+    const uint8_t* ftsp=fdsTransferState.data(); const uint8_t* ftse=ftsp+fdsTransferState.size();
+    uint8_t fdsTransferRestored=0;
+    const bool fdsTransferStateOk=fdsTransfer->loadState(ftsp,ftse) &&
+        fdsTransfer->cpuReadRegister(0x4030,fdsTransferRestored) &&
+        (fdsTransferRestored&0x80)!=0 && fdsTransfer->irqActive();
+    const bool fdsTransferClock=fdsTransferBefore&&fdsTransferFirst&&fdsTransferAck&&
+        fdsTransferStillClear&&fdsTransferSecond&&fdsTransferStateOk;
+    std::printf("fds_write_transfer_clock=%s first150=%s next149=%s motor_independent=%s state=%s\n",
+        fdsTransferClock?"PASS":"FAIL",fdsTransferFirst?"PASS":"FAIL",
+        (fdsTransferStillClear&&fdsTransferSecond)?"PASS":"FAIL",
+        fdsTransferFirst?"PASS":"FAIL",fdsTransferStateOk?"PASS":"FAIL");
+    ok &= fdsTransferClock;
+
+    auto fdsExt = makeMapper(20, 0x2000, 0, 0x8000, 0x2000);
+    uint8_t fdsExtOff = 0, fdsExtOn = 0, fdsExtReset = 0;
+    fdsExt->cpuWrite(0x4026, 0x55, 0);
+    fdsExt->cpuWrite(0x4025, 0x03, 0);
+    const bool fdsExtReadOff = fdsExt->cpuReadRegister(0x4033, fdsExtOff);
+    fdsExt->cpuWrite(0x4025, 0x01, 0);
+    const bool fdsExtReadOn = fdsExt->cpuReadRegister(0x4033, fdsExtOn);
+    fdsExt->cpuWrite(0x4023, 0x02, 0);
+    const bool fdsExtReadReset = fdsExt->cpuReadRegister(0x4033, fdsExtReset);
+    const bool fdsExpansion = fdsExtReadOff && fdsExtReadOn && fdsExtReadReset &&
+        fdsExtOff == 0x55 && fdsExtOn == 0xD5 && fdsExtReset == 0x7F;
+    std::printf("fds_expansion_port_and_motor_bits=%s open_collector=%s battery_motor=%s reset=%s\n",
+        fdsExpansion?"PASS":"FAIL", (fdsExtOff==0x55)?"PASS":"FAIL",
+        (fdsExtOn==0xD5)?"PASS":"FAIL", (fdsExtReset==0x7F)?"PASS":"FAIL");
+    ok &= fdsExpansion;
+
+    auto fdsAudio = makeMapper(20, 0x2000, 0, 0x8000, 0x2000);
+    fdsAudio->cpuWrite(0x4089, 0x80, 0);
+    fdsAudio->cpuWrite(0x4040, 0x2D, 0);
+    fdsAudio->cpuWrite(0x4085, 0x15, 0);
+    uint8_t fdsA90=0,fdsA91=0,fdsA93=0,fdsA94=0,fdsA95=0,fdsA96=0,fdsA97=0;
+    const bool fdsAudioReads =
+        fdsAudio->cpuReadRegister(0x4090,fdsA90) &&
+        fdsAudio->cpuReadRegister(0x4091,fdsA91) &&
+        fdsAudio->cpuReadRegister(0x4093,fdsA93) &&
+        fdsAudio->cpuReadRegister(0x4094,fdsA94) &&
+        fdsAudio->cpuReadRegister(0x4095,fdsA95) &&
+        fdsAudio->cpuReadRegister(0x4096,fdsA96) &&
+        fdsAudio->cpuReadRegister(0x4097,fdsA97) &&
+        fdsA96==0x2D && fdsA97==0x15;
+    fdsAudio->cpuWrite(0x4023, 0x81, 0);
+    uint8_t fdsReset90=0,fdsReset91=0,fdsReset97=0,fdsWaveDisabled=0;
+    const bool fdsAudioReset =
+        fdsAudio->cpuReadRegister(0x4090,fdsReset90) && fdsReset90==0 &&
+        fdsAudio->cpuReadRegister(0x4091,fdsReset91) && fdsReset91==0 &&
+        fdsAudio->cpuReadRegister(0x4097,fdsReset97) && fdsReset97==0;
+    fdsAudio->cpuWrite(0x4040, 0x12, 0);
+    const bool fdsAudioMapped = fdsAudio->cpuReadRegister(0x4040,fdsWaveDisabled) && fdsWaveDisabled==0x12;
+    fdsAudio->cpuWrite(0x4085, 0x06, 0);
+    uint8_t fdsModDisabled=0;
+    const bool fdsModMapped = fdsAudio->cpuReadRegister(0x4097,fdsModDisabled) && fdsModDisabled==0x06;
+    std::vector<uint8_t> fdsAudioState; fdsAudio->saveState(fdsAudioState);
+    fdsAudio->cpuWrite(0x4085, 0x21, 0);
+    const uint8_t* fasp=fdsAudioState.data(); const uint8_t* fase=fasp+fdsAudioState.size();
+    uint8_t fdsModRestored=0;
+    const bool fdsAudioStateOk=fdsAudio->loadState(fasp,fase) &&
+        fdsAudio->cpuReadRegister(0x4097,fdsModRestored) && fdsModRestored==0x06;
+    const bool fdsAudioIo = fdsAudioReads && fdsAudioReset && fdsAudioMapped && fdsModMapped && fdsAudioStateOk;
+    std::printf("fds_audio_reset_and_debug_reads=%s reads=%s reset=%s mapped=%s mod=%s state=%s\n",
+        fdsAudioIo?"PASS":"FAIL", fdsAudioReads?"PASS":"FAIL",
+        fdsAudioReset?"PASS":"FAIL", fdsAudioMapped?"PASS":"FAIL", fdsModMapped?"PASS":"FAIL",
+        fdsAudioStateOk?"PASS":"FAIL");
+    ok &= fdsAudioIo;
+
+    auto fdsPhase = makeMapper(20, 0x2000, 0, 0x8000, 0x2000);
+    fdsPhase->cpuWrite(0x4023, 0x83, 0);
+    fdsPhase->cpuWrite(0x4089, 0x80, 0);
+    fdsPhase->cpuWrite(0x4040, 0x11, 0);
+    fdsPhase->cpuWrite(0x4041, 0x22, 0);
+    fdsPhase->cpuWrite(0x4082, 0xFF, 0);
+    fdsPhase->cpuWrite(0x4083, 0x0F, 0);
+    uint8_t fdsPhase0=0,fdsPhase15=0,fdsPhase16=0,fdsPhaseHeld=0;
+    fdsPhase->cpuReadRegister(0x4091,fdsPhase0);
+    for(int i=0;i<15;i++)fdsPhase->clockCpu();
+    fdsPhase->cpuReadRegister(0x4091,fdsPhase15);
+    fdsPhase->clockCpu();
+    fdsPhase->cpuReadRegister(0x4091,fdsPhase16);
+    for(int i=0;i<16;i++)fdsPhase->clockCpu();
+    fdsPhase->cpuReadRegister(0x4091,fdsPhaseHeld);
+    fdsPhase->cpuWrite(0x4089, 0x00, 0);
+    uint8_t fdsWaveCur0=0,fdsWaveCur1=0;
+    fdsPhase->cpuReadRegister(0x4040,fdsWaveCur0);
+    fdsPhase->cpuReadRegister(0x4041,fdsWaveCur1);
+    const bool fdsWaveDivider=fdsPhase0==0 && fdsPhase15==0 && fdsPhase16==0x3F && fdsPhaseHeld==0x7F;
+    const bool fdsCurrentWaveRead=fdsWaveCur0==0x22 && fdsWaveCur1==0x22;
+
+    fdsPhase->cpuWrite(0x4087, 0x80, 0);
+    for(int i=0;i<32;i++)fdsPhase->cpuWrite(0x4088, 0x01, 0);
+    fdsPhase->cpuWrite(0x4085, 0x00, 0);
+    fdsPhase->cpuWrite(0x4087, 0x40, 0);
+    uint8_t fdsMod0=0,fdsMod15=0,fdsMod16=0;
+    fdsPhase->cpuReadRegister(0x4097,fdsMod0);
+    for(int i=0;i<15;i++)fdsPhase->clockCpu();
+    fdsPhase->cpuReadRegister(0x4097,fdsMod15);
+    fdsPhase->clockCpu();
+    fdsPhase->cpuReadRegister(0x4097,fdsMod16);
+    const bool fdsModDivider=fdsMod0==0 && fdsMod15==0 && fdsMod16==1;
+    const bool fdsPhaseTiming=fdsWaveDivider && fdsCurrentWaveRead && fdsModDivider;
+    std::printf("fds_audio_phase_timing=%s wave16=%s current_read=%s mod16=%s\n",
+        fdsPhaseTiming?"PASS":"FAIL", fdsWaveDivider?"PASS":"FAIL",
+        fdsCurrentWaveRead?"PASS":"FAIL", fdsModDivider?"PASS":"FAIL");
+    ok &= fdsPhaseTiming;
+
+    auto m128 = makeMapper(128, 0x200000, 0, 0, 0x2000);
+    uint32_t m128lo=0,m128hi=0,m128chr=0;
+    const bool m128Boot=m128->cpuMapRead(0x8000,m128lo)&&m128lo==0x00000&&
+        m128->cpuMapRead(0xC000,m128hi)&&m128hi==0x1C000&&
+        m128->mirroring()==Mirror::Vertical;
+    m128->cpuWrite(0x9002,0x03,0);
+    const std::size_t m128outer1=std::size_t(0x9002u>>2);
+    const uint32_t m128ExpectLo1=uint32_t(((m128outer1|3u)%(0x200000u/0x4000u))*0x4000u);
+    const uint32_t m128ExpectHi1=uint32_t(((m128outer1|7u)%(0x200000u/0x4000u))*0x4000u);
+    const bool m128Banks=m128->cpuMapRead(0x8000,m128lo)&&m128lo==m128ExpectLo1&&
+        m128->cpuMapRead(0xC000,m128hi)&&m128hi==m128ExpectHi1&&
+        m128->mirroring()==Mirror::Horizontal&&m128->ppuMapRead(0x1234,m128chr)&&m128chr==0x1234;
+    m128->cpuWrite(0xF000,0x05,0);
+    const std::size_t m128lockedOuter=std::size_t(0xF000u>>2);
+    m128->cpuWrite(0x8000,0x01,0);
+    const uint32_t m128ExpectLocked=uint32_t(((m128lockedOuter|1u)%(0x200000u/0x4000u))*0x4000u);
+    const bool m128Lock=m128->cpuMapRead(0x8000,m128lo)&&m128lo==m128ExpectLocked;
+    std::vector<uint8_t> m128state; m128->saveState(m128state);
+    m128->reset(true); const uint8_t* m128sp=m128state.data(); const uint8_t* m128se=m128sp+m128state.size();
+    const bool m128State=m128->loadState(m128sp,m128se)&&m128->cpuMapRead(0x8000,m128lo)&&
+        m128lo==m128ExpectLocked;
+    const bool m128Gate=mapperImplementationSupported(128,0)&&!mapperImplementationSupported(128,1);
+    const bool mapper128=m128Boot&&m128Banks&&m128Lock&&m128State&&m128Gate;
+    std::printf("mapper128_super_hik=%s boot=%s banks=%s lock=%s state=%s gate=%s\n",
+        mapper128?"PASS":"FAIL",m128Boot?"PASS":"FAIL",m128Banks?"PASS":"FAIL",
+        m128Lock?"PASS":"FAIL",m128State?"PASS":"FAIL",m128Gate?"PASS":"FAIL");
+    ok &= mapper128;
+
+    auto m186 = makeMapper(186, 0x20000, 0x2000, 0x8000, 0);
+    uint8_t m186r = 0;
+    const bool m186Regs = m186->cpuReadRegister(0x4200, m186r) && m186r == 0x00 &&
+        m186->cpuReadRegister(0x4202, m186r) && m186r == 0x40 &&
+        m186->cpuReadRegister(0x4300, m186r) && m186r == 0xFF;
+    m186->cpuWrite(0x4400, 0x5A, 0);
+    const bool m186Internal = m186->cpuReadRegister(0x4400, m186r) && m186r == 0x5A;
+    m186->cpuWrite(0x4201, 0x03, 0);
+    uint32_t m186prg = 0;
+    const bool m186Prg = m186->cpuMapRead(0x8123, m186prg) && m186prg == 0x0C123;
+    m186->cpuWrite(0x4200, 0x80, 0);
+    uint32_t m186ram = 0;
+    const bool m186Ram = m186->mapPrgRam(0x6123, m186ram, false) && m186ram == 0x04123;
+    std::vector<uint8_t> m186state; m186->saveState(m186state);
+    m186->cpuWrite(0x4400, 0x00, 0); m186->cpuWrite(0x4201, 0x00, 0);
+    const uint8_t* m186sp=m186state.data(); const uint8_t* m186se=m186sp+m186state.size();
+    const bool m186Load=m186->loadState(m186sp,m186se);
+    uint32_t m186restore=0; uint8_t m186restoreRam=0;
+    const bool m186State=m186Load&&m186->cpuMapRead(0x8000,m186restore)&&m186restore==0x0C000&&
+        m186->cpuReadRegister(0x4400,m186restoreRam)&&m186restoreRam==0x5A;
+    const bool m186Gate=mapperImplementationSupported(186,0)&&!mapperImplementationSupported(186,1);
+    const bool mapper186=m186Regs&&m186Internal&&m186Prg&&m186Ram&&m186State&&m186Gate;
+    std::printf("mapper186_sbx=%s regs=%s internal_ram=%s prg=%s wram=%s state=%s gate=%s\n",
+        mapper186?"PASS":"FAIL",m186Regs?"PASS":"FAIL",m186Internal?"PASS":"FAIL",
+        m186Prg?"PASS":"FAIL",m186Ram?"PASS":"FAIL",m186State?"PASS":"FAIL",m186Gate?"PASS":"FAIL");
+    ok &= mapper186;
+
+    auto m246 = makeMapper(246, 0x80000, 0x80000, 0x0800, 0, 0, true);
+    uint32_t m246ram0=0,m246ram1=0,m246ram2=0,m246prg=0,m246chr=0;
+    const bool m246Ram=!m246->mapPrgRam(0x67FF,m246ram0,false)&&
+        m246->mapPrgRam(0x6800,m246ram0,false)&&m246ram0==0&&
+        m246->mapPrgRam(0x6FFF,m246ram1,true)&&m246ram1==0x07FF&&
+        !m246->mapPrgRam(0x7000,m246ram2,false);
+    m246->cpuWrite(0x6000,0x12,0);
+    m246->cpuWrite(0x6004,0x34,0);
+    const bool m246Banks=m246->cpuMapRead(0x8000,m246prg)&&m246prg==0x24000&&
+        m246->ppuMapRead(0x0000,m246chr)&&m246chr==0x1A000;
+    const bool m246Gate=m246Ram&&m246Banks;
+    std::printf("mapper246_ce_ram_and_banking=%s ram=%s banks=%s\n",
+        m246Gate?"PASS":"FAIL",m246Ram?"PASS":"FAIL",m246Banks?"PASS":"FAIL");
+    ok &= m246Gate;
+
     auto n163Volatile = makeMapper(19, 0x8000, 0x2000, 0, 0, 0, false, Mirror::Horizontal, false);
     auto n163Battery = makeMapper(19, 0x8000, 0x2000, 0, 0, 0, false, Mirror::Horizontal, true);
     const bool n163BatteryGate = n163Volatile->mapperBatterySize() == 0 &&
@@ -507,13 +777,13 @@ int runMapperConformanceProbe()
     mmc3->cpuWrite(0xC001, 0x00, 0);
     mmc3->cpuWrite(0xE001, 0x00, 0);
     mmc3->notifyPpuAddress(0x0000, 0);
-    mmc3->notifyPpuAddress(0x1000, 8);
+    mmc3->notifyPpuAddress(0x1000, 9);
     const bool mmc3ReloadNoIrq = !mmc3->irqActive();
-    mmc3->notifyPpuAddress(0x0000, 9);
-    mmc3->notifyPpuAddress(0x1000, 13);
+    mmc3->notifyPpuAddress(0x0000, 10);
+    mmc3->notifyPpuAddress(0x1000, 18);
     const bool mmc3ShortFiltered = !mmc3->irqActive();
-    mmc3->notifyPpuAddress(0x0000, 14);
-    mmc3->notifyPpuAddress(0x1000, 22);
+    mmc3->notifyPpuAddress(0x0000, 19);
+    mmc3->notifyPpuAddress(0x1000, 28);
     const bool mmc3QualifiedIrq = mmc3->irqActive();
 
     auto mmc3Disabled = makeMapper(4);
@@ -521,12 +791,12 @@ int runMapperConformanceProbe()
     mmc3Disabled->cpuWrite(0xC001, 0x00, 0);
     mmc3Disabled->cpuWrite(0xE000, 0x00, 0);
     mmc3Disabled->notifyPpuAddress(0x0000, 100);
-    mmc3Disabled->notifyPpuAddress(0x1000, 108);
-    mmc3Disabled->notifyPpuAddress(0x0000, 109);
-    mmc3Disabled->notifyPpuAddress(0x1000, 117);
+    mmc3Disabled->notifyPpuAddress(0x1000, 109);
+    mmc3Disabled->notifyPpuAddress(0x0000, 110);
+    mmc3Disabled->notifyPpuAddress(0x1000, 119);
     mmc3Disabled->cpuWrite(0xE001, 0x00, 0);
-    mmc3Disabled->notifyPpuAddress(0x0000, 118);
-    mmc3Disabled->notifyPpuAddress(0x1000, 126);
+    mmc3Disabled->notifyPpuAddress(0x0000, 120);
+    mmc3Disabled->notifyPpuAddress(0x1000, 129);
     const bool mmc3RunsDisabled = mmc3Disabled->irqActive();
 
     auto mmc3Deferred = makeMapper(4);
@@ -535,7 +805,7 @@ int runMapperConformanceProbe()
     mmc3Deferred->cpuWrite(0xC001, 0x00, 0);
     const bool mmc3C001NoImmediateIrq = !mmc3Deferred->irqActive();
     mmc3Deferred->notifyPpuAddress(0x0000, 200);
-    mmc3Deferred->notifyPpuAddress(0x1000, 208);
+    mmc3Deferred->notifyPpuAddress(0x1000, 209);
     const bool mmc3RevBZeroIrq = mmc3Deferred->irqActive();
 
     auto mmc3Threshold = makeMapper(4);
@@ -543,24 +813,24 @@ int runMapperConformanceProbe()
     mmc3Threshold->cpuWrite(0xC001, 0x00, 0);
     mmc3Threshold->cpuWrite(0xE001, 0x00, 0);
     mmc3Threshold->notifyPpuAddress(0x0000, 300);
-    mmc3Threshold->notifyPpuAddress(0x1000, 307);
-    const bool mmc3SevenRejected = !mmc3Threshold->irqActive();
-    mmc3Threshold->notifyPpuAddress(0x0000, 308);
-    mmc3Threshold->notifyPpuAddress(0x1000, 316);
-    const bool mmc3EightAccepted = mmc3Threshold->irqActive();
+    mmc3Threshold->notifyPpuAddress(0x1000, 308);
+    const bool mmc3TwoM2Rejected = !mmc3Threshold->irqActive();
+    mmc3Threshold->notifyPpuAddress(0x0000, 309);
+    mmc3Threshold->notifyPpuAddress(0x1000, 318);
+    const bool mmc3ThreeM2Accepted = mmc3Threshold->irqActive();
 
-    std::printf("mmc3_reload=%s short_filter=%s qualified_irq=%s disabled_run=%s c001_deferred=%s revB_zero=%s a12_7=%s a12_8=%s\n",
+    std::printf("mmc3_reload=%s short_filter=%s qualified_irq=%s disabled_run=%s c001_deferred=%s revB_zero=%s a12_8dot=%s a12_9dot=%s\n",
         mmc3ReloadNoIrq ? "PASS" : "FAIL",
         mmc3ShortFiltered ? "PASS" : "FAIL",
         mmc3QualifiedIrq ? "PASS" : "FAIL",
         mmc3RunsDisabled ? "PASS" : "FAIL",
         mmc3C001NoImmediateIrq ? "PASS" : "FAIL",
         mmc3RevBZeroIrq ? "PASS" : "FAIL",
-        mmc3SevenRejected ? "PASS" : "FAIL",
-        mmc3EightAccepted ? "PASS" : "FAIL");
+        mmc3TwoM2Rejected ? "PASS" : "FAIL",
+        mmc3ThreeM2Accepted ? "PASS" : "FAIL");
     ok &= mmc3ReloadNoIrq && mmc3ShortFiltered && mmc3QualifiedIrq &&
         mmc3RunsDisabled && mmc3C001NoImmediateIrq && mmc3RevBZeroIrq &&
-        mmc3SevenRejected && mmc3EightAccepted;
+        mmc3TwoM2Rejected && mmc3ThreeM2Accepted;
 
     auto m12 = makeMapper(12, 0x40000, 0x80000, 0, 0, 0, true);
     uint32_t m12LoA=0,m12HiA=0,m12LoB=0,m12HiB=0;
@@ -574,7 +844,8 @@ int runMapperConformanceProbe()
     m12->cpuWrite(0xC001, 0x00, 0);
     m12->cpuWrite(0xE001, 0x00, 0);
     m12->notifyPpuAddress(0x0000, 100);
-    m12->notifyPpuAddress(0x1000, 108);
+    m12->clockCpu(); m12->clockCpu(); m12->clockCpu();
+    m12->notifyPpuAddress(0x1000, 109);
     const bool m12Mmc3aZero = !m12->irqActive();
     const bool m12Chr = m12LoA == 0x40000 && m12HiA == 0x00000 &&
         m12LoB == 0x00000 && m12HiB == 0x40000;
@@ -750,6 +1021,31 @@ int runMapperConformanceProbe()
         (mmc5FrameAck && mmc5IdleLeavesFrame) ? "PASS" : "FAIL");
     ok &= mmc5TwoReadsNoFrame && mmc5ThirdArmsOnly && mmc5FourthStartsFrame &&
         mmc5ZeroNoIrq && mmc5IrqRaised && mmc5FrameAck && mmc5IdleLeavesFrame;
+
+    auto mmc5Pcm = makeMapper(5);
+    mmc5Pcm->cpuWrite(0x5010, 0x80, 0);
+    mmc5Pcm->cpuWrite(0x5011, 0x00, 0);
+    const bool mmc5PcmWriteIrq = mmc5Pcm->irqActive();
+    uint8_t pcmStatus = 0;
+    const bool mmc5PcmStatusDriven = mmc5Pcm->cpuReadRegister(0x5010, pcmStatus);
+    const bool mmc5PcmAck = (pcmStatus & 0x80) != 0 && !mmc5Pcm->irqActive();
+    mmc5Pcm->cpuWrite(0x5010, 0x81, 0);
+    mmc5Pcm->observeCpuRead(0x8000, 0x00);
+    const bool mmc5PcmReadIrq = mmc5Pcm->irqActive();
+    mmc5Pcm->observeCpuRead(0x8001, 0x55);
+    const bool mmc5PcmNonzeroClears = !mmc5Pcm->irqActive();
+
+    auto mmc5Len = makeMapper(5);
+    mmc5Len->cpuWrite(0x5015, 0x01, 0);
+    mmc5Len->cpuWrite(0x5003, uint8_t(0x1C << 3), 0);
+    uint8_t mmc5LenStatus = 0;
+    mmc5Len->cpuReadRegister(0x5015, mmc5LenStatus);
+    const bool mmc5Length1cZero = (mmc5LenStatus & 0x01) == 0;
+    const bool mmc5PcmIrq = mmc5PcmWriteIrq && mmc5PcmStatusDriven && mmc5PcmAck &&
+        mmc5PcmReadIrq && mmc5PcmNonzeroClears;
+    std::printf("mmc5_pcm_irq=%s length_1c=%s\n",
+        mmc5PcmIrq ? "PASS" : "FAIL", mmc5Length1cZero ? "PASS" : "FAIL");
+    ok &= mmc5PcmIrq && mmc5Length1cZero;
 
     auto mmc5Split = makeMapper(5);
     mmc5Split->cpuWrite(0x5104, 0x00, 0);
@@ -2794,6 +3090,866 @@ int runMapperConformanceProbe()
     const bool phase49=p49_212&&p49_179&&p49_182&&p49_255;
     std::printf("phase49_mapper_bundle 212=%s 179=%s 182=%s 255=%s\n",p49_212?"PASS":"FAIL",p49_179?"PASS":"FAIL",p49_182?"PASS":"FAIL",p49_255?"PASS":"FAIL");
     ok &= phase49;
+
+    bool m83Core=false,m83Sub1=false,m83Sub2=false,m264Alias=false;
+    {
+        auto m=makeMapper(83,0x200000,0x40000,0,0,0,true,Mirror::Horizontal);
+        m->cpuWrite(0x8000,0x20,0);
+        m->cpuWrite(0x8100,0x10,0);
+        m->cpuWrite(0x8300,0x03,0);
+        m->cpuWrite(0x8301,0x04,0);
+        m->cpuWrite(0x8302,0x05,0);
+        m->cpuWrite(0x8310,0x07,0);
+        uint32_t p0=0,pf=0,c0=0;
+        const bool banks=m->cpuMapRead(0x8000,p0)&&p0==67u*0x2000u&&
+            m->cpuMapRead(0xE000,pf)&&pf==95u*0x2000u&&
+            m->ppuMapRead(0x0000,c0)&&c0==7u*0x400u&&m->mirroring()==Mirror::Vertical;
+        m->cpuWrite(0x8100,0xD0,0);
+        m->cpuWrite(0x8200,0x02,0);m->cpuWrite(0x8201,0x00,0);
+        m->clockCpu();const bool before=!m->irqActive();m->clockCpu();const bool fired=m->irqActive();
+        m->cpuWrite(0x8200,0x02,0);const bool ack=!m->irqActive();
+        m83Core=banks&&before&&fired&&ack&&mapperImplementationSupported(83,0);
+    }
+    {
+        auto m=makeMapper(83,0x40000,0x80000,0,0,1,true);
+        m->cpuWrite(0x8310,0x05,0);
+        uint32_t c0=0,c1=0;
+        m83Sub1=m->ppuMapRead(0x0000,c0)&&m->ppuMapRead(0x0400,c1)&&
+            c0==0x2800&&c1==0x2C00&&mapperImplementationSupported(83,1);
+    }
+    {
+        auto m=makeMapper(83,0x40000,0x40000,0x8000,0,2,true);
+        m->cpuWrite(0x8000,0xC0,0);
+        uint32_t r0=0,r1=0;
+        m83Sub2=m->mapPrgRam(0x6000,r0,false)&&r0==0x6000&&
+            m->mapPrgRam(0x7FFF,r1,true)&&r1==0x7FFF&&mapperImplementationSupported(83,2);
+    }
+    {
+        auto m=makeMapper(264,0x200000,0x80000,0,0,0,true);
+        m->cpuWrite(0x8400,0x10,0);
+        m->cpuWrite(0x8C00,0x02,0);
+        m->cpuWrite(0x5402,0xA5,0);
+        uint32_t p0=0;uint8_t scratch=0;
+        m264Alias=m->cpuMapRead(0x8000,p0)&&p0==2u*0x2000u&&
+            m->cpuReadRegister(0x5402,scratch)&&scratch==0xA5&&mapperImplementationSupported(264,0);
+    }
+    const bool phase50=m83Core&&m83Sub1&&m83Sub2&&m264Alias;
+    std::printf("phase50_cony_mapper83_264 core=%s sub1_2kchr=%s sub2_wram=%s mapper264_alias=%s\n",
+        m83Core?"PASS":"FAIL",m83Sub1?"PASS":"FAIL",m83Sub2?"PASS":"FAIL",m264Alias?"PASS":"FAIL");
+    ok &= phase50;
+
+    bool m99Chr=false,m99Prg=false,m99State=false,m99Gate=false;
+    {
+        auto m=makeMapper(99,0x8000,0x4000,0,0,0,true,Mirror::Vertical);
+        uint32_t p0=0,p1=0,c0=0,c1=0;
+        m99Prg=m->cpuMapRead(0x8000,p0)&&p0==0&&m->cpuMapRead(0xFFFF,p1)&&p1==0x7FFF;
+        const bool initial=m->ppuMapRead(0x0123,c0)&&c0==0x0123;
+        m->observeCpuWrite(0x4016,0x04);
+        const bool switched=m->ppuMapRead(0x0123,c1)&&c1==0x2123;
+        m99Chr=initial&&switched;
+        std::vector<uint8_t> state; m->saveState(state);
+        auto n=makeMapper(99,0x8000,0x4000,0,0,0,true,Mirror::Vertical);
+        const uint8_t* sp=state.data(); const uint8_t* se=sp+state.size();
+        uint32_t cs=0;
+        m99State=n->loadState(sp,se)&&n->ppuMapRead(0x0000,cs)&&cs==0x2000;
+        m99Gate=mapperImplementationSupported(99,0)&&!mapperImplementationSupported(99,1);
+    }
+    const bool phase51=m99Chr&&m99Prg&&m99State&&m99Gate;
+    std::printf("phase51_vs_mapper99 chr_select=%s prg=%s state=%s gate=%s\n",
+        m99Chr?"PASS":"FAIL",m99Prg?"PASS":"FAIL",m99State?"PASS":"FAIL",m99Gate?"PASS":"FAIL");
+    ok &= phase51;
+
+    bool m198=false,m199=false,m245=false;
+    {
+        auto m=makeMapper(198,0xA0000,0,0x3000,0x2000,0,true,Mirror::Vertical);
+        m->cpuWrite(0x8000,0x06,0);m->cpuWrite(0x8001,0x41,0);
+        uint32_t p8=0,pc=0,pe=0,chr=0,r5=0,r7=0;
+        const bool prg=m->cpuMapRead(0x8000,p8)&&p8==0x82000&&
+            m->cpuMapRead(0xC000,pc)&&pc==0x9C000&&m->cpuMapRead(0xE000,pe)&&pe==0x9E000;
+        m->cpuWrite(0x8000,0x02,0);m->cpuWrite(0x8001,0x77,0);
+        const bool unbankedChr=m->ppuMapRead(0x1234,chr)&&chr==0x1234&&m->ppuUsesChrRam(0x1234);
+        const bool ram=m->mapPrgRam(0x5000,r5,true)&&r5==0&&m->mapPrgRam(0x7FFF,r7,false)&&r7==0x2FFF;
+        m->cpuWrite(0xA001,0x00,0);uint32_t ignored=0;
+        const bool protect=m->mapPrgRam(0x5000,ignored,true)&&!m->mapPrgRam(0x6000,ignored,true);
+        m198=prg&&unbankedChr&&ram&&protect&&mapperImplementationSupported(198,0)&&!mapperImplementationSupported(198,1);
+    }
+    {
+        auto m=makeMapper(199,0x100000,0,0x8000,0x2000,0,true,Mirror::Horizontal);
+        m->cpuWrite(0x8000,0x06,0);m->cpuWrite(0x8001,0x7D,0);
+        uint32_t p8=0,pc=0,pe=0,chr=0,r=0;
+        const bool prg=m->cpuMapRead(0x8000,p8)&&p8==0xFA000&&
+            m->cpuMapRead(0xC000,pc)&&pc==0xFC000&&m->cpuMapRead(0xE000,pe)&&pe==0xFE000;
+        m->cpuWrite(0x8000,0x05,0);m->cpuWrite(0x8001,0xE1,0);
+        const bool chrRam=m->ppuMapRead(0x1ABC,chr)&&chr==0x1ABC&&m->ppuUsesChrRam(0x1ABC);
+        const bool ram=m->mapPrgRam(0x5ABC,r,false)&&r==0x0ABC&&m->mapPrgRam(0x7FFF,r,true)&&r==0x2FFF;
+        m199=prg&&chrRam&&ram&&mapperImplementationSupported(199,0)&&!mapperImplementationSupported(199,1);
+    }
+    {
+        auto m=makeMapper(245,0x100000,0,0x2000,0x2000,0,true,Mirror::Vertical);
+        m->cpuWrite(0x8000,0x00,0);m->cpuWrite(0x8001,0x02,0);
+        m->cpuWrite(0x8000,0x06,0);m->cpuWrite(0x8001,0x01,0);
+        uint32_t p8=0,pe=0,chr=0;
+        const bool bank=m->cpuMapRead(0x8000,p8)&&p8==0x82000&&m->cpuMapRead(0xE000,pe)&&pe==0xFE000;
+        const bool chrRam=m->ppuMapRead(0x1555,chr)&&chr==0x1555&&m->ppuUsesChrRam(0x1555);
+        std::vector<uint8_t> st;m->saveState(st);
+        auto n=makeMapper(245,0x100000,0,0x2000,0x2000,0,true,Mirror::Vertical);
+        const uint8_t* sp=st.data();const uint8_t* se=sp+st.size();uint32_t restored=0;
+        const bool state=n->loadState(sp,se)&&n->cpuMapRead(0x8000,restored)&&restored==0x82000;
+        m245=bank&&chrRam&&state&&mapperImplementationSupported(245,0)&&!mapperImplementationSupported(245,1);
+    }
+    const bool phase52=m198&&m199&&m245;
+    std::printf("phase52_oversize_mmc3_batch 198=%s 199=%s 245=%s\n",
+        m198?"PASS":"FAIL",m199?"PASS":"FAIL",m245?"PASS":"FAIL");
+    ok &= phase52;
+
+    bool m216=false,m218=false,m234=false,m244=false;
+    {
+        auto m=makeMapper(216,0x10000,0x8000,0,0,0,true,Mirror::Vertical);
+        uint32_t p=0,c=0;
+        m->cpuWrite(0x8005,0,0);
+        m216=m->cpuMapRead(0x8123,p)&&p==0x8123&&m->ppuMapRead(0x0456,c)&&c==0x4456&&
+            mapperImplementationSupported(216,0)&&!mapperImplementationSupported(216,1);
+    }
+    {
+        auto v=makeMapper(218,0x8000,0,0,0,0,true,Mirror::Vertical,false,0,false);
+        uint32_t c0=0,c1=0,n0=0,n1=0;NametableSource ns0=NametableSource::MapperRam,ns1=NametableSource::MapperRam;
+        const bool a10=v->mapPatternCiram(0x0000,c0)&&c0==0&&v->mapPatternCiram(0x0400,c1)&&c1==0x400&&
+            v->mapNametable(0x2000,ns0,n0)&&n0==0&&v->mapNametable(0x2400,ns1,n1)&&n1==0x400&&
+            ns0==NametableSource::Ciram&&ns1==NametableSource::Ciram;
+        auto s=makeMapper(218,0x8000,0,0,0,0,true,Mirror::Horizontal,false,0,true);
+        uint32_t q0=0,q1=0;
+        const bool a12=s->mapPatternCiram(0x0000,q0)&&q0==0&&s->mapPatternCiram(0x1000,q1)&&q1==0x400;
+        m218=a10&&a12&&mapperImplementationSupported(218,0)&&!mapperImplementationSupported(218,1);
+    }
+    {
+        auto m=makeMapper(234,0x100000,0x100000,0,0,0,true,Mirror::Horizontal);
+        m->observeCpuRead(0xFF80,0x8A);
+        m->observeCpuRead(0xFFE8,0x20);
+        uint32_t p=0,c=0;
+        const bool cnrom=m->cpuMapRead(0x8000,p)&&p==10u*0x8000u&&m->ppuMapRead(0,c)&&c==42u*0x2000u&&m->mirroring()==Mirror::Horizontal;
+        m->observeCpuRead(0xFF80,0x40);
+        uint32_t locked=0; const bool lock=m->cpuMapRead(0x8000,locked)&&locked==p;
+        m->reset(false);
+        m->observeCpuRead(0xFF80,0x46);
+        m->observeCpuRead(0xFFE8,0x51);
+        uint32_t np=0,nc=0;
+        const bool nina=m->cpuMapRead(0x8000,np)&&np==7u*0x8000u&&m->ppuMapRead(0,nc)&&nc==29u*0x2000u;
+        m234=cnrom&&lock&&nina&&m->hasBusConflicts()&&mapperImplementationSupported(234,0)&&!mapperImplementationSupported(234,1);
+    }
+    {
+        auto m=makeMapper(244,0x40000,0x10000,0,0,0,true,Mirror::Vertical);
+        uint32_t p=0,c=0;
+        m->cpuWrite(0x8000,0x12,0);
+        const bool prg=m->cpuMapRead(0x8000,p)&&p==0x8000;
+        m->cpuWrite(0x8000,0x7A,0);
+        const bool chr=m->ppuMapRead(0,c)&&c==5u*0x2000u;
+        m244=prg&&chr&&m->hasBusConflicts()&&mapperImplementationSupported(244,0)&&!mapperImplementationSupported(244,1);
+    }
+    const bool phase53=m216&&m218&&m234&&m244;
+    std::printf("phase53_mapper_batch_216_218_234_244 216=%s 218=%s 234=%s 244=%s\n",
+        m216?"PASS":"FAIL",m218?"PASS":"FAIL",m234?"PASS":"FAIL",m244?"PASS":"FAIL");
+    ok &= phase53;
+
+    bool m109=false,m110=false,m160=false,m161=false,m208s0=false,m208s1=false;
+    {
+        auto a=makeMapper(109,0x80000,0x20000,0,0,0,true,Mirror::Vertical);
+        auto b=makeMapper(137,0x80000,0x20000,0,0,0,true,Mirror::Vertical);
+        for (auto* m : {a.get(), b.get()}) { m->cpuWrite(0x4100,0x05,0); m->cpuWrite(0x4101,0x03,0); }
+        uint32_t ap=0,bp=0,ac=0,bc=0;
+        m109=a->cpuMapRead(0x8123,ap)&&b->cpuMapRead(0x8123,bp)&&a->ppuMapRead(0x0456,ac)&&b->ppuMapRead(0x0456,bc)&&
+            ap==bp&&ac==bc&&a->mirroring()==b->mirroring()&&mapperImplementationSupported(109,0)&&!mapperImplementationSupported(109,1);
+    }
+    {
+        auto a=makeMapper(110,0x80000,0x20000,0,0,0,true,Mirror::Vertical);
+        auto b=makeMapper(243,0x80000,0x20000,0,0,0,true,Mirror::Vertical);
+        const uint16_t wa[]={0x4100,0x4101,0x4100,0x4101}; const uint8_t wd[]={0x05,0x03,0x02,0x01};
+        for(int i=0;i<4;++i){a->cpuWrite(wa[i],wd[i],i);b->cpuWrite(wa[i],wd[i],i);}
+        uint32_t ap=0,bp=0,ac=0,bc=0;
+        m110=a->cpuMapRead(0x8123,ap)&&b->cpuMapRead(0x8123,bp)&&a->ppuMapRead(0x0456,ac)&&b->ppuMapRead(0x0456,bc)&&
+            ap==bp&&ac==bc&&a->mirroring()==b->mirroring()&&mapperImplementationSupported(110,0)&&!mapperImplementationSupported(110,1);
+    }
+    {
+        auto a=makeMapper(160,0x200000,0x100000,0,0,0,true,Mirror::Vertical);
+        auto b=makeMapper(90,0x200000,0x100000,0,0,0,true,Mirror::Vertical);
+        const uint16_t wa[]={0x8000,0x8001,0x9000,0xD000}; const uint8_t wd[]={0x03,0x04,0x05,0x00};
+        for(int i=0;i<4;++i){a->cpuWrite(wa[i],wd[i],i);b->cpuWrite(wa[i],wd[i],i);}
+        uint32_t ap=0,bp=0,ac=0,bc=0;
+        m160=a->cpuMapRead(0x8123,ap)&&b->cpuMapRead(0x8123,bp)&&a->ppuMapRead(0x0456,ac)&&b->ppuMapRead(0x0456,bc)&&
+            ap==bp&&ac==bc&&a->mirroring()==b->mirroring()&&mapperImplementationSupported(160,0)&&!mapperImplementationSupported(160,1);
+    }
+    {
+        auto a=makeMapper(161,0x80000,0x20000,0x2000,0,0,true,Mirror::Vertical);
+        auto b=makeMapper(1,0x80000,0x20000,0x2000,0,0,true,Mirror::Vertical);
+
+        for (auto* m : {a.get(), b.get()}) {
+            m->cpuWrite(0x8000,0x80,0);
+            for(int i=0;i<5;++i) m->cpuWrite(0xE000,uint8_t((3>>i)&1),2+i*2);
+        }
+        uint32_t ap=0,bp=0,ac=0,bc=0;
+        m161=a->cpuMapRead(0x8123,ap)&&b->cpuMapRead(0x8123,bp)&&a->ppuMapRead(0x0456,ac)&&b->ppuMapRead(0x0456,bc)&&
+            ap==bp&&ac==bc&&a->mirroring()==b->mirroring()&&mapperImplementationSupported(161,0)&&!mapperImplementationSupported(161,1);
+    }
+    {
+        auto m=makeMapper(208,0x20000,0x20000,0,0,0,true,Mirror::Horizontal);
+        uint32_t p=0,c=0; uint8_t prot=0;
+        const bool boot=m->cpuMapRead(0x8000,p)&&p==0x18000&&m->mirroring()==Mirror::Vertical;
+        m->cpuWrite(0x4800,0x21,0);
+        const bool outer=m->cpuMapRead(0x8123,p)&&p==0x8123&&m->mirroring()==Mirror::Horizontal;
+        m->cpuWrite(0x5000,0x00,0); m->cpuWrite(0x5802,0xA5,0);
+        const bool protection=m->cpuReadRegister(0x5802,prot)&&prot==uint8_t(0xA5^0x59);
+        m->cpuWrite(0x8000,0x02,0); m->cpuWrite(0x8001,0x03,0);
+        const bool chr=m->ppuMapRead(0x1000,c)&&c==0x0C00;
+        m->cpuWrite(0xA000,0x00,0); const bool mirrorOwned=m->mirroring()==Mirror::Horizontal;
+        std::vector<uint8_t> st;m->saveState(st); auto n=makeMapper(208,0x20000,0x20000,0,0,0,true,Mirror::Horizontal);
+        const uint8_t* sp=st.data();const uint8_t* se=sp+st.size();uint8_t rp=0;uint32_t rprg=0;
+        const bool state=n->loadState(sp,se)&&n->cpuReadRegister(0x5802,rp)&&rp==prot&&n->cpuMapRead(0x8000,rprg)&&rprg==0x8000;
+        m208s0=boot&&outer&&protection&&chr&&mirrorOwned&&state&&mapperImplementationSupported(208,0);
+    }
+    {
+        auto m=makeMapper(208,0x40000,0x20000,0,0,1,true,Mirror::Vertical);
+        m->cpuWrite(0x8000,0x06,0);m->cpuWrite(0x8001,0x0C,0);
+        uint32_t p=0;uint8_t v=0x5A;
+        const bool prg=m->cpuMapRead(0x8000,p)&&p==0x18000;
+        m->cpuWrite(0xA000,0x01,0);
+        const bool mirror=m->mirroring()==Mirror::Horizontal;
+        const bool noProtection=!m->cpuReadRegister(0x5800,v)&&v==0x5A;
+        m208s1=prg&&mirror&&noProtection&&mapperImplementationSupported(208,1)&&!mapperImplementationSupported(208,2);
+    }
+    const bool phase54=m109&&m110&&m160&&m161&&m208s0&&m208s1;
+    std::printf("phase54_mapper_batch_109_110_160_161_208 109=%s 110=%s 160=%s 161=%s 208.0=%s 208.1=%s\n",
+        m109?"PASS":"FAIL",m110?"PASS":"FAIL",m160?"PASS":"FAIL",m161?"PASS":"FAIL",m208s0?"PASS":"FAIL",m208s1?"PASS":"FAIL");
+    ok &= phase54;
+
+    bool m166=false,m167=false,m168=false,m177=false;
+    {
+        auto m=makeMapper(167,0x100000,0,0x2000,0x2000,0,true,Mirror::Horizontal);
+        m->cpuWrite(0x8000,0x09,0);
+        m->cpuWrite(0xA000,0x00,0);
+        m->cpuWrite(0xC000,0x05,0);
+        m->cpuWrite(0xE000,0x03,0);
+        uint32_t lo=0,hi=0;
+        const bool mode0=m->cpuMapRead(0x8000,lo)&&lo==38u*0x4000u&&m->cpuMapRead(0xC000,hi)&&hi==32u*0x4000u;
+        m->cpuWrite(0xA000,0x08,0);
+        uint32_t a=0,b=0;
+        const bool mode2=m->cpuMapRead(0x8000,a)&&m->cpuMapRead(0xC000,b)&&a!=b;
+        m167=mode0&&mode2&&m->mirroring()==Mirror::Vertical&&mapperImplementationSupported(167,0)&&!mapperImplementationSupported(167,1);
+    }
+    {
+        auto m=makeMapper(166,0x100000,0,0x2000,0x2000,0,true,Mirror::Horizontal);
+        m->cpuWrite(0x8000,0x00,0);m->cpuWrite(0xA000,0x00,0);m->cpuWrite(0xC000,0x02,0);m->cpuWrite(0xE000,0x01,0);
+        uint32_t lo=0,hi=0;
+        m166=m->cpuMapRead(0x8000,lo)&&lo==3u*0x4000u&&m->cpuMapRead(0xC000,hi)&&hi==7u*0x4000u&&
+            mapperImplementationSupported(166,0)&&!mapperImplementationSupported(166,1);
+    }
+    {
+        auto m=makeMapper(168,0x10000,0,0,0x10000,0,true,Mirror::Horizontal);
+        m->cpuWrite(0x8000,0xC5,0);
+        uint32_t p=0,c0=0,c1=0;
+        const bool banks=m->cpuMapRead(0x8000,p)&&p==0xC000&&m->ppuMapRead(0x0123,c0)&&c0==0x0123&&
+            m->ppuMapRead(0x1123,c1)&&c1==0x5123&&m->mirroring()==Mirror::Vertical;
+        m->cpuWrite(0xC000,0x00,0);
+        for(int i=0;i<1024;++i)m->clockCpu();
+        const bool irq=m->irqActive();
+        m->cpuWrite(0xC000,0x04,0);
+        const bool ack=!m->irqActive();
+        m168=banks&&irq&&ack&&mapperImplementationSupported(168,0)&&!mapperImplementationSupported(168,1);
+    }
+    {
+        auto m=makeMapper(177,0x100000,0,0x2000,0x2000,0,true,Mirror::Vertical);
+        m->cpuWrite(0x8000,0x23,0);
+        uint32_t p=0,r=0;
+        const bool first=m->cpuMapRead(0x8123,p)&&p==3u*0x8000u+0x123u&&m->mirroring()==Mirror::Horizontal&&
+            m->mapPrgRam(0x6123,r,false)&&r==0x123;
+        m->cpuWrite(0xFFFF,0x04,0);
+        const bool second=m->cpuMapRead(0x8000,p)&&p==4u*0x8000u&&m->mirroring()==Mirror::Vertical;
+        m177=first&&second&&mapperImplementationSupported(177,0)&&!mapperImplementationSupported(177,1);
+    }
+    const bool phase55=m166&&m167&&m168&&m177;
+    std::printf("phase55_mapper_batch_166_167_168_177 166=%s 167=%s 168=%s 177=%s\n",
+        m166?"PASS":"FAIL",m167?"PASS":"FAIL",m168?"PASS":"FAIL",m177?"PASS":"FAIL");
+    ok &= phase55;
+
+    bool m173=false,m178=false,m181=false,m188=false,m190=false;
+    {
+        auto m=makeMapper(173,0x8000,0x8000,0,0,0,true,Mirror::Vertical);
+        uint8_t r=0; uint32_t c=0;
+        m->cpuWrite(0x4102,0x0D,0);
+        m->cpuWrite(0x4100,0,0);
+        const bool read=m->cpuReadRegister(0x4100,r)&&r==0x0D;
+        m->cpuWrite(0x8000,0,0);
+        const bool bank2=m->ppuMapRead(0,c)&&c==0x6000;
+        m->cpuWrite(0x4101,1,0);
+        const bool bank1=m->ppuMapRead(0,c)&&c==0x2000;
+        m->cpuWrite(0x4103,1,0);m->cpuWrite(0x4100,0,0);
+        uint8_t inc=0; const bool increment=m->cpuReadRegister(0x4100,inc)&&((inc&7)==6);
+
+        m173=read&&bank2&&bank1&&increment&&mapperImplementationSupported(173,0)&&!mapperImplementationSupported(173,1);
+    }
+    {
+        auto m=makeMapper(178,0x400000,0,0x8000,0x2000,0,true,Mirror::Horizontal);
+        m->cpuWrite(0x4802,0x02,0);m->cpuWrite(0x4801,0x03,0);m->cpuWrite(0x4800,0x03,0);
+        uint32_t lo=0,hi=0,ram=0;
+        const bool unrom=m->cpuMapRead(0x8000,lo)&&lo==19u*0x4000u&&m->cpuMapRead(0xC000,hi)&&hi==23u*0x4000u&&m->mirroring()==Mirror::Horizontal;
+        m->cpuWrite(0x4803,0x02,0);const bool wram=m->mapPrgRam(0x6123,ram,false)&&ram==0x4123;
+        m->cpuWrite(0x4800,0x04,0);
+        uint32_t a=0,b=0;const bool nrom128=m->cpuMapRead(0x8000,a)&&m->cpuMapRead(0xC000,b)&&a==b&&m->mirroring()==Mirror::Vertical;
+        m178=unrom&&wram&&nrom128&&mapperImplementationSupported(178,0)&&!mapperImplementationSupported(178,1);
+    }
+    {
+        auto a=makeMapper(181,0x8000,0x2000,0,0,0,true,Mirror::Vertical);
+        auto b=makeMapper(185,0x8000,0x2000,0,0,0,true,Mirror::Vertical);
+        a->cpuWrite(0x8000,3,0);b->cpuWrite(0x8000,3,0);
+        uint32_t ap=0,bp=0,ac=0,bc=0;
+        m181=a->cpuMapRead(0x8123,ap)&&b->cpuMapRead(0x8123,bp)&&a->ppuMapRead(0x0123,ac)&&b->ppuMapRead(0x0123,bc)&&ap==bp&&ac==bc&&mapperImplementationSupported(181,0)&&!mapperImplementationSupported(181,1);
+    }
+    {
+        auto m=makeMapper(188,0x40000,0,0,0x2000,0,true,Mirror::Vertical);
+        uint32_t p=0;uint8_t mic=0;
+        m->cpuWrite(0x8000,0x63,0);
+        const bool internal=m->cpuMapRead(0x8000,p)&&p==0xC000&&m->mirroring()==Mirror::Horizontal;
+        const bool fixed=m->cpuMapRead(0xC000,p)&&p==0x1C000;
+        m->cpuWrite(0x8000,0x02,0);
+        const bool external=m->cpuMapRead(0x8000,p)&&p==0x28000;
+        const bool input=m->cpuReadRegister(0x6000,mic)&&mic==0x03;
+        m188=internal&&fixed&&external&&input&&m->hasBusConflicts()&&mapperImplementationSupported(188,0)&&!mapperImplementationSupported(188,1);
+    }
+    {
+        auto m=makeMapper(190,0x40000,0x20000,0x2000,0,0,true,Mirror::Vertical);
+        uint32_t p=0,c=0;
+        m->cpuWrite(0x8000,5,0);const bool low=m->cpuMapRead(0x8000,p)&&p==5u*0x4000u;
+        const bool fixed=m->cpuMapRead(0xC000,p)&&p==0;
+        m->cpuWrite(0xC000,2,0);const bool highsel=m->cpuMapRead(0x8000,p)&&p==10u*0x4000u;
+        m->cpuWrite(0xA002,7,0);const bool chr=m->ppuMapRead(0x1000,c)&&c==7u*0x800u;
+        m190=low&&fixed&&highsel&&chr&&mapperImplementationSupported(190,0)&&!mapperImplementationSupported(190,1);
+    }
+    const bool phase56=m173&&m178&&m181&&m188&&m190;
+    std::printf("phase56_mapper_batch_173_178_181_188_190 173=%s 178=%s 181=%s 188=%s 190=%s\n",
+        m173?"PASS":"FAIL",m178?"PASS":"FAIL",m181?"PASS":"FAIL",m188?"PASS":"FAIL",m190?"PASS":"FAIL");
+    ok &= phase56;
+
+    bool m189=false,m196=false,m205=false,m249=false,m250=false;
+    {
+        auto m=makeMapper(189,0x80000,0x40000,0x2000,0,0,true,Mirror::Vertical);
+        m->cpuWrite(0x4120,0x21,0);
+        uint32_t p=0,c=0;
+        const bool prg=m->cpuMapRead(0x8123,p)&&p==3u*0x8000u+0x123u;
+        m->cpuWrite(0x8000,0x02,0);m->cpuWrite(0x8001,0x07,0);
+        const bool chr=m->ppuMapRead(0x1000,c)&&c==7u*0x400u;
+        m189=prg&&chr&&mapperImplementationSupported(189,0)&&!mapperImplementationSupported(189,1);
+    }
+    {
+        auto m=makeMapper(196,0x80000,0x40000,0x2000,0,0,true,Mirror::Vertical);
+        m->cpuWrite(0x6000,0x21,0);
+        uint32_t a=0,b=0;
+        const bool overrideBanks=m->cpuMapRead(0x8000,a)&&a==3u*0x8000u&&m->cpuMapRead(0xE000,b)&&b==3u*0x8000u+0x6000u;
+        m196=overrideBanks&&mapperImplementationSupported(196,0)&&!mapperImplementationSupported(196,1);
+    }
+    {
+        auto m=makeMapper(205,0x100000,0x80000,0x2000,0,0,true,Mirror::Vertical);
+        m->cpuWrite(0x6000,0x03,0);
+        uint32_t p=0,c=0;
+        const bool prg=m->cpuMapRead(0x8000,p)&&p==0x60000;
+        const bool chr=m->ppuMapRead(0x0000,c)&&c==0x60000;
+        m205=prg&&chr&&mapperImplementationSupported(205,0)&&!mapperImplementationSupported(205,1);
+    }
+    {
+        auto m=makeMapper(249,0x100000,0x80000,0x2000,0,0,true,Mirror::Vertical);
+        m->cpuWrite(0x8000,0x06,0);m->cpuWrite(0x8001,0x0C,0);
+        uint32_t before=0,after=0;
+        const bool raw=m->cpuMapRead(0x8000,before)&&before==0x18000;
+        m->cpuWrite(0x5000,0x02,0);
+        const bool scrambled=m->cpuMapRead(0x8000,after)&&after==0x28000;
+        m249=raw&&scrambled&&mapperImplementationSupported(249,0)&&!mapperImplementationSupported(249,1);
+    }
+    {
+        auto m=makeMapper(250,0x80000,0x40000,0x2000,0,0,true,Mirror::Vertical);
+
+        m->cpuWrite(0x8006,0xFF,0);
+        m->cpuWrite(0x8403,0xFF,0);
+        uint32_t p=0;
+        m250=m->cpuMapRead(0x8000,p)&&p==3u*0x2000u&&mapperImplementationSupported(250,0)&&!mapperImplementationSupported(250,1);
+    }
+    const bool phase57=m189&&m196&&m205&&m249&&m250;
+    std::printf("phase57_mapper_batch_189_196_205_249_250 189=%s 196=%s 205=%s 249=%s 250=%s\n",
+        m189?"PASS":"FAIL",m196?"PASS":"FAIL",m205?"PASS":"FAIL",m249?"PASS":"FAIL",m250?"PASS":"FAIL");
+    ok &= phase57;
+
+    bool m14=false,m134=false,m224=false,m238=false;
+    {
+        auto m=makeMapper(14,0x100000,0x80000,0x2000,0,0,true,Mirror::Vertical);
+
+        m->cpuWrite(0x8000,0x03,0);m->cpuWrite(0xA000,0x04,0);
+        m->cpuWrite(0xB000,0x05,0);m->cpuWrite(0xB001,0x00,0);
+        uint32_t p0=0,p1=0,c=0;
+        const bool vrc=m->cpuMapRead(0x8000,p0)&&p0==3u*0x2000u&&
+            m->cpuMapRead(0xA000,p1)&&p1==4u*0x2000u&&m->ppuMapRead(0,c)&&c==5u*0x400u;
+
+        m->cpuWrite(0xA131,0x0A,0);
+        m->cpuWrite(0x8000,0x00,0);m->cpuWrite(0x8001,0x02,0);
+        const bool mmc3Mapped = m->ppuMapRead(0,c) && c == 0x102u * 0x400u;
+        m14 = vrc && mmc3Mapped && mapperImplementationSupported(14,0)&&!mapperImplementationSupported(14,1);
+    }
+    {
+        auto m=makeMapper(134,0x100000,0x80000,0x2000,0,0,true,Mirror::Vertical);
+        m->cpuWrite(0x6001,0x22,0);
+        m->cpuWrite(0x8000,0x06,0);m->cpuWrite(0x8001,0x03,0);
+        uint32_t p=0,c=0;
+        const bool prg=m->cpuMapRead(0x8000,p)&&p==0x23u*0x2000u;
+        m->cpuWrite(0x8000,0x02,0);m->cpuWrite(0x8001,0x01,0);
+        const bool chr=m->ppuMapRead(0x1000,c)&&c==0x101u*0x400u;
+        m134=prg&&chr&&mapperImplementationSupported(134,0)&&!mapperImplementationSupported(134,1);
+    }
+    {
+        auto m=makeMapper(224,0x100000,0x40000,0x2000,0,0,true,Mirror::Vertical);
+        m->cpuWrite(0x8000,0x06,0);m->cpuWrite(0x8001,0x03,0);
+        uint32_t before=0,after=0;
+        const bool inner=m->cpuMapRead(0x8000,before)&&before==3u*0x2000u;
+        m->cpuWrite(0x5000,0x04,0);
+        const bool outer=m->cpuMapRead(0x8000,after)&&after==0x43u*0x2000u;
+        m224=inner&&outer&&mapperImplementationSupported(224,0)&&!mapperImplementationSupported(224,1);
+    }
+    {
+        auto m=makeMapper(238,0x80000,0x40000,0x2000,0,0,true,Mirror::Vertical);
+        uint8_t r=0;
+        m->cpuWrite(0x4020,0x01,0);
+        const bool lut1=m->cpuReadRegister(0x5000,r)&&r==0x02;
+        m->cpuWrite(0x7FFF,0x03,0);
+        const bool lut3=m->cpuReadRegister(0x6000,r)&&r==0x03;
+        m238=lut1&&lut3&&mapperImplementationSupported(238,0)&&!mapperImplementationSupported(238,1);
+    }
+    const bool phase58=m14&&m134&&m224&&m238;
+    std::printf("phase58_mapper_batch_14_134_224_238 14=%s 134=%s 224=%s 238=%s\n",
+        m14?"PASS":"FAIL",m134?"PASS":"FAIL",m224?"PASS":"FAIL",m238?"PASS":"FAIL");
+    ok &= phase58;
+
+    bool m162=false,m163=false,m165=false,m187=false;
+    {
+        auto m=makeMapper(162,0x400000,0,0,0x2000,0,true,Mirror::Vertical);
+        uint32_t p=0,c=0;
+        const bool resetBank=m->cpuMapRead(0x8000,p)&&p==3u*0x8000u;
+        m->cpuWrite(0x5000,0x0A,0);
+        m->cpuWrite(0x5200,0x02,0);
+        m->cpuWrite(0x5300,0x05,0);
+        const bool switched=m->cpuMapRead(0x8123,p)&&p==0x2Au*0x8000u+0x123u;
+        const bool chr=m->ppuMapRead(0x1234,c)&&c==0x1234;
+        m162=resetBank&&switched&&chr&&mapperImplementationSupported(162,0)&&!mapperImplementationSupported(162,1);
+    }
+    {
+        auto m=makeMapper(163,0x400000,0,0x2000,0x2000,0,true,Mirror::Vertical);
+        m->cpuWrite(0x5300,0x04,0);
+        m->cpuWrite(0x5000,0x05,0);
+        m->cpuWrite(0x5200,0x02,0);
+        uint32_t p=0,c=0;
+        const bool prg=m->cpuMapRead(0x8000,p)&&p==0x25u*0x8000u;
+        m->cpuWrite(0x5100,0x06,0);
+        uint8_t r0=0,r1=0;
+        const bool feedback0=m->cpuReadRegister(0x5500,r0)&&r0==0x00;
+        m->cpuWrite(0x5101,0x00,0);
+        const bool feedback1=m->cpuReadRegister(0x5501,r1)&&r1==0x04;
+        m->cpuWrite(0x5000,0x85,0);
+        m->notifyPpuAddressContext(0x0000,0,0,0);
+        m->notifyPpuAddressContext(0x2200,1,0,1);
+        const bool chr=m->ppuMapRead(0x0123,c)&&c==0x1123;
+        m163=prg&&feedback0&&feedback1&&chr&&mapperImplementationSupported(163,0)&&!mapperImplementationSupported(163,1);
+    }
+    {
+        auto m=makeMapper(165,0x80000,0x40000,0x2000,0x1000,0,true,Mirror::Vertical);
+
+        m->cpuWrite(0x8000,0x00,0); m->cpuWrite(0x8001,0x00,0);
+        uint32_t c0=0,c1=0;
+        const bool ram=m->ppuUsesChrRam(0x0123)&&m->ppuMapRead(0x0123,c0)&&c0==0x0123;
+
+        m->cpuWrite(0x8000,0x01,0); m->cpuWrite(0x8001,0x08,0);
+        uint32_t trigger=0; m->ppuMapRead(0x0FE8,trigger);
+        const bool rom=!m->ppuUsesChrRam(0x0123)&&m->ppuMapRead(0x0123,c1)&&c1==0x2123;
+        m165=ram&&rom&&mapperImplementationSupported(165,0)&&!mapperImplementationSupported(165,1);
+    }
+    {
+        auto m=makeMapper(187,0x100000,0x80000,0x2000,0,0,true,Mirror::Vertical);
+        uint8_t security=0; uint32_t p0=0,p1=0,c=0;
+        const bool prot=m->cpuReadRegister(0x5000,security)&&security==0x83;
+        m->cpuWrite(0x5000,0x83,0);
+        const bool prg=m->cpuMapRead(0x8000,p0)&&p0==6u*0x2000u&&
+            m->cpuMapRead(0xA000,p1)&&p1==7u*0x2000u;
+        const bool chr=m->ppuMapRead(0x0000,c)&&c==0x100u*0x400u;
+        m187=prot&&prg&&chr&&mapperImplementationSupported(187,0)&&!mapperImplementationSupported(187,1);
+    }
+    const bool phase59=m162&&m163&&m165&&m187;
+    std::printf("phase59_mapper_batch_162_163_165_187 162=%s 163=%s 165=%s 187=%s\n",
+        m162?"PASS":"FAIL",m163?"PASS":"FAIL",m165?"PASS":"FAIL",m187?"PASS":"FAIL");
+    ok &= phase59;
+
+    bool m29=false,m129=false,m131=false;
+    {
+        auto m=makeMapper(29,0x20000,0,0,0x8000,0,true,Mirror::Horizontal);
+        m->cpuWrite(0x8000,uint8_t((5u<<2)|3u),0);
+        uint32_t p0=0,p1=0,c=0;
+        const bool prg=m->cpuMapRead(0x8000,p0)&&p0==5u*0x4000u &&
+            m->cpuMapRead(0xC000,p1)&&p1==7u*0x4000u;
+        const bool chr=m->ppuMapRead(0x0123,c)&&c==3u*0x2000u+0x123u;
+        m29=prg&&chr&&m->mirroring()==Mirror::Vertical&&mapperImplementationSupported(29,0)&&!mapperImplementationSupported(29,1);
+    }
+    {
+        auto m=makeMapper(129,0x40000,0x10000,0,0,0,true,Mirror::Vertical);
+        m->cpuWrite(0x80D8,0,0);
+        uint32_t p=0,c=0;
+        m129=m->cpuMapRead(0x8000,p)&&m->ppuMapRead(0,c)&&mapperImplementationSupported(129,0)&&!mapperImplementationSupported(129,1);
+    }
+    {
+        auto m=makeMapper(131,0x100000,0x80000,0x2000,0,0,true,Mirror::Vertical);
+        m->cpuWrite(0x6000,0x03,0);
+        uint32_t p=0,c=0;
+        m131=m->cpuMapRead(0x8000,p)&&p==0x60000&&m->ppuMapRead(0,c)&&c==0x60000&&
+            mapperImplementationSupported(131,0)&&!mapperImplementationSupported(131,1);
+    }
+    const bool phase60=m29&&m129&&m131;
+    std::printf("phase60_mapper_batch_29_129_131 29=%s 129=%s 131=%s\n",m29?"PASS":"FAIL",m129?"PASS":"FAIL",m131?"PASS":"FAIL");
+    ok &= phase60;
+
+    bool m170=false,m172=false,m175=false,m183=false,m233=false;
+    {
+        auto m=makeMapper(170,0x8000,0x2000,0,0,0,true,Mirror::Vertical);
+        uint8_t r=0;
+        m->cpuWrite(0x6502,0x40,0);
+        const bool hi=m->cpuReadRegister(0x7001,r)&&r==0xF0;
+        m->cpuWrite(0x7000,0x00,0);
+        const bool lo=m->cpuReadRegister(0x7777,r)&&r==0x77;
+        uint32_t p=0,c=0;
+        const bool fixed=m->cpuMapRead(0x8123,p)&&p==0x123&&m->ppuMapRead(0x1234,c)&&c==0x1234;
+        m170=hi&&lo&&fixed&&mapperImplementationSupported(170,0)&&!mapperImplementationSupported(170,1);
+    }
+    {
+        auto m=makeMapper(172,0x8000,0x10000,0,0,0,true,Mirror::Vertical);
+
+        m->cpuWrite(0x4101,0x00,0);
+        m->cpuWrite(0x4102,0x28,0);
+        m->cpuWrite(0x4100,0x00,0);
+        m->cpuWrite(0x8000,0x00,0);
+        uint32_t c=0; uint8_t r=0xC0;
+        const bool chr=m->ppuMapRead(0x0123,c)&&c==5u*0x2000u+0x123u;
+        const bool read=m->cpuReadRegister(0x4100,r)&&r==0xE8;
+        m172=chr&&read&&m->mirroring()==Mirror::Horizontal&&mapperImplementationSupported(172,0)&&!mapperImplementationSupported(172,1);
+    }
+    {
+        auto m=makeMapper(175,0x40000,0x20000,0,0,0,true,Mirror::Vertical);
+        uint32_t before=0,vec=0,after=0,c=0;
+        m->cpuWrite(0xA000,0x03,0);
+        const bool delayed=m->cpuMapRead(0x8000,before)&&before==0;
+        const bool vector=m->cpuMapRead(0xFFFC,vec)&&vec==3u*0x4000u+0x3FFCu;
+        m->observeCpuRead(0xFFFC,0);
+        const bool committed=m->cpuMapRead(0xC000,after)&&after==3u*0x4000u&&m->ppuMapRead(0x0000,c)&&c==3u*0x2000u;
+        m->cpuWrite(0x8000,0x04,0);
+        m175=delayed&&vector&&committed&&m->mirroring()==Mirror::Horizontal&&mapperImplementationSupported(175,0)&&!mapperImplementationSupported(175,1);
+    }
+    {
+        auto m=makeMapper(183,0x80000,0x40000,0,0,0,true,Mirror::Vertical);
+        uint32_t p=0,c=0;
+        m->cpuWrite(0x6805,0,0);
+        const bool lowPrg=m->cpuMapRead(0x6000,p)&&p==5u*0x2000u;
+        m->cpuWrite(0x8800,0x03,0); m->cpuWrite(0xA800,0x04,0); m->cpuWrite(0xA000,0x05,0);
+        const bool prg=m->cpuMapRead(0x8000,p)&&p==3u*0x2000u&&m->cpuMapRead(0xC000,p)&&p==5u*0x2000u;
+        m->cpuWrite(0xB000,0x03,0); m->cpuWrite(0xB004,0x02,0);
+        const bool chr=m->ppuMapRead(0x0123,c)&&c==0x23u*0x400u+0x123u;
+        m->cpuWrite(0xF000,0x0E,0); m->cpuWrite(0xF004,0x0F,0); m->cpuWrite(0xF008,1,0);
+        for(int i=0;i<228;++i)m->clockCpu();
+        const bool irqBefore=!m->irqActive();
+        m->clockCpu();
+        const bool irqAfter=m->irqActive();
+        m183=lowPrg&&prg&&chr&&irqBefore&&irqAfter&&mapperImplementationSupported(183,0)&&!mapperImplementationSupported(183,1);
+    }
+    {
+        auto m=makeMapper(233,0x200000,0,0,0x2000,0,true,Mirror::Horizontal);
+        uint32_t p0=0,p1=0;
+        m->cpuWrite(0x8000,0x23,0);
+        m->cpuWrite(0x8001,0x01,0);
+        const bool bank0=m->cpuMapRead(0x8000,p0)&&p0==0x43u*0x4000u;
+        m->reset(false);
+        const bool bank1=m->cpuMapRead(0x8000,p1)&&p1==0x63u*0x4000u;
+        m->cpuWrite(0x8000,0x42,0);
+        m->cpuWrite(0x8001,0x00,0);
+        const bool pair=m->cpuMapRead(0x8000,p0)&&p0==0x22u*0x4000u&&m->cpuMapRead(0xC000,p1)&&p1==0x23u*0x4000u;
+        m233=bank0&&bank1&&pair&&m->mirroring()==Mirror::Vertical&&mapperImplementationSupported(233,0)&&!mapperImplementationSupported(233,1);
+    }
+    const bool phase61=m170&&m172&&m175&&m183&&m233;
+    std::printf("phase61_mapper_batch_170_172_175_183_233 170=%s 172=%s 175=%s 183=%s 233=%s\n",
+        m170?"PASS":"FAIL",m172?"PASS":"FAIL",m175?"PASS":"FAIL",m183?"PASS":"FAIL",m233?"PASS":"FAIL");
+    ok &= phase61;
+
+    bool m222=false,m252=false,m253=false,m254=false;
+    {
+        auto m=makeMapper(222,0x40000,0x20000,0,0,0,true,Mirror::Horizontal);
+        uint32_t p=0,c=0;
+        m->cpuWrite(0x8000,0x03,0); m->cpuWrite(0xA000,0x04,0);
+        const bool prg=m->cpuMapRead(0x8000,p)&&p==3u*0x2000u&&m->cpuMapRead(0xA000,p)&&p==4u*0x2000u;
+        m->cpuWrite(0xB000,0x05,0); m->cpuWrite(0xB002,0x06,0);
+        const bool chr=m->ppuMapRead(0x0000,c)&&c==5u*0x400u&&m->ppuMapRead(0x0400,c)&&c==6u*0x400u;
+        m->cpuWrite(0x9000,1,0); m->cpuWrite(0xF000,238,0);
+        m->notifyPpuScanline(0,true); const bool irq0=!m->irqActive();
+        m->notifyPpuScanline(1,true); const bool irq1=m->irqActive();
+        m222=prg&&chr&&irq0&&irq1&&m->mirroring()==Mirror::Horizontal&&mapperImplementationSupported(222,0)&&!mapperImplementationSupported(222,1);
+    }
+    {
+        auto m=makeMapper(252,0x40000,0x40000,0,0,0,true,Mirror::Vertical);
+        uint32_t p=0,c=0;
+        m->cpuWrite(0x8000,0x03,0); m->cpuWrite(0xA000,0x04,0);
+        const bool prg=m->cpuMapRead(0x8000,p)&&p==3u*0x2000u&&m->cpuMapRead(0xA000,p)&&p==4u*0x2000u;
+        m->cpuWrite(0xB000,0x05,0); m->cpuWrite(0xB004,0x02,0);
+        const bool chr=m->ppuMapRead(0x0123,c)&&c==0x25u*0x400u+0x123u;
+        m->cpuWrite(0xF000,0x0E,0); m->cpuWrite(0xF004,0x0F,0); m->cpuWrite(0xF008,0x06,0);
+        m->clockCpu(); const bool before=!m->irqActive(); m->clockCpu(); const bool after=m->irqActive();
+        m252=prg&&chr&&before&&after&&mapperImplementationSupported(252,0)&&!mapperImplementationSupported(252,1);
+    }
+    {
+        auto m=makeMapper(253,0x40000,0x80000,0,0x800,0,true,Mirror::Vertical);
+        uint32_t p=0,c=0;
+        m->cpuWrite(0x8010,0x03,0); m->cpuWrite(0xA010,0x04,0);
+        const bool prg=m->cpuMapRead(0x8000,p)&&p==3u*0x2000u&&m->cpuMapRead(0xA000,p)&&p==4u*0x2000u;
+        m->cpuWrite(0xB000,0x04,0); m->cpuWrite(0xB004,0x00,0);
+        const bool ram=m->ppuUsesChrRam(0x0000)&&m->ppuMapRead(0x0123,c)&&c==0x123u;
+        m->cpuWrite(0xB000,0x08,0); m->cpuWrite(0xB004,0x08,0);
+        const bool rom=!m->ppuUsesChrRam(0x0000)&&m->ppuMapRead(0x0123,c)&&c==0x88u*0x400u+0x123u;
+        m->cpuWrite(0x9400,3,0);
+        m->cpuWrite(0xF000,0x0F,0); m->cpuWrite(0xF004,0x0F,0); m->cpuWrite(0xF008,2,0);
+        for(int i=0;i<113;++i) m->clockCpu();
+        const bool irq0=!m->irqActive(); m->clockCpu(); const bool irq1=m->irqActive();
+        m253=prg&&ram&&rom&&irq0&&irq1&&m->mirroring()==Mirror::OnescreenHi&&mapperImplementationSupported(253,0)&&!mapperImplementationSupported(253,1);
+    }
+    {
+        auto m=makeMapper(254,0x80000,0x40000,0x2000,0,0,true,Mirror::Vertical);
+        uint32_t r=0;
+        m->cpuWrite(0xA001,0xA5,0);
+        const bool mapped=m->mapPrgRam(0x6000,r,false)&&r==0;
+        const bool locked=m->transformPrgRamRead(0x6000,0x3C)==uint8_t(0x3C^0xA5);
+        m->cpuWrite(0x8000,0x00,0);
+        const bool unlocked=m->transformPrgRamRead(0x6000,0x3C)==0x3C;
+        m254=mapped&&locked&&unlocked&&mapperImplementationSupported(254,0)&&!mapperImplementationSupported(254,1);
+    }
+    const bool phase62=m222&&m252&&m253&&m254;
+    std::printf("phase62_mapper_batch_222_252_253_254 222=%s 252=%s 253=%s 254=%s\n",
+        m222?"PASS":"FAIL",m252?"PASS":"FAIL",m253?"PASS":"FAIL",m254?"PASS":"FAIL");
+    ok &= phase62;
+
+    bool m219=false,m221=false;
+    {
+        auto m=makeMapper(219,0x80000,0x80000,0x2000,0,0,true,Mirror::Vertical);
+        uint32_t p=0,c=0;
+
+        m->cpuWrite(0x5002,0x01,0);
+        m->cpuWrite(0x5003,0x00,0);
+        m->cpuWrite(0x8000,0x06,0);
+        m->cpuWrite(0x8001,0x02,0);
+        const bool mmc3Prg=m->cpuMapRead(0x8000,p)&&p==18u*0x2000u;
+
+        m->cpuWrite(0x8002,0x26,0);
+        m->cpuWrite(0x8001,0x20,0);
+        const bool exPrg=m->cpuMapRead(0x8000,p)&&p==17u*0x2000u;
+
+        m->cpuWrite(0x8000,0x08,0); m->cpuWrite(0x8001,0x03,0);
+        m->cpuWrite(0x8000,0x11,0); m->cpuWrite(0x8001,0x0A,0);
+        const bool exChr=m->ppuMapRead(0x1000,c)&&c==0xB5u*0x400u;
+
+        m->cpuWrite(0xC000,0x00,0); m->cpuWrite(0xC001,0x00,0); m->cpuWrite(0xE001,0x00,0);
+        m->notifyPpuAddress(0x0000,0); m->notifyPpuAddress(0x1000,9);
+        const bool irq=m->irqActive();
+        m219=mmc3Prg&&exPrg&&exChr&&irq&&mapperImplementationSupported(219,0)&&!mapperImplementationSupported(219,1);
+    }
+    {
+        auto m=makeMapper(221,0x200000,0,0x2000,0x2000,0,true,Mirror::Vertical);
+        uint32_t p0=0,p1=0,c=0;
+        m->cpuWrite(0x8003,0,0);
+        m->cpuWrite(0xC005,0,0);
+        const bool pair=m->cpuMapRead(0x8000,p0)&&p0==4u*0x4000u&&
+                        m->cpuMapRead(0xC000,p1)&&p1==5u*0x4000u;
+        const bool horiz=m->mirroring()==Mirror::Horizontal;
+        m->cpuWrite(0x8102,0,0);
+        const bool fixed=m->cpuMapRead(0x8000,p0)&&p0==5u*0x4000u&&
+                         m->cpuMapRead(0xC000,p1)&&p1==7u*0x4000u;
+        const bool chr=m->ppuMapRead(0x0123,c)&&c==0x123u;
+        m221=pair&&horiz&&fixed&&chr&&m->mirroring()==Mirror::Vertical&&mapperImplementationSupported(221,0)&&!mapperImplementationSupported(221,1);
+    }
+    const bool phase63=m219&&m221;
+    std::printf("phase63_mapper_batch_219_221 219=%s 221=%s\n",m219?"PASS":"FAIL",m221?"PASS":"FAIL");
+    ok &= phase63;
+
+    bool m126=false,m422=false,m534=false;
+    {
+        auto m=makeMapper(126,0x400000,0x200000,0x2000,0,0,true,Mirror::Vertical);
+        uint32_t p=0,c=0,r=0;
+
+        const bool resetOuter=m->cpuMapRead(0x8000,p)&&p==0x200000u;
+        m->cpuWrite(0xA001,0x80,0);
+        m->cpuWrite(0x6000,0x60,0);
+        const bool outerPrg=m->cpuMapRead(0x8000,p)&&p==0;
+
+        m->cpuWrite(0x6000,0x10,0);
+        const bool chrWire=m->ppuMapRead(0x0000,c)&&c==0x80000u;
+
+        m->cpuWrite(0xA001,0x00,0);
+        const bool wram=m->mapPrgRam(0x6000,r,false)&&r==0;
+        m->cpuWrite(0x6000,0x20,0);
+        const bool gated=m->ppuMapRead(0x0000,c)&&c==0x80000u;
+        m126=resetOuter&&outerPrg&&chrWire&&wram&&gated&&mapperImplementationSupported(126,0)&&!mapperImplementationSupported(126,1);
+    }
+    {
+        auto m=makeMapper(422,0x400000,0x200000,0x2000,0,0,true,Mirror::Vertical);
+        uint32_t c=0;
+        m->cpuWrite(0xA001,0x80,0);
+        m->cpuWrite(0x6000,0x10,0);
+
+        m422=m->ppuMapRead(0x0000,c)&&c==0x40000u&&mapperImplementationSupported(422,0)&&!mapperImplementationSupported(422,1);
+    }
+    {
+        auto m=makeMapper(534,0x400000,0x200000,0x2000,0,0,true,Mirror::Vertical);
+
+        m->cpuWrite(0xC000,0xFE,0); m->cpuWrite(0xC001,0,0); m->cpuWrite(0xE001,0,0);
+        m->scanlineTick(); const bool before=!m->irqActive();
+        m->scanlineTick(); const bool after=m->irqActive();
+        m534=before&&after&&mapperImplementationSupported(534,0)&&!mapperImplementationSupported(534,1);
+    }
+    const bool phase64=m126&&m422&&m534;
+    std::printf("phase64_mapper_batch_126_422_534 126=%s 422=%s 534=%s\n",
+        m126?"PASS":"FAIL",m422?"PASS":"FAIL",m534?"PASS":"FAIL");
+    ok &= phase64;
+
+    bool m164=false,m223=false,m248=false,m251=false;
+    {
+        auto m=makeMapper(164,0x400000,0,0x2000,0x2000,0,true,Mirror::Horizontal);
+        uint32_t p=0,c=0,r=0;
+
+        const bool reset=m->cpuMapRead(0x8000,p)&&p==0&&m->cpuMapRead(0xC000,p)&&p==0x1Fu*0x4000u&&m->mirroring()==Mirror::Vertical;
+        m->cpuWrite(0x5100,1,0); m->cpuWrite(0x5000,0x2B,0);
+        const bool ux=m->cpuMapRead(0x8000,p)&&p==(0x20u|0x1Bu)*0x4000u;
+        m->cpuWrite(0x5000,0x13,0); m->cpuWrite(0x5300,0x00,0);
+        const bool bx=m->cpuMapRead(0x8000,p)&&p==(0x10u|3u)*0x8000u&&m->mirroring()==Mirror::Horizontal;
+        m->cpuWrite(0x5300,0x80,0);
+        const bool mirror=m->mirroring()==Mirror::Vertical;
+        const bool ram=m->mapPrgRam(0x6000,r,false)&&r==0;
+        const bool chr=m->ppuMapRead(0x0123,c)&&c==0x123u;
+
+        auto line=[&](bool cs,bool clk,bool di){m->cpuWrite(0x5200,uint8_t((cs?0x10:0)|(clk?0x04:0)|(di?0x01:0)),0);};
+        auto bit=[&](bool v){line(true,false,v);line(true,true,v);};
+        auto send=[&](uint16_t value,int bits){for(int i=bits-1;i>=0;--i)bit(((value>>i)&1)!=0);};
+        line(false,false,false); line(true,false,false);
+        send(0x980,12);
+        line(false,false,false); line(true,false,false);
+        send(0xA12,12); send(0x5A,8);
+        line(false,false,false); line(true,false,false);
+        send(0xC12,12);
+        uint8_t got=0,rd=0;
+        for(int i=0;i<8;++i){
+            if(i) { line(true,false,false); line(true,true,false); }
+            m->cpuReadRegister(0x5500,rd);
+            got=uint8_t((got<<1)|((rd&0x04)?0:1));
+        }
+        line(false,false,false);
+        std::vector<uint8_t> battery; m->saveMapperBattery(battery);
+        const bool eeprom=got==0x5A&&battery.size()==512&&battery[0x12]==0x5A&&m->mapperBatterySize()==512;
+        m164=reset&&ux&&bx&&mirror&&ram&&chr&&eeprom&&mapperImplementationSupported(164,0)&&!mapperImplementationSupported(164,1);
+    }
+    {
+        auto m=makeMapper(223,0xA0000,0x2000,0,0,0,true,Mirror::Vertical);
+
+        m223=m->id()==199&&mapperImplementationSupported(223,0)&&!mapperImplementationSupported(223,1);
+    }
+    {
+        auto m=makeMapper(248,0x80000,0x80000,0,0,0,true,Mirror::Vertical);
+
+        m248=m->id()==115&&mapperImplementationSupported(248,0)&&!mapperImplementationSupported(248,1);
+    }
+    {
+        auto m=makeMapper(251,0x100000,0x100000,0,0,0,true,Mirror::Vertical);
+
+        m251=m->id()==45&&mapperImplementationSupported(251,0)&&!mapperImplementationSupported(251,1);
+    }
+    const bool phase65=m164&&m223&&m248&&m251;
+    std::printf("phase65_mapper_batch_164_223_248_251 164=%s 223=%s 248=%s 251=%s\n",
+        m164?"PASS":"FAIL",m223?"PASS":"FAIL",m248?"PASS":"FAIL",m251?"PASS":"FAIL");
+    ok &= phase65;
+
+    bool m113=false,m130=false,m331=false;
+    {
+        auto m=makeMapper(113,0x80000,0x20000,0,0,0,false,Mirror::Horizontal);
+        uint32_t p=0,c=0;
+
+        const bool ignored=!m->cpuWrite(0x4000,0xFF,0);
+        const bool write=m->cpuWrite(0x4300,0xED,0);
+        const bool prg=m->cpuMapRead(0x8000,p)&&p==5u*0x8000u;
+        const bool chr=m->ppuMapRead(0x0000,c)&&c==13u*0x2000u;
+        const bool mir=m->mirroring()==Mirror::Vertical;
+        m113=ignored&&write&&prg&&chr&&mir&&mapperImplementationSupported(113,0)&&!mapperImplementationSupported(113,1);
+    }
+    auto check331=[&](uint16_t id)->bool {
+        auto m=makeMapper(id,0x100000,0x80000,0,0,0,true,Mirror::Horizontal);
+        uint32_t p0=0,p1=0,c0=0,c1=0;
+
+        m->cpuWrite(0xE000,0x02,0);
+        m->cpuWrite(0xA000,0x2D,0);
+        m->cpuWrite(0xC000,0x30,0);
+        const bool prg16=m->cpuMapRead(0x8000,p0)&&p0==(0x10u|5u)*0x4000u&&
+                         m->cpuMapRead(0xC000,p1)&&p1==(0x10u|7u)*0x4000u;
+        const bool chr=m->ppuMapRead(0x0000,c0)&&c0==(0x40u|5u)*0x1000u&&
+                       m->ppuMapRead(0x1000,c1)&&c1==(0x40u|6u)*0x1000u;
+        const bool vertical=m->mirroring()==Mirror::Vertical;
+
+        m->cpuWrite(0xE000,0x0E,0);
+        const bool prg32=m->cpuMapRead(0x8000,p0)&&p0==(0x10u|4u)*0x4000u&&
+                         m->cpuMapRead(0xC000,p1)&&p1==(0x10u|5u)*0x4000u;
+        return prg16&&chr&&vertical&&prg32&&m->mirroring()==Mirror::Horizontal&&
+               mapperImplementationSupported(id,0)&&!mapperImplementationSupported(id,1);
+    };
+    m130=check331(130);
+    m331=check331(331);
+    const bool phase66=m113&&m130&&m331;
+    std::printf("phase66_mapper_batch_113_130_331 113=%s 130=%s 331=%s\n",
+        m113?"PASS":"FAIL",m130?"PASS":"FAIL",m331?"PASS":"FAIL");
+    ok &= phase66;
+
+    bool m169=false,m259=false,m263=false,m265=false;
+    {
+        auto m=makeMapper(169,0x100000,0,0,0x2000,0,true,Mirror::Horizontal);
+        uint32_t p0=0,p1=0,c=0;
+        m->cpuWrite(0x8083,0,0);
+        m->cpuWrite(0xC005,0,0);
+        const bool prg=m->cpuMapRead(0x8000,p0)&&p0==0x24u*0x4000u&&
+                       m->cpuMapRead(0xC000,p1)&&p1==0x25u*0x4000u;
+        const bool chr=m->ppuMapRead(0x0123,c)&&c==0x123u;
+        m169=prg&&chr&&m->mirroring()==Mirror::Horizontal&&mapperImplementationSupported(169,0)&&!mapperImplementationSupported(169,1);
+    }
+    {
+        auto m=makeMapper(259,0x80000,0x40000,0x2000,0,0,true,Mirror::Vertical);
+        uint32_t p0=0,p1=0;
+        m->cpuWrite(0xA001,0x80,0);
+        m->cpuWrite(0x6000,0x0B,0);
+        const bool banks=m->cpuMapRead(0x8000,p0)&&p0==0x0Au*0x4000u&&
+                         m->cpuMapRead(0xC000,p1)&&p1==0x0Bu*0x4000u;
+        m259=banks&&mapperImplementationSupported(259,0)&&!mapperImplementationSupported(259,1);
+    }
+    {
+        auto m=makeMapper(263,0x80000,0x40000,0x2000,0,0,true,Mirror::Vertical);
+        uint32_t p=0;
+
+        m->cpuWrite(0x8000,0x21,0);
+        m->cpuWrite(0x9000,0x03,0);
+        m263=m->cpuMapRead(0x8000,p)&&p==5u*0x2000u&&mapperImplementationSupported(263,0)&&!mapperImplementationSupported(263,1);
+    }
+    {
+        auto m=makeMapper(265,0x100000,0,0,0x2000,0,true,Mirror::Vertical);
+        uint32_t p0=0,p1=0;
+        m->cpuWrite(0x8060,3,0);
+        const bool fixed=m->cpuMapRead(0x8000,p0)&&p0==0x1Bu*0x4000u&&
+                         m->cpuMapRead(0xC000,p1)&&p1==0x1Fu*0x4000u;
+        m->cpuWrite(0xA0E2,5,0);
+        const bool mirrored=m->cpuMapRead(0x8000,p0)&&p0==0x1Du*0x4000u&&
+                            m->cpuMapRead(0xC000,p1)&&p1==0x1Du*0x4000u&&m->mirroring()==Mirror::Horizontal;
+        m->cpuWrite(0x8100,2,0);
+        const bool locked=m->cpuMapRead(0x8000,p0)&&p0==0x1Au*0x4000u&&
+                          m->cpuMapRead(0xC000,p1)&&p1==0x1Au*0x4000u&&m->mirroring()==Mirror::Horizontal;
+        m265=fixed&&mirrored&&locked&&mapperImplementationSupported(265,0)&&!mapperImplementationSupported(265,1);
+    }
+    const bool phase67=m169&&m259&&m263&&m265;
+    std::printf("phase67_mapper_batch_169_259_263_265 169=%s 259=%s 263=%s 265=%s\n",
+        m169?"PASS":"FAIL",m259?"PASS":"FAIL",m263?"PASS":"FAIL",m265?"PASS":"FAIL");
+    ok &= phase67;
 
     auto m28ref = makeMapper(28, 0x800000, 0, 0, 0);
     auto calcM28Ref = [](uint16_t address, uint8_t bankMode, uint8_t outerBank, uint8_t currentBank) -> uint16_t {

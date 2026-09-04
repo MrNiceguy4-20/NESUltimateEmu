@@ -81,6 +81,7 @@ void Bus::reset()
 
     m_controller1Shift = m_controller1;
     m_controller2Shift = m_controller2;
+    m_fourScoreIndex1 = m_fourScoreIndex2 = 0;
     m_strobe = false;
     m_controllerReadActivePort = 0;
     m_controllerReadLatched1 = 0;
@@ -99,6 +100,13 @@ void Bus::powerOn()
     std::memset(m_ram, 0, sizeof(m_ram));
     m_controller1 = 0;
     m_controller2 = 0;
+    m_controller3 = 0;
+    m_controller4 = 0;
+    m_fourScoreEnabled = false;
+    m_fourScoreIndex1 = m_fourScoreIndex2 = 0;
+    m_zapperEnabled = false;
+    m_zapperX = m_zapperY = -1;
+    m_zapperTrigger = false;
     m_controller1Shift = 0;
     m_controller2Shift = 0;
     m_strobe = false;
@@ -191,6 +199,11 @@ void Bus::clock()
         !m_dmaActive && dmcWasActive && m_dmcDmaPhase == DmcDmaPhase::Halt &&
         m_cpu && cpuBusCycle.type == CPU::BusCycleType::Write;
 
+    const bool dmcDeferredForPalFetch =
+        !m_dmaActive && dmcWasActive && m_dmcDmaPhase == DmcDmaPhase::Halt &&
+        m_timing == ConsoleTiming::PAL && m_cpu && !m_cpu->atInstructionBoundary();
+    const bool dmcHaltDeferred = dmcBlockedByCpuWrite || dmcDeferredForPalFetch;
+
     if (dmcBlockedByCpuWrite && m_dmcDmaAbortAfterHalt) {
         traceDmc("ABORT_HALT_SUPPRESSED_BY_WRITE");
         m_dmcDmaActive = false;
@@ -208,12 +221,12 @@ void Bus::clock()
         (m_dmaReadPhase == oamGetCycle);
 
     bool dmcUsedBus = false;
-    if (dmcWasActive && !dmcBlockedByCpuWrite)
+    if (dmcWasActive && !dmcHaltDeferred)
         dmcUsedBus = clockDmcDma();
 
     if (m_dmaActive && (!dmcUsedBus || !oamNeedsBus))
         clockOamDma();
-    else if (!m_dmaActive && (!dmcWasActive || dmcBlockedByCpuWrite) && m_cpu)
+    else if (!m_dmaActive && (!dmcWasActive || dmcHaltDeferred) && m_cpu)
         m_cpu->clock();
 
     if (dmaGetCycle() && m_strobe) {
@@ -364,6 +377,7 @@ uint8_t Bus::repeatDmcStalledCpuRead() const
 
 uint8_t Bus::readDmcExternalSample() const
 {
+    if (m_cart) m_cart->notifyCpuAddress(m_dmcDmaAddress);
 
     uint8_t data = m_cpuDataBus;
     if (m_cart && m_cart->cpuRead(m_dmcDmaAddress, data))
@@ -405,6 +419,7 @@ uint8_t Bus::readDmcSampleWithCpuConflict() const
 
 uint8_t Bus::readOamDmaSource(uint16_t addr) const
 {
+    if (m_cart) m_cart->notifyCpuAddress(addr);
 
     uint8_t external = m_cpuDataBus;
     bool externalDriven = false;
@@ -560,27 +575,77 @@ void Bus::releaseControllerReadLine() const
 uint8_t Bus::readControllerPort(uint8_t port) const
 {
     const uint8_t active = port == 1 ? 1 : 2;
-    uint8_t& shift = port == 1 ? m_controller1Shift : m_controller2Shift;
     uint8_t& latched = port == 1 ? m_controllerReadLatched1 : m_controllerReadLatched2;
-    const uint8_t live = port == 1 ? m_controller1 : m_controller2;
 
+    if (m_zapperEnabled && port == 2) {
+        if (m_controllerReadActivePort == active)
+            return driveCpuDataBus(latched, 0x18);
+        bool light = false;
+        if (m_ppu && m_zapperX >= 0 && m_zapperX < 256 && m_zapperY >= 0 && m_zapperY < 240) {
+            const int sl = m_ppu->scanline();
+
+            if (sl >= m_zapperY - 24 && sl <= m_zapperY + 2) {
+                const uint32_t pixel = m_ppu->framebuffer()[m_zapperY * 256 + m_zapperX];
+                const int r = int((pixel >> 16) & 0xFF), g = int((pixel >> 8) & 0xFF), b = int(pixel & 0xFF);
+                light = (r * 3 + g * 6 + b) >= 7 * 128;
+            }
+        }
+
+        latched = static_cast<uint8_t>((light ? 0x00 : 0x08) | (m_zapperTrigger ? 0x10 : 0x00));
+        m_controllerReadActivePort = active;
+        return driveCpuDataBus(latched, 0x18);
+    }
+
+    if (m_fourScoreEnabled) {
+        if (m_strobe) {
+            latched = (port == 1 ? m_controller1 : m_controller2) & 0x01;
+            m_controllerReadActivePort = active;
+            return driveCpuDataBus(latched, 0x01);
+        }
+        if (m_controllerReadActivePort == active)
+            return driveCpuDataBus(latched, 0x01);
+        uint8_t& index = port == 1 ? m_fourScoreIndex1 : m_fourScoreIndex2;
+        const uint8_t first = port == 1 ? m_controller1 : m_controller2;
+        const uint8_t second = port == 1 ? m_controller3 : m_controller4;
+        const uint8_t signature = port == 1 ? 0x08 : 0x04;
+        uint8_t bit = 1;
+        if (index < 8) bit = (first >> index) & 1;
+        else if (index < 16) bit = (second >> (index - 8)) & 1;
+        else if (index < 24) bit = (signature >> (index - 16)) & 1;
+        if (index < 24) ++index;
+        latched = bit;
+        m_controllerReadActivePort = active;
+        return driveCpuDataBus(latched, 0x01);
+    }
+
+    uint8_t& shift = port == 1 ? m_controller1Shift : m_controller2Shift;
+    const uint8_t live = port == 1 ? m_controller1 : m_controller2;
     if (m_strobe) {
         latched = live & 0x01;
         m_controllerReadActivePort = active;
         return driveCpuDataBus(latched, 0x01);
     }
-
     if (m_controllerReadActivePort == active)
         return driveCpuDataBus(latched, 0x01);
-
     latched = shift & 0x01;
     shift = static_cast<uint8_t>((shift >> 1) | 0x80);
     m_controllerReadActivePort = active;
     return driveCpuDataBus(latched, 0x01);
 }
 
+uint8_t Bus::debugRead(uint16_t addr) const
+{
+    if (addr <= 0x1FFF) return m_ram[addr & 0x07FF];
+
+    if (addr < 0x4020) return m_cpuDataBus;
+    uint8_t data = m_cpuDataBus;
+    if (m_cart && m_cart->debugCpuRead(addr, data)) return data;
+    return m_cpuDataBus;
+}
+
 uint8_t Bus::read(uint16_t addr) const
 {
+    if (m_cart) m_cart->notifyCpuAddress(addr);
     if (addr == 0x4016) {
         const uint8_t value = readControllerPort(1);
         return m_cart ? driveCpuDataBus(m_cart->cheats().applyRawCpuRead(addr, value)) : value;
@@ -633,6 +698,7 @@ uint8_t Bus::read(uint16_t addr) const
 
 void Bus::write(uint16_t addr, uint8_t data)
 {
+    if (m_cart) m_cart->notifyCpuAddress(addr);
     releaseControllerReadLine();
 
     m_cpuDataBus = data;
@@ -645,7 +711,12 @@ void Bus::write(uint16_t addr, uint8_t data)
         return;
     }
     if (addr >= 0x2000 && addr <= 0x3FFF) {
-        if (m_ppu) m_ppu->cpuWrite(addr, data);
+        if (m_ppu) {
+
+            m_ppu->setCpuPpuIoLatePhase(true);
+            m_ppu->cpuWrite(addr, data);
+            m_ppu->setCpuPpuIoLatePhase(false);
+        }
         return;
     }
     if (addr == 0x4014) {
@@ -657,6 +728,7 @@ void Bus::write(uint16_t addr, uint8_t data)
     if (addr == 0x4016) {
 
         m_strobe = (data & 1) != 0;
+        if (m_strobe) m_fourScoreIndex1 = m_fourScoreIndex2 = 0;
         return;
     }
 
@@ -698,6 +770,10 @@ void Bus::saveState(std::vector<uint8_t>& out) const
     out.push_back(m_dmaData);
     out.push_back(m_dmaDummyCycles);
 
+    out.push_back(static_cast<uint8_t>(m_dmaCpuReadAddress & 0xFF));
+    out.push_back(static_cast<uint8_t>(m_dmaCpuReadAddress >> 8));
+    out.push_back(m_dmaCpuReadAddressValid ? 1 : 0);
+
     out.push_back(m_dmcDmaActive ? 1 : 0);
     out.push_back(static_cast<uint8_t>(m_dmcDmaPhase));
     out.push_back(static_cast<uint8_t>(m_dmcDmaAddress & 0xFF));
@@ -706,11 +782,18 @@ void Bus::saveState(std::vector<uint8_t>& out) const
     out.push_back(static_cast<uint8_t>(m_dmcDmaCpuReadAddress >> 8));
     out.push_back(m_dmcDmaNeedsAlign ? 1 : 0);
     out.push_back(m_dmcDmaAbortAfterHalt ? 1 : 0);
+    out.push_back(m_controller3); out.push_back(m_controller4);
+    out.push_back(m_fourScoreEnabled ? 1 : 0);
+    out.push_back(m_fourScoreIndex1); out.push_back(m_fourScoreIndex2);
+    out.push_back(m_zapperEnabled ? 1 : 0);
+    out.push_back(static_cast<uint8_t>(m_zapperX & 0xFF)); out.push_back(static_cast<uint8_t>((m_zapperX >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>(m_zapperY & 0xFF)); out.push_back(static_cast<uint8_t>((m_zapperY >> 8) & 0xFF));
+    out.push_back(m_zapperTrigger ? 1 : 0);
 }
 
 bool Bus::loadState(const uint8_t*& p, const uint8_t* end)
 {
-    if (p + 2048 + 10 + 12 + 7 + 8 > end) return false;
+    if (p + 2048 + 10 + 15 + 7 + 8 > end) return false;
     memcpy(m_ram, p, 2048); p += 2048;
     m_controller1 = *p++;
     m_controller2 = *p++;
@@ -739,8 +822,10 @@ bool Bus::loadState(const uint8_t*& p, const uint8_t* end)
     m_dmaAddress = *p++;
     m_dmaData = *p++;
     m_dmaDummyCycles = *p++;
-    m_dmaCpuReadAddress = 0;
-    m_dmaCpuReadAddressValid = false;
+    m_dmaCpuReadAddress = static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
+    p += 2;
+    m_dmaCpuReadAddressValid = (*p++) != 0;
+    if (!m_dmaCpuReadAddressValid) m_dmaCpuReadAddress = 0;
 
     m_dmcDmaActive = (*p++) != 0;
     m_dmcDmaPhase = static_cast<DmcDmaPhase>(*p++);
@@ -751,5 +836,15 @@ bool Bus::loadState(const uint8_t*& p, const uint8_t* end)
     m_dmcDmaNeedsAlign = (*p++) != 0;
     m_dmcDmaAbortAfterHalt = (*p++) != 0;
     if (static_cast<uint8_t>(m_dmcDmaPhase) > static_cast<uint8_t>(DmcDmaPhase::Get)) return false;
+    if (p + 11 > end) return false;
+    m_controller3 = *p++; m_controller4 = *p++;
+    m_fourScoreEnabled = (*p++) != 0;
+    m_fourScoreIndex1 = *p++; m_fourScoreIndex2 = *p++;
+    m_zapperEnabled = (*p++) != 0;
+    m_zapperX = static_cast<int16_t>(uint16_t(p[0]) | (uint16_t(p[1]) << 8)); p += 2;
+    m_zapperY = static_cast<int16_t>(uint16_t(p[0]) | (uint16_t(p[1]) << 8)); p += 2;
+    m_zapperTrigger = (*p++) != 0;
+    if (m_fourScoreIndex1 > 24 || m_fourScoreIndex2 > 24) return false;
+    if (m_zapperX < -1 || m_zapperX > 255 || m_zapperY < -1 || m_zapperY > 239) return false;
     return true;
 }

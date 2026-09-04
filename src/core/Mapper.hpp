@@ -67,7 +67,9 @@ public:
     virtual uint8_t readMapperNametable(uint32_t mapped) const;
     virtual void writeMapperNametable(uint32_t mapped, uint8_t data);
     virtual bool mapPrgRam(uint16_t addr, uint32_t& mapped, bool write) const;
+    virtual uint8_t transformPrgRamRead(uint16_t addr, uint8_t data) const;
 
+    virtual void notifyCpuAddress(uint16_t addr);
     virtual void notifyPpuAddress(uint16_t addr, uint64_t ppuCycle);
     virtual void notifyPpuAddressContext(uint16_t addr, uint64_t ppuCycle, int scanline, int dot);
     virtual void notifyPpuScanline(int scanline, bool rendering);

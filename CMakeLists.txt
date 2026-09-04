@@ -3,6 +3,8 @@ cmake_minimum_required(VERSION 3.20)
 project(NESUltimateEmu LANGUAGES CXX)
 
 option(NES_BUILD_HEADLESS_TESTS "Build the headless emulator regression runner" ON)
+option(NES_BUILD_FRONTEND "Build the SDL3/ImGui emulator frontend when dependencies are available" ON)
+set(NES_IMGUI_SOURCE_DIR "" CACHE PATH "Path to Dear ImGui source tree (must contain imgui.cpp and backends/)")
 option(NES_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(NES_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 set(NES_ACCURACYCOIN_ROM "" CACHE FILEPATH "Path to AccuracyCoin.nes for optional external conformance testing")
@@ -14,7 +16,100 @@ set(NES_BRANCH_TIMING_ROM_DIR "" CACHE PATH "Directory containing blargg branch_
 set(NES_SPRITE_TEST_ROOT "" CACHE PATH "Root directory extracted from sprite_hit_tests_2005.10.05.zip")
 set(NES_EXTENDED_TEST_ROOT "" CACHE PATH "Root directory of the extended NES hardware-test corpus")
 
+set(NES_CORE_SOURCES
+    src/core/CPU.cpp
+    src/core/Bus.cpp
+    src/core/PPU.cpp
+    src/core/APU.cpp
+    src/core/Cartridge.cpp
+    src/core/CheatSystem.cpp
+    src/core/Mapper.cpp
+    src/core/MapperNintendoDiscrete.cpp
+    src/core/MapperMmc1.cpp
+    src/core/MapperMmc3.cpp
+    src/core/MapperMmc5.cpp
+    src/core/MapperNamco.cpp
+    src/core/MapperVrc.cpp
+    src/core/MapperSunsoft.cpp
+    src/core/MapperUnlicensed.cpp
+)
+
+add_library(nes-core STATIC ${NES_CORE_SOURCES})
+target_compile_features(nes-core PUBLIC cxx_std_23)
+target_include_directories(nes-core PUBLIC src/core)
+
+if(MSVC)
+    target_compile_options(nes-core PRIVATE /W4 /permissive-)
+    if(NES_WARNINGS_AS_ERRORS)
+        target_compile_options(nes-core PRIVATE /WX)
+    endif()
+else()
+    target_compile_options(nes-core PRIVATE -Wall -Wextra -Wpedantic)
+    if(NES_WARNINGS_AS_ERRORS)
+        target_compile_options(nes-core PRIVATE -Werror)
+    endif()
+    if(NES_ENABLE_SANITIZERS)
+        target_compile_options(nes-core PRIVATE -fno-omit-frame-pointer -fsanitize=address,undefined)
+        target_link_options(nes-core PRIVATE -fno-omit-frame-pointer -fsanitize=address,undefined)
+    endif()
+endif()
+
+if(NES_BUILD_FRONTEND)
+    find_package(SDL3 CONFIG QUIET)
+    if(NOT SDL3_FOUND)
+        find_package(SDL3 QUIET)
+    endif()
+
+    set(_nes_imgui_ok FALSE)
+    if(NES_IMGUI_SOURCE_DIR AND EXISTS "${NES_IMGUI_SOURCE_DIR}/imgui.cpp"
+       AND EXISTS "${NES_IMGUI_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp"
+       AND EXISTS "${NES_IMGUI_SOURCE_DIR}/backends/imgui_impl_sdlrenderer3.cpp")
+        set(_nes_imgui_ok TRUE)
+    endif()
+
+    if(SDL3_FOUND AND _nes_imgui_ok)
+        add_library(nes-imgui STATIC
+            "${NES_IMGUI_SOURCE_DIR}/imgui.cpp"
+            "${NES_IMGUI_SOURCE_DIR}/imgui_draw.cpp"
+            "${NES_IMGUI_SOURCE_DIR}/imgui_tables.cpp"
+            "${NES_IMGUI_SOURCE_DIR}/imgui_widgets.cpp"
+            "${NES_IMGUI_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp"
+            "${NES_IMGUI_SOURCE_DIR}/backends/imgui_impl_sdlrenderer3.cpp"
+        )
+        target_compile_features(nes-imgui PUBLIC cxx_std_23)
+        target_include_directories(nes-imgui PUBLIC
+            "${NES_IMGUI_SOURCE_DIR}"
+            "${NES_IMGUI_SOURCE_DIR}/backends"
+        )
+        if(TARGET SDL3::SDL3)
+            target_link_libraries(nes-imgui PUBLIC SDL3::SDL3)
+        else()
+            target_include_directories(nes-imgui PUBLIC ${SDL3_INCLUDE_DIRS})
+            target_link_libraries(nes-imgui PUBLIC ${SDL3_LIBRARIES})
+        endif()
+
+        add_executable(NESUltimateEmu
+            src/main.cpp
+            src/frontend/Frontend.cpp
+            src/frontend/Debugger.cpp
+        )
+        target_compile_features(NESUltimateEmu PRIVATE cxx_std_23)
+                target_link_libraries(NESUltimateEmu PRIVATE nes-core nes-imgui)
+        if(WIN32)
+            target_link_libraries(NESUltimateEmu PRIVATE comdlg32)
+        endif()
+        if(MSVC)
+            target_compile_options(NESUltimateEmu PRIVATE /W4 /permissive-)
+        else()
+            target_compile_options(NESUltimateEmu PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+    else()
+        message(STATUS "NES frontend not built: install/find SDL3 and set NES_IMGUI_SOURCE_DIR to an ImGui source tree")
+    endif()
+endif()
+
 if(NES_BUILD_HEADLESS_TESTS)
+    target_compile_definitions(nes-core PRIVATE NES_HEADLESS NES_PROBE_SUITE)
     add_executable(NESUltimateEmu.Tests
         tests/HeadlessRunner.cpp
         tests/probes/ProbeSuite.cpp
@@ -31,26 +126,31 @@ if(NES_BUILD_HEADLESS_TESTS)
         tests/probes/MapperConformanceProbe.cpp
         tests/probes/CartridgeConformanceProbe.cpp
         tests/probes/CheatConformanceProbe.cpp
-        src/core/CPU.cpp
-        src/core/Bus.cpp
-        src/core/PPU.cpp
-        src/core/APU.cpp
-        src/core/Cartridge.cpp
-        src/core/CheatSystem.cpp
-        src/core/Mapper.cpp
-        src/core/MapperNintendoDiscrete.cpp
-        src/core/MapperMmc1.cpp
-        src/core/MapperMmc3.cpp
-        src/core/MapperMmc5.cpp
-        src/core/MapperNamco.cpp
-        src/core/MapperVrc.cpp
-        src/core/MapperSunsoft.cpp
-        src/core/MapperUnlicensed.cpp
     )
 
-    target_compile_features(NESUltimateEmu.Tests PRIVATE cxx_std_17)
+    target_compile_features(NESUltimateEmu.Tests PRIVATE cxx_std_23)
     target_compile_definitions(NESUltimateEmu.Tests PRIVATE NES_HEADLESS NES_PROBE_SUITE)
     target_include_directories(NESUltimateEmu.Tests PRIVATE src/core)
+    target_link_libraries(NESUltimateEmu.Tests PRIVATE nes-core)
+
+    add_executable(NESBatch4.Smoke tests/Batch4Smoke.cpp)
+    target_compile_features(NESBatch4.Smoke PRIVATE cxx_std_23)
+    target_include_directories(NESBatch4.Smoke PRIVATE src/core)
+    target_link_libraries(NESBatch4.Smoke PRIVATE nes-core)
+    if(MSVC)
+        target_compile_options(NESBatch4.Smoke PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(NESBatch4.Smoke PRIVATE -Wall -Wextra -Wpedantic)
+        if(NES_WARNINGS_AS_ERRORS)
+            target_compile_options(NESBatch4.Smoke PRIVATE -Werror)
+        endif()
+        if(NES_ENABLE_SANITIZERS)
+            target_compile_options(NESBatch4.Smoke PRIVATE
+                -fno-omit-frame-pointer -fsanitize=address,undefined)
+            target_link_options(NESBatch4.Smoke PRIVATE
+                -fno-omit-frame-pointer -fsanitize=address,undefined)
+        endif()
+    endif()
 
     if(MSVC)
         target_compile_options(NESUltimateEmu.Tests PRIVATE /W4 /permissive-)
@@ -70,25 +170,27 @@ if(NES_BUILD_HEADLESS_TESTS)
         endif()
     endif()
 
-    add_custom_target(NESUltimateEmu.ProbeAssets ALL
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/tests/probes/dmc_apu_conflict.nes"
-            "$<TARGET_FILE_DIR:NESUltimateEmu.Tests>/dmc_apu_conflict.nes"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/tests/probes/dmc_ppu_conflict_probe.nes"
-            "$<TARGET_FILE_DIR:NESUltimateEmu.Tests>/dmc_ppu_conflict_probe.nes"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/tests/probes/dmc_ppu_conflict_probe_align.nes"
-            "$<TARGET_FILE_DIR:NESUltimateEmu.Tests>/dmc_ppu_conflict_probe_align.nes"
-        DEPENDS NESUltimateEmu.Tests
-        COMMENT "Copying built-in probe ROMs"
-        VERBATIM
-    )
+    # Some source packages intentionally omit redistributability-sensitive probe ROMs.
+    # Copy built-in probe assets only when they are actually present so a clean source
+    # checkout still configures and links successfully.
+    foreach(_nes_probe_asset
+        dmc_apu_conflict.nes
+        dmc_ppu_conflict_probe.nes
+        dmc_ppu_conflict_probe_align.nes)
+        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/probes/${_nes_probe_asset}")
+            add_custom_command(TARGET NESUltimateEmu.Tests POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/probes/${_nes_probe_asset}"
+                    "$<TARGET_FILE_DIR:NESUltimateEmu.Tests>/${_nes_probe_asset}"
+                VERBATIM)
+        endif()
+    endforeach()
 
     include(CTest)
     if(BUILD_TESTING)
         add_test(NAME builtin-regression-probes
                  COMMAND NESUltimateEmu.Tests --self-test)
+        add_test(NAME batch4-input-mapper-smoke COMMAND NESBatch4.Smoke)
         if(NES_ACCURACYCOIN_ROM)
             add_test(NAME accuracycoin
                      COMMAND NESUltimateEmu.Tests "${NES_ACCURACYCOIN_ROM}" --accuracycoin --max-cycles 500000000 --min-pass "${NES_ACCURACYCOIN_MIN_PASS}")
@@ -297,6 +399,13 @@ if(NES_BUILD_HEADLESS_TESTS)
                          COMMAND NESUltimateEmu.Tests "${_scanline_rom}" --scanline-visual --max-cycles 5000000 --quiet)
                 set_tests_properties(extended-ppu-scanline-visual PROPERTIES TIMEOUT 30)
             endif()
+
+            add_custom_target(nes-extended-conformance
+                COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^extended-"
+                DEPENDS NESUltimateEmu.Tests
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+                COMMENT "Running configured extended NES hardware conformance corpus"
+                VERBATIM)
         endif()
     endif()
 endif()

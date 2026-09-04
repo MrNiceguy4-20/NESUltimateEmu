@@ -1,6 +1,8 @@
 #include "Cartridge.hpp"
 #include "RomDatabase.hpp"
+#include "AtomicFile.hpp"
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstring>
 #include <filesystem>
@@ -84,13 +86,65 @@ uint32_t readLe32(const uint8_t* p)
     return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
 }
 
-void writeLe32(std::ostream& out, uint32_t value)
+struct UnifBoardInfo {
+    uint16_t mapper = 0;
+    uint8_t submapper = 0;
+    std::size_t prgRam = 0;
+    std::size_t chrRam = 0;
+    bool recognized = false;
+};
+
+std::string canonicalUnifBoard(std::string board)
 {
-    const uint8_t bytes[4] = {
-        static_cast<uint8_t>(value), static_cast<uint8_t>(value >> 8),
-        static_cast<uint8_t>(value >> 16), static_cast<uint8_t>(value >> 24)
+    while (!board.empty() && (board.back() == '\0' || std::isspace(static_cast<unsigned char>(board.back())))) board.pop_back();
+    std::size_t first = 0;
+    while (first < board.size() && std::isspace(static_cast<unsigned char>(board[first]))) ++first;
+    board.erase(0, first);
+    std::transform(board.begin(), board.end(), board.begin(), [](unsigned char c) { return char(std::toupper(c)); });
+    for (const char* prefix : {"NES-", "HVC-", "UNL-", "BTL-", "BMC-"}) {
+        const std::size_t n = std::strlen(prefix);
+        if (board.size() >= n && board.compare(0, n, prefix) == 0) { board.erase(0, n); break; }
+    }
+    return board;
+}
+
+UnifBoardInfo resolveUnifBoard(const std::string& rawBoard)
+{
+    const std::string b = canonicalUnifBoard(rawBoard);
+    auto exactOrVariant = [&](const char* stem) {
+        const std::size_t n = std::strlen(stem);
+        return b == stem || (b.size() > n && b.compare(0, n, stem) == 0 && b[n] == '-');
     };
-    out.write(reinterpret_cast<const char*>(bytes), 4);
+    if (exactOrVariant("NROM") || exactOrVariant("HROM") || exactOrVariant("RROM") ||
+        exactOrVariant("RTROM") || exactOrVariant("SROM") || exactOrVariant("STROM")) return {0,0,0,0,true};
+    if (exactOrVariant("UNROM") || exactOrVariant("UOROM")) return {2,2,0,0x2000,true};
+    if (exactOrVariant("CNROM")) return {3,2,0,0,true};
+    if (exactOrVariant("CPROM")) return {13,0,0,0x4000,true};
+    if (exactOrVariant("ANROM") || exactOrVariant("AN1ROM")) return {7,1,0,0x2000,true};
+    if (exactOrVariant("AMROM")) return {7,2,0,0x2000,true};
+    if (exactOrVariant("AOROM")) return {7,0,0,0x2000,true};
+    if (exactOrVariant("BNROM")) return {34,2,0,0x2000,true};
+    if (exactOrVariant("PEEOROM") || exactOrVariant("PNROM")) return {9,0,0,0,true};
+    if (exactOrVariant("FJROM") || exactOrVariant("FKROM")) return {10,0,0x2000,0,true};
+    if (exactOrVariant("SEROM") || exactOrVariant("SHROM") || exactOrVariant("SH1ROM")) return {1,5,0,0,true};
+    if (exactOrVariant("SAROM") || exactOrVariant("SIROM") || exactOrVariant("SJROM") || exactOrVariant("SKROM")) return {1,0,0x2000,0,true};
+    if (exactOrVariant("SGROM") || exactOrVariant("SMROM")) return {1,0,0,0x2000,true};
+    if (exactOrVariant("SNROM") || exactOrVariant("SNWEPROM") || exactOrVariant("SUROM")) return {1,0,0x2000,0x2000,true};
+    if (exactOrVariant("SOROM")) return {1,0,0x4000,0x2000,true};
+    if (exactOrVariant("SXROM")) return {1,0,0x8000,0x2000,true};
+    if (exactOrVariant("SBROM") || exactOrVariant("SCROM") || exactOrVariant("SC1ROM") ||
+        exactOrVariant("SFROM") || exactOrVariant("SF1ROM") || exactOrVariant("SFEXPROM") ||
+        exactOrVariant("SLROM") || exactOrVariant("SL1ROM") || exactOrVariant("SL2ROM") ||
+        exactOrVariant("SL3ROM") || exactOrVariant("SLRROM")) return {1,0,0,0,true};
+    if (exactOrVariant("TBROM") || exactOrVariant("TFROM") || exactOrVariant("TLROM") ||
+        exactOrVariant("TL1ROM") || exactOrVariant("TL2ROM")) return {4,0,0,0,true};
+    if (exactOrVariant("TGROM")) return {4,0,0,0x2000,true};
+    if (exactOrVariant("TKROM") || exactOrVariant("TK1ROM") || exactOrVariant("TKEPROM") || exactOrVariant("TSROM")) return {4,0,0x2000,0,true};
+    if (exactOrVariant("TNROM")) return {4,0,0x2000,0x2000,true};
+    if (exactOrVariant("TKSROM")) return {118,0,0x2000,0,true};
+    if (exactOrVariant("TLSROM")) return {118,0,0,0,true};
+    if (exactOrVariant("TQROM")) return {119,0,0,0x2000,true};
+    return {};
 }
 
 }
@@ -131,53 +185,76 @@ void Cartridge::loadBattery()
     if (!m_battery || m_batteryPath.empty() || (m_prgNvRamSize == 0 && m_chrNvRamSize == 0 && mapperSize == 0))
         return;
 
-    std::ifstream f(m_batteryPath, std::ios::binary | std::ios::ate);
-    if (!f) return;
-    const auto endPos = f.tellg();
-    if (endPos <= 0) return;
-    f.seekg(0);
-    std::vector<uint8_t> data(static_cast<std::size_t>(endPos));
-    f.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()));
-    if (!f) return;
+    auto readFile = [](const std::string& path, std::vector<uint8_t>& data) -> bool {
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f) return false;
+        const auto endPos = f.tellg();
+        if (endPos < 0) return false;
+        f.seekg(0);
+        data.resize(static_cast<std::size_t>(endPos));
+        if (!data.empty())
+            f.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()));
+        return bool(f) || data.empty();
+    };
 
-    if (data.size() >= 13 && std::memcmp(data.data(), "NESB", 4) == 0) {
-        const uint8_t version = data[4];
-        if (version == 1) {
-            const uint32_t prgSize = readLe32(data.data() + 5);
-            const uint32_t chrSize = readLe32(data.data() + 9);
-            const std::size_t payload = std::size_t(prgSize) + chrSize;
-            if (data.size() != 13 + payload) return;
-            if (prgSize > 0 && prgSize == m_prgNvRamSize && prgSize <= m_prgRam.size())
-                std::memcpy(m_prgRam.data(), data.data() + 13, prgSize);
-            if (chrSize > 0 && chrSize == m_chrNvRamSize && chrSize <= m_chrRam.size())
-                std::memcpy(m_chrRam.data(), data.data() + 13 + prgSize, chrSize);
-            return;
-        }
-        if (version == 2 && data.size() >= 17) {
-            const uint32_t prgSize = readLe32(data.data() + 5);
-            const uint32_t chrSize = readLe32(data.data() + 9);
-            const uint32_t mapSize = readLe32(data.data() + 13);
-            const std::size_t payload = std::size_t(prgSize) + chrSize + mapSize;
-            if (data.size() != 17 + payload) return;
-            const uint8_t* payloadPtr = data.data() + 17;
-            if (prgSize > 0 && prgSize == m_prgNvRamSize && prgSize <= m_prgRam.size())
-                std::memcpy(m_prgRam.data(), payloadPtr, prgSize);
-            payloadPtr += prgSize;
-            if (chrSize > 0 && chrSize == m_chrNvRamSize && chrSize <= m_chrRam.size())
-                std::memcpy(m_chrRam.data(), payloadPtr, chrSize);
-            payloadPtr += chrSize;
-            if (m_mapper && mapSize == mapperSize)
-                m_mapper->loadMapperBattery(payloadPtr, mapSize);
-            return;
-        }
-    }
+    auto apply = [&](const std::vector<uint8_t>& data) -> bool {
+        if (data.size() >= 13 && std::memcmp(data.data(), "NESB", 4) == 0) {
+            const uint8_t version = data[4];
+            uint32_t prgSize = 0, chrSize = 0, mapSize = 0;
+            std::size_t headerSize = 0;
+            if (version == 1) {
+                prgSize = readLe32(data.data() + 5);
+                chrSize = readLe32(data.data() + 9);
+                headerSize = 13;
+            }
+            else if (version == 2 && data.size() >= 17) {
+                prgSize = readLe32(data.data() + 5);
+                chrSize = readLe32(data.data() + 9);
+                mapSize = readLe32(data.data() + 13);
+                headerSize = 17;
+            }
+            else {
+                return false;
+            }
 
-    if (m_prgNvRamSize > 0 && !m_prgRam.empty()) {
-        const std::size_t amount = std::min({ data.size(), m_prgNvRamSize, m_prgRam.size() });
-        if (amount) std::memcpy(m_prgRam.data(), data.data(), amount);
-    }
-    if (m_mapper && mapperSize && data.size() >= m_prgNvRamSize + mapperSize)
-        m_mapper->loadMapperBattery(data.data() + m_prgNvRamSize, mapperSize);
+            const uint64_t payload64 = uint64_t(prgSize) + uint64_t(chrSize) + uint64_t(mapSize);
+            if (payload64 > std::numeric_limits<std::size_t>::max() ||
+                data.size() != headerSize + static_cast<std::size_t>(payload64))
+                return false;
+
+            if (prgSize != m_prgNvRamSize || chrSize != m_chrNvRamSize ||
+                (version == 2 && mapSize != mapperSize) ||
+                prgSize > m_prgRam.size() || chrSize > m_chrRam.size())
+                return false;
+
+            const uint8_t* payload = data.data() + headerSize;
+            if (prgSize) std::memcpy(m_prgRam.data(), payload, prgSize);
+            payload += prgSize;
+            if (chrSize) std::memcpy(m_chrRam.data(), payload, chrSize);
+            payload += chrSize;
+            if (version == 2 && m_mapper && mapSize)
+                m_mapper->loadMapperBattery(payload, mapSize);
+            return true;
+        }
+
+        if (m_chrNvRamSize != 0) return false;
+        const std::size_t expected = m_prgNvRamSize + mapperSize;
+        if (data.size() != expected) return false;
+        if (m_prgNvRamSize && m_prgNvRamSize <= m_prgRam.size())
+            std::memcpy(m_prgRam.data(), data.data(), m_prgNvRamSize);
+        if (m_mapper && mapperSize)
+            m_mapper->loadMapperBattery(data.data() + m_prgNvRamSize, mapperSize);
+        return true;
+    };
+
+    std::vector<uint8_t> data;
+    if (readFile(m_batteryPath, data) && apply(data))
+        return;
+
+    data.clear();
+    const std::string backupPath = m_batteryPath + ".bak";
+    if (readFile(backupPath, data))
+        (void)apply(data);
 }
 
 void Cartridge::saveBattery() const
@@ -185,9 +262,6 @@ void Cartridge::saveBattery() const
     const std::size_t mapperSize = m_mapper ? m_mapper->mapperBatterySize() : 0;
     if (!m_battery || m_batteryPath.empty() || (m_prgNvRamSize == 0 && m_chrNvRamSize == 0 && mapperSize == 0))
         return;
-
-    std::ofstream f(m_batteryPath, std::ios::binary | std::ios::trunc);
-    if (!f) return;
 
     const std::size_t prgAmount = std::min(m_prgNvRamSize, m_prgRam.size());
     const std::size_t chrAmount = std::min(m_chrNvRamSize, m_chrRam.size());
@@ -198,38 +272,37 @@ void Cartridge::saveBattery() const
         if (mapperData.size() != mapperSize) mapperData.clear();
     }
 
-    if (chrAmount == 0) {
-        if (prgAmount)
-            f.write(reinterpret_cast<const char*>(m_prgRam.data()), static_cast<std::streamsize>(prgAmount));
-        if (!mapperData.empty())
-            f.write(reinterpret_cast<const char*>(mapperData.data()), static_cast<std::streamsize>(mapperData.size()));
-        return;
-    }
+    std::vector<uint8_t> data;
+    data.reserve(17 + prgAmount + chrAmount + mapperData.size());
+    data.insert(data.end(), {'N', 'E', 'S', 'B'});
+    data.push_back(2);
+    auto appendLe32 = [&](uint32_t value) {
+        data.push_back(static_cast<uint8_t>(value));
+        data.push_back(static_cast<uint8_t>(value >> 8));
+        data.push_back(static_cast<uint8_t>(value >> 16));
+        data.push_back(static_cast<uint8_t>(value >> 24));
+    };
+    appendLe32(static_cast<uint32_t>(prgAmount));
+    appendLe32(static_cast<uint32_t>(chrAmount));
+    appendLe32(static_cast<uint32_t>(mapperData.size()));
+    data.insert(data.end(), m_prgRam.begin(), m_prgRam.begin() + static_cast<std::ptrdiff_t>(prgAmount));
+    data.insert(data.end(), m_chrRam.begin(), m_chrRam.begin() + static_cast<std::ptrdiff_t>(chrAmount));
+    data.insert(data.end(), mapperData.begin(), mapperData.end());
 
-    f.write("NESB", 4);
-    const uint8_t version = 2;
-    f.write(reinterpret_cast<const char*>(&version), 1);
-    writeLe32(f, static_cast<uint32_t>(prgAmount));
-    writeLe32(f, static_cast<uint32_t>(chrAmount));
-    writeLe32(f, static_cast<uint32_t>(mapperData.size()));
-    if (prgAmount)
-        f.write(reinterpret_cast<const char*>(m_prgRam.data()), static_cast<std::streamsize>(prgAmount));
-    if (chrAmount)
-        f.write(reinterpret_cast<const char*>(m_chrRam.data()), static_cast<std::streamsize>(chrAmount));
-    if (!mapperData.empty())
-        f.write(reinterpret_cast<const char*>(mapperData.data()), static_cast<std::streamsize>(mapperData.size()));
+    nes::writeFileAtomically(m_batteryPath, data.data(), data.size(), true);
 }
 
 bool Cartridge::loadFromFile(const std::string& path)
 {
+    m_lastError.clear();
     std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file) return false;
+    if (!file) { m_lastError = "Could not open ROM file."; return false; }
     const auto end = file.tellg();
-    if (end <= 0) return false;
+    if (end <= 0) { m_lastError = "ROM file is empty."; return false; }
     file.seekg(0);
     std::vector<uint8_t> raw(static_cast<std::size_t>(end));
     file.read(reinterpret_cast<char*>(raw.data()), static_cast<std::streamsize>(raw.size()));
-    if (!file) return false;
+    if (!file) { m_lastError = "Could not read the complete ROM file."; return false; }
     return loadFromMemory(raw, path);
 }
 
@@ -240,6 +313,7 @@ bool Cartridge::loadFromMemory(const std::vector<uint8_t>& raw, const std::strin
     const std::string backingPath = containerPath.empty() ? logicalPath : containerPath;
     saveBattery();
     resetImage();
+    m_lastError.clear();
 
     std::string ext;
     try {
@@ -298,6 +372,88 @@ bool Cartridge::loadFromMemory(const std::vector<uint8_t>& raw, const std::strin
 
         m_battery = true;
         loadBattery();
+        m_loaded = true;
+        return true;
+    }
+
+    const bool headeredUnif = raw.size() >= 32 && std::memcmp(raw.data(), "UNIF", 4) == 0;
+    if (headeredUnif || ext == ".unf" || ext == ".unif") {
+        if (!headeredUnif) { m_lastError = "Invalid UNIF header."; return false; }
+        std::array<std::vector<uint8_t>, 16> prgChunks;
+        std::array<std::vector<uint8_t>, 16> chrChunks;
+        std::string board;
+        int mirrorCode = -1;
+        int tvci = -1;
+        bool battery = false;
+        bool vror = false;
+        std::size_t pos = 32;
+        auto hexIndex = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            return -1;
+        };
+        while (pos < raw.size()) {
+            if (raw.size() - pos < 8) { m_lastError = "Truncated UNIF chunk header."; return false; }
+            const char id0 = char(raw[pos]), id1 = char(raw[pos+1]), id2 = char(raw[pos+2]), id3 = char(raw[pos+3]);
+            const uint32_t len32 = readLe32(raw.data() + pos + 4);
+            pos += 8;
+            if (std::size_t(len32) > raw.size() - pos) { m_lastError = "Truncated UNIF chunk payload."; return false; }
+            const uint8_t* data = raw.data() + pos;
+            if (id0=='M' && id1=='A' && id2=='P' && id3=='R') {
+                board.assign(reinterpret_cast<const char*>(data), reinterpret_cast<const char*>(data) + len32);
+                const auto zero = board.find('\0'); if (zero != std::string::npos) board.resize(zero);
+            } else if (id0=='P' && id1=='R' && id2=='G') {
+                const int idx = hexIndex(id3); if (idx >= 0) prgChunks[std::size_t(idx)].assign(data, data + len32);
+            } else if (id0=='C' && id1=='H' && id2=='R') {
+                const int idx = hexIndex(id3); if (idx >= 0) chrChunks[std::size_t(idx)].assign(data, data + len32);
+            } else if (id0=='M' && id1=='I' && id2=='R' && id3=='R' && len32 >= 1) mirrorCode = data[0];
+            else if (id0=='T' && id1=='V' && id2=='C' && id3=='I' && len32 >= 1) tvci = data[0];
+            else if (id0=='B' && id1=='A' && id2=='T' && id3=='R') battery = true;
+            else if (id0=='V' && id1=='R' && id2=='O' && id3=='R') vror = true;
+            pos += len32;
+        }
+        if (board.empty() || prgChunks[0].empty()) { m_lastError = "UNIF requires MAPR and PRG0 chunks."; return false; }
+        const UnifBoardInfo info = resolveUnifBoard(board);
+        if (!info.recognized) { m_lastError = "Unsupported UNIF board " + board + "."; return false; }
+        m_mapperId = info.mapper; m_submapper = info.submapper; m_nes20 = false;
+        for (const auto& c : prgChunks) m_prgRom.insert(m_prgRom.end(), c.begin(), c.end());
+        for (const auto& c : chrChunks) m_chrRom.insert(m_chrRom.end(), c.begin(), c.end());
+        if (m_prgRom.empty()) { m_lastError = "UNIF contains no PRG ROM."; return false; }
+        if (mirrorCode == 1) m_headerMirror = Mirror::Vertical;
+        else if (mirrorCode == 2 || mirrorCode == 3) m_headerMirror = Mirror::OnescreenLo;
+        else if (mirrorCode == 4) m_headerMirror = Mirror::FourScreen;
+        else m_headerMirror = Mirror::Horizontal;
+        if (tvci == 1) m_timing = ConsoleTiming::PAL;
+        else if (tvci == 2) { m_timing = ConsoleTiming::NTSC; m_multiRegion = true; }
+        else m_timing = ConsoleTiming::NTSC;
+        std::size_t prgRam = info.prgRam;
+        std::size_t chrRam = info.chrRam;
+        if ((m_chrRom.empty() || vror) && chrRam == 0) chrRam = 0x2000;
+        if (vror) m_chrRom.clear();
+        if (battery && prgRam == 0) prgRam = 0x2000;
+        m_prgNvRamSize = battery ? prgRam : 0;
+        m_prgRam.assign(prgRam, 0);
+        m_chrRam.assign(chrRam, 0);
+        m_identityData = raw;
+        const MapperConfig config { m_mapperId, m_submapper, m_prgRom.size(), m_chrRom.size(), m_prgRam.size(),
+            m_chrRam.size(), m_headerMirror, m_headerMirror == Mirror::FourScreen, m_prgNvRamSize, 0, false, battery };
+        m_mapper = createMapper(config);
+        if (!m_mapper || !m_mapper->implementationSupported()) {
+            m_lastError = "UNIF board " + board + " maps to unsupported mapper " + std::to_string(m_mapperId) + ".";
+            resetImage(); return false;
+        }
+        m_mapper->initializePrgImage(m_prgRom.data(), m_prgRom.size());
+        m_path = containerPath.empty() ? logicalPath : (containerPath + "::" + logicalPath);
+        m_fileName = std::filesystem::path(logicalPath).filename().string();
+        try {
+            const auto rp = std::filesystem::path(backingPath);
+            const std::string stem = containerPath.empty() ? rp.stem().string() :
+                (rp.stem().string() + "." + std::filesystem::path(logicalPath).stem().string());
+            m_batteryPath = (rp.parent_path() / (stem + ".sav")).string();
+        } catch (...) { m_batteryPath = backingPath + ".sav"; }
+        m_battery = battery && m_prgNvRamSize != 0;
+        if (m_battery) loadBattery();
         m_loaded = true;
         return true;
     }
@@ -435,6 +591,15 @@ bool Cartridge::loadFromMemory(const std::vector<uint8_t>& raw, const std::strin
 
     if (hasTrainer && prgRamTotal < 0x2000) prgRamTotal = 0x2000;
 
+    if (m_mapperId == 198) {
+        m_prgNvRamSize = std::max<std::size_t>(m_prgNvRamSize, 0x2000);
+        prgRamVolatile = std::max<std::size_t>(prgRamVolatile, 0x1000);
+        prgRamTotal = std::max<std::size_t>(prgRamTotal, 0x3000);
+    } else if (m_mapperId == 199) {
+        m_prgNvRamSize = std::max<std::size_t>(m_prgNvRamSize, 0x8000);
+        prgRamTotal = std::max<std::size_t>(prgRamTotal, 0x8000);
+    }
+
     if (m_mapperId == 111 && chrSize == 0) chrRamTotal = std::max<std::size_t>(chrRamTotal, 0x8000);
 
     if (chrSize == 0 && chrRamTotal == 0) {
@@ -501,8 +666,18 @@ bool Cartridge::loadFromMemory(const std::vector<uint8_t>& raw, const std::strin
         dbResolution.boardVariant
     };
     m_mapper = createMapper(config);
-    if (m_mapper) m_mapper->initializePrgImage(m_prgRom.data(), m_prgRom.size());
-    if (!m_mapper) { resetImage(); return false; }
+    if (!m_mapper || !m_mapper->implementationSupported()) {
+        const uint16_t unsupportedMapper = m_mapperId;
+        const uint8_t unsupportedSubmapper = m_submapper;
+        const bool nes20 = m_nes20;
+        resetImage();
+        m_lastError = "Unsupported mapper " + std::to_string(unsupportedMapper);
+        if (nes20)
+            m_lastError += " / submapper " + std::to_string(static_cast<unsigned>(unsupportedSubmapper));
+        m_lastError += ". This ROM needs a mapper implementation that is not present yet.";
+        return false;
+    }
+    m_mapper->initializePrgImage(m_prgRom.data(), m_prgRom.size());
 
     if (hasTrainer) {
         if (m_mapperId == 17) {
@@ -590,7 +765,8 @@ bool Cartridge::cpuRead(uint16_t addr, uint8_t& data)
 
     uint32_t mapped = 0;
     if (addr >= 0x4020 && m_mapper->mapPrgRam(addr, mapped, false) && mapped < m_prgRam.size()) {
-        data = m_cheats.applyGameGenie(addr, m_prgRam[mapped]);
+        const uint8_t ramData = m_mapper->transformPrgRamRead(addr, m_prgRam[mapped]);
+        data = m_cheats.applyGameGenie(addr, ramData);
         m_mapper->observeCpuRead(addr, data);
         return true;
     }
@@ -598,6 +774,21 @@ bool Cartridge::cpuRead(uint16_t addr, uint8_t& data)
     if (m_mapper->cpuMapRead(addr, mapped) && mapped < m_prgRom.size()) {
         data = m_cheats.applyGameGenie(addr, m_prgRom[mapped]);
         m_mapper->observeCpuRead(addr, data);
+        return true;
+    }
+    return false;
+}
+
+bool Cartridge::debugCpuRead(uint16_t addr, uint8_t& data) const
+{
+    if (!m_loaded || !m_mapper) return false;
+    uint32_t mapped = 0;
+    if (addr >= 0x4020 && m_mapper->mapPrgRam(addr, mapped, false) && mapped < m_prgRam.size()) {
+        data = m_cheats.applyGameGenie(addr, m_mapper->transformPrgRamRead(addr, m_prgRam[mapped]));
+        return true;
+    }
+    if (m_mapper->cpuMapRead(addr, mapped) && mapped < m_prgRom.size()) {
+        data = m_cheats.applyGameGenie(addr, m_prgRom[mapped]);
         return true;
     }
     return false;
@@ -698,6 +889,11 @@ void Cartridge::writeNametableBacking(NametableSource source, uint32_t mapped, u
         m_chrRam[mapped % m_chrRam.size()] = data;
     else if (source == NametableSource::MapperRam && m_mapper)
         m_mapper->writeMapperNametable(mapped, data);
+}
+
+void Cartridge::notifyCpuAddress(uint16_t addr)
+{
+    if (m_mapper) m_mapper->notifyCpuAddress(addr);
 }
 
 void Cartridge::notifyPpuAddress(uint16_t addr, uint64_t ppuCycle, int scanline, int dot)

@@ -92,6 +92,34 @@ int runDmaArbitrationProbe()
               << " joy_driven=" << unsigned(drivenController) << "\n";
     ok &= positiveDecode;
 
+    Bus stateBus;
+    PPU statePpu;
+    APU stateApu;
+    stateBus.connectPPU(&statePpu);
+    stateBus.connectAPU(&stateApu);
+    stateApu.connectBus(&stateBus);
+    stateBus.powerOn();
+    stateBus.testStartOamDma(0x40, 0x4015);
+    std::vector<uint8_t> busState;
+    stateBus.saveState(busState);
+
+    Bus restoredBus;
+    PPU restoredPpu;
+    APU restoredApu;
+    restoredBus.connectPPU(&restoredPpu);
+    restoredBus.connectAPU(&restoredApu);
+    restoredApu.connectBus(&restoredBus);
+    restoredBus.powerOn();
+    const uint8_t* stateCursor = busState.data();
+    const bool stateLoad = restoredBus.loadState(stateCursor, busState.data() + busState.size()) &&
+        stateCursor == busState.data() + busState.size();
+    const bool oamHeldState = stateLoad && restoredBus.dmaActive() &&
+        restoredBus.testOamDmaHeldCpuAddressValid() &&
+        restoredBus.testOamDmaHeldCpuAddress() == 0x4015;
+    std::cout << "oam_mid_dma_state=" << (oamHeldState ? "PASS" : "FAIL")
+              << " held=" << std::hex << restoredBus.testOamDmaHeldCpuAddress() << std::dec << "\n";
+    ok &= oamHeldState;
+
     return ok ? 0 : 1;
 }
 

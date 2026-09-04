@@ -61,6 +61,7 @@ public:
     void testSetCpuPpuIoLatePhase(bool late) { m_cpuPpuIoLatePhase = late; }
     uint16_t testTempVramAddress() const { return m_t; }
     void testSetTimingPosition(int scanline, int cycle) { m_scanline = scanline; m_cycle = cycle; }
+    void testSetOddFrame(bool odd) { m_oddFrame = odd; }
     void testSetScrollAddresses(uint16_t v, uint16_t t) { m_v = v; m_t = t; }
     void testForceEffectiveRenderMask(uint8_t mask) { m_mask = mask; m_renderMask = static_cast<uint8_t>(mask & 0x18); m_pendingRenderMask = m_renderMask; m_renderMaskDelay = 0; }
     void testSetStatusFlags(uint8_t flags) { m_status = static_cast<uint8_t>((m_status & 0x1F) | (flags & 0xE0)); updateNmiLine(); }
@@ -71,6 +72,18 @@ public:
     void testClockBackgroundShifters() { updateBackgroundShifters(); }
     uint16_t testBackgroundPatternLo() const { return m_bgShifterPatternLo; }
     uint16_t testBackgroundPatternHi() const { return m_bgShifterPatternHi; }
+    uint64_t testSpriteEvalSignature() const {
+        uint64_t h = 1469598103934665603ull;
+        auto mix = [&](uint8_t v) { h ^= v; h *= 1099511628211ull; };
+        mix(m_spriteEvalStartAddr); mix(m_spriteEvalN); mix(m_spriteEvalM);
+        mix(m_spriteEvalFound); mix(m_spriteEvalData); mix(m_spriteEvalCopyRemaining);
+        mix(m_spriteEvalWrapBusData); mix(m_spriteEvalOverflowIncRemaining);
+        mix(m_spriteEvalOverflowHandoff ? 1 : 0); mix(m_spriteEvalFull ? 1 : 0);
+        mix(m_spriteEvalOverflowDiagonal ? 1 : 0); mix(m_spriteEvalWrapped ? 1 : 0);
+        mix(m_spriteZeroNext ? 1 : 0);
+        for (uint8_t v : m_oamSecondary) mix(v);
+        return h;
+    }
 
     void testPrimeSpriteZeroHitPixel(int cycle, uint8_t mask, bool bgOpaque = true, bool spriteOpaque = true, int scanline = 0) {
         m_scanline = scanline;
