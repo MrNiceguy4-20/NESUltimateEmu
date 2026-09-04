@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """Repeat the headless core benchmark and report robust median throughput."""
 from __future__ import annotations
 import argparse, json, statistics, subprocess, sys

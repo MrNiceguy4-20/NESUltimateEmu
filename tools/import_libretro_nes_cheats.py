@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """Import compatible NES .cht files from a local libretro-database checkout.
 
 Usage:
